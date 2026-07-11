@@ -1,0 +1,19 @@
+[project]
+name = "xiaohe-adb-automation"
+version = "0.1.0"
+description = "Desktop panel to automate Xiaohe AI Doctor over ADB"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "uiautomator2>=3.7,<4",
+    "openpyxl>=3.1,<4",
+    "pillow>=10,<13",
+]
+
+[dependency-groups]
+build = [
+    "pyinstaller>=6.3,<7",
+]
+
+[tool.uv]
+default-groups = []

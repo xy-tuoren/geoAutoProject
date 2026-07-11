@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+captures/
+test_captures/
+*.pyc
+build/
+dist/
+vendor/platform-tools/
+autox-v7/node_modules/
+autox-v7/dist/
+autox-v7/device-project/

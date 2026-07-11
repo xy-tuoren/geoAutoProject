@@ -1,0 +1,45 @@
+name: Build desktop packages
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Build Windows package
+        shell: pwsh
+        run: .\scripts\build_desktop.ps1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xiaohe-panel-windows
+          path: |
+            dist/小荷AI医生自动化-Windows.zip
+            dist/小荷AI医生自动化/**
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Build macOS package
+        run: |
+          chmod +x scripts/build_desktop.sh
+          ./scripts/build_desktop.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xiaohe-panel-macos
+          path: |
+            dist/小荷AI医生自动化-macOS.zip
+            dist/小荷AI医生自动化.app/**
