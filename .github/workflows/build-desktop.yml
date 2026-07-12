@@ -12,34 +12,49 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check and test
+        run: |
+          npm run check
+          npm test
 
       - name: Build Windows package
-        shell: pwsh
-        run: .\scripts\build_desktop.ps1
+        run: npm run dist
 
       - uses: actions/upload-artifact@v4
         with:
-          name: xiaohe-panel-windows
-          path: |
-            dist/小荷AI医生自动化-Windows.zip
-            dist/小荷AI医生自动化/**
+          name: question-automation-windows
+          path: dist/**
 
   macos:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check and test
+        run: |
+          npm run check
+          npm test
 
       - name: Build macOS package
-        run: |
-          chmod +x scripts/build_desktop.sh
-          ./scripts/build_desktop.sh
+        run: npm run dist
 
       - uses: actions/upload-artifact@v4
         with:
-          name: xiaohe-panel-macos
-          path: |
-            dist/小荷AI医生自动化-macOS.zip
-            dist/小荷AI医生自动化.app/**
+          name: question-automation-macos
+          path: dist/**

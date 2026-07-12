@@ -1,11 +1,11 @@
-.venv/
+.DS_Store
 __pycache__/
+*.pyc
 captures/
 test_captures/
-*.pyc
 build/
 dist/
 vendor/platform-tools/
-autox-v7/node_modules/
-autox-v7/dist/
-autox-v7/device-project/
+vendor/appium-home/
+vendor/appium-home.zip
+node_modules/
