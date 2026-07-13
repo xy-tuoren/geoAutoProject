@@ -15,8 +15,12 @@ function nodeAttr(attrs, name) {
 
 function nodeIsVisible(attrs) {
   // Different UiAutomator serializers use either attribute. Older dumps use
-  // visible-to-user, while this device exposes displayed only.
-  return nodeAttr(attrs, 'visible-to-user') === 'true' || nodeAttr(attrs, 'displayed') === 'true'
+  // visible-to-user, while Appium exposes displayed. Android's built-in
+  // `uiautomator dump` omits both because it serializes visible nodes only.
+  const visible = nodeAttr(attrs, 'visible-to-user')
+  const displayed = nodeAttr(attrs, 'displayed')
+  if (!visible && !displayed) return Boolean(nodeAttr(attrs, 'bounds'))
+  return visible === 'true' || displayed === 'true'
 }
 
 function parseBounds(bounds) {
@@ -118,14 +122,24 @@ function replyTailOnScreen(xml, chatBounds) {
   const [, top,, bottom] = chatBounds
   const lowerY = top + Math.floor((bottom - top) * 0.45)
   const tolerance = Math.max(1, Math.floor((bottom - top) * 0.064))
-  if (!visibleNodesWithLabel(xml, '复制').some(bounds => boundsCenterY(bounds) >= lowerY && boundsCenterY(bounds) <= bottom)) return false
-  const disclaimer = visibleNodesWithLabel(xml, 'AI生成非医疗诊断仅供参考 不适就医')
-  if (disclaimer.some(bounds => boundsCenterY(bounds) >= lowerY - tolerance && boundsCenterY(bounds) <= bottom)) return true
+  const inTailArea = bounds => boundsCenterY(bounds) >= lowerY - tolerance && boundsCenterY(bounds) <= bottom
+  const copyVisible = iterNodes(xml).some(attrs => {
+    if (!nodeIsVisible(attrs)) return false
+    const label = nodeAttr(attrs, 'text') || nodeAttr(attrs, 'content-desc')
+    const rawBounds = nodeAttr(attrs, 'bounds')
+    return label.includes('复制') && rawBounds && inTailArea(parseBounds(rawBounds))
+  })
+  if (!copyVisible) return false
   return iterNodes(xml).some(attrs => {
     if (!nodeIsVisible(attrs)) return false
-    const text = nodeAttr(attrs, 'text')
-    const bounds = nodeAttr(attrs, 'bounds')
-    return text.includes('AI生成非医疗诊断仅供参考') && bounds && boundsCenterY(parseBounds(bounds)) >= lowerY - tolerance && boundsCenterY(parseBounds(bounds)) <= bottom
+    const label = nodeAttr(attrs, 'text') || nodeAttr(attrs, 'content-desc')
+    const rawBounds = nodeAttr(attrs, 'bounds')
+    if (!label.includes('AI生成') || !rawBounds || !inTailArea(parseBounds(rawBounds))) return false
+    return label.includes('仅供参考')
+      || label.includes('不适就医')
+      || label.includes('不适请就医')
+      || label.includes('诊疗依据')
+      || label.includes('可能存在不准确')
   })
 }
 
@@ -192,6 +206,16 @@ function floatingScrollControlBounds(xml, chatBounds) {
   })
   candidates.sort((a, b) => b[1] - a[1])
   return candidates[0] || null
+}
+
+function replyCaptureBounds(xml, screenSize) {
+  const bounds = findChatScrollBounds(xml, screenSize)
+  const floatingControl = floatingScrollControlBounds(xml, bounds)
+  if (floatingControl) {
+    const safeBottom = floatingControl[1] - Math.max(8, Math.floor((bounds[3] - bounds[1]) * 0.008))
+    if (safeBottom - bounds[1] >= screenSize.height * 0.3) bounds[3] = safeBottom
+  }
+  return { bounds, floatingControl }
 }
 
 function visibleLabelBounds(xml, label) { return visibleNodesWithLabel(xml, label)[0] || null }
@@ -295,4 +319,4 @@ function referenceProductsSection(xml) {
   return { panel, cardsTop, tap }
 }
 
-module.exports = { LOADING_TEXT_MARKERS, iterNodes, nodeAttr, nodeIsVisible, parseBounds, boundsIntersect, boundsCenterY, estimateVerticalScrollShift, sharedTextSeam, hierarchyIsLoading, visibleNodesWithLabel, replyTailOnScreen, questionVisible, findChatScrollBounds, validateCaptureViewport, floatingScrollControlBounds, visibleLabelBounds, visibleLabelBoundsList, boundsForNodeAttribute, boundsListForNodeAttribute, evidencePanelBounds, panelIsClipped, evidenceMinimumHeight, parseNodeTree, referenceProductsSection }
+module.exports = { LOADING_TEXT_MARKERS, iterNodes, nodeAttr, nodeIsVisible, parseBounds, boundsIntersect, boundsCenterY, estimateVerticalScrollShift, sharedTextSeam, hierarchyIsLoading, visibleNodesWithLabel, replyTailOnScreen, questionVisible, findChatScrollBounds, validateCaptureViewport, floatingScrollControlBounds, replyCaptureBounds, visibleLabelBounds, visibleLabelBoundsList, boundsForNodeAttribute, boundsListForNodeAttribute, evidencePanelBounds, panelIsClipped, evidenceMinimumHeight, parseNodeTree, referenceProductsSection }

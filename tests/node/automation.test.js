@@ -5,11 +5,11 @@ const os = require('node:os')
 const path = require('node:path')
 const sharp = require('sharp')
 const XLSX = require('xlsx')
-const { questionVisible, replyTailOnScreen, findChatScrollBounds, validateCaptureViewport, floatingScrollControlBounds, estimateVerticalScrollShift, sharedTextSeam, evidencePanelBounds, visibleLabelBounds, visibleLabelBoundsList, boundsListForNodeAttribute, referenceProductsSection } = require('../../src/automation/hierarchy')
+const { questionVisible, replyTailOnScreen, findChatScrollBounds, validateCaptureViewport, floatingScrollControlBounds, replyCaptureBounds, estimateVerticalScrollShift, sharedTextSeam, evidencePanelBounds, visibleLabelBounds, visibleLabelBoundsList, boundsListForNodeAttribute, referenceProductsSection } = require('../../src/automation/hierarchy')
 const { stackFramesInGroups, verifyFrameOverlap, imageInfo, imageLooksLoaded, imagesSimilar, imageRegionsStable, alignCropToWhitespace, stitchFramesWithOverlaps, composeLongImages, cropFramesAtTextSeams } = require('../../src/automation/images')
 const { createBatchDirectory, questionArtifactDirectory } = require('../../src/automation/utils')
 const { loadQuestionFile } = require('../../src/questions')
-const { adbConnectionLost, appiumHelperApks, conservativeFallbackOverlap, explainSessionError, findOptionalElement, buildReplyImages, historyOnboardingVisible, maxLongImageHeight, parsePackageVersion, prepareEmbeddedEvidence, sessionCapabilities } = require('../../src/automation/runner')
+const { adbConnectionLost, appiumHelperApks, chatSwipePlan, conservativeFallbackOverlap, explainSessionError, findOptionalElement, buildReplyImages, historyOnboardingVisible, maxLongImageHeight, parsePackageVersion, prepareEmbeddedEvidence, scrollEndConfirmed, sessionCapabilities } = require('../../src/automation/runner')
 const { prepareAndroidSdk } = require('../../src/automation/appium-server')
 
 const CHAT_BOUNDS = [0, 200, 1080, 1800]
@@ -45,6 +45,11 @@ test('兼容 class 命名的 UiAutomator 层级节点', () => {
   assert.equal(questionVisible(xml, '新的问题', [0, 400, 1080, 1800]), true)
 })
 
+test('系统 uiautomator dump 未写可见属性时仍按可见节点处理', () => {
+  const xml = '<hierarchy><node class="android.widget.TextView" text="系统层级问题" bounds="[80,900][900,980]" /></hierarchy>'
+  assert.equal(questionVisible(xml, '系统层级问题', [0, 400, 1080, 1800]), true)
+})
+
 test('新 Android 层级格式可识别引用资料卡和推荐药品入口', () => {
   const xml = '<hierarchy><androidx.compose.ui.viewinterop.ViewFactoryHolder class="androidx.compose.ui.viewinterop.ViewFactoryHolder" displayed="true" bounds="[40,700][1040,980]" /><android.widget.TextView text="推荐药品" displayed="true" bounds="[60,1100][300,1180]" /></hierarchy>'
   assert.deepEqual(evidencePanelBounds(xml, 100), [40, 700, 1040, 980])
@@ -75,6 +80,21 @@ test('仅在底部同时可见复制和免责声明时结束回答截图', () =>
   assert.equal(replyTailOnScreen(xml, CHAT_BOUNDS), true)
 })
 
+test('兼容新版回答操作栏和免责声明文案', () => {
+  const xml = '<hierarchy>'
+    + '<node content-desc="复制回答" displayed="true" bounds="[760,1510][880,1600]" />'
+    + '<node text="AI生成内容可能存在不准确，仅供参考，请勿作为诊疗依据，不适请就医" displayed="true" bounds="[80,1430][940,1500]" />'
+    + '</hierarchy>'
+  assert.equal(replyTailOnScreen(xml, CHAT_BOUNDS), true)
+})
+
+test('设备明确到达滚动边界时立即结束，否则两次无进展兜底', () => {
+  assert.equal(scrollEndConfirmed(false, 0), true)
+  assert.equal(scrollEndConfirmed(null, 1), false)
+  assert.equal(scrollEndConfirmed(null, 2), true)
+  assert.equal(scrollEndConfirmed(true, 1), false)
+})
+
 test('聊天区域会避开底部输入框，并拒绝横屏', () => {
   const xml = '<hierarchy><node scrollable="true" bounds="[0,457][1272,2744]" /><node class="android.widget.EditText" visible-to-user="true" bounds="[189,2523][1064,2689]" /></hierarchy>'
   assert.deepEqual(findChatScrollBounds(xml, { width: 1272, height: 2800 }), [0, 457, 1272, 2317])
@@ -87,6 +107,26 @@ test('识别聊天区底部固定的无标签向下按钮', () => {
     + '<node class="android.view.View" clickable="true" text="操作" displayed="true" bounds="[430,900][650,1030]" />'
     + '</hierarchy>'
   assert.deepEqual(floatingScrollControlBounds(xml, [0, 333, 1080, 2001]), [475, 1829, 607, 1961])
+})
+
+test('滚到顶部后重新计算回答截图范围并排除新出现的向下按钮', () => {
+  const xml = '<hierarchy>'
+    + '<node class="android.view.View" scrollable="true" displayed="true" bounds="[0,333][1080,2001]" />'
+    + '<node class="android.view.View" clickable="true" text="" content-desc="" displayed="true" bounds="[475,1829][607,1961]" />'
+    + '</hierarchy>'
+  assert.deepEqual(replyCaptureBounds(xml, { width: 1080, height: 2340 }), {
+    bounds: [0, 333, 1080, 1816],
+    floatingControl: [475, 1829, 607, 1961],
+  })
+})
+
+test('顶部定位使用更长且更快的滚动，回答采集保持较高重叠', () => {
+  const bounds = [0, 333, 1080, 2001]
+  const capture = chatSwipePlan(bounds, 0.45, { speed: 1400 })
+  const navigation = chatSwipePlan(bounds, 0.65, { speed: 3200 })
+  assert.equal(capture.distance, 750)
+  assert.equal(navigation.distance, 1084)
+  assert.ok(navigation.durationMs < capture.durationMs)
 })
 
 test('根据相同文本节点测量真实滚动距离，忽略固定控件', () => {

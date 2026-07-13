@@ -1,11 +1,8 @@
 const fs = require('node:fs/promises')
 const path = require('node:path')
-const crypto = require('node:crypto')
 const { execFile } = require('node:child_process')
-const { remote } = require('webdriverio')
-const { startAppium } = require('./appium-server')
 const { sleep, createBatchDirectory, questionArtifactDirectory } = require('./utils')
-const { hierarchyIsLoading, parseBounds, boundsIntersect, boundsCenterY, estimateVerticalScrollShift, replyTailOnScreen, questionVisible, findChatScrollBounds, validateCaptureViewport, floatingScrollControlBounds, visibleLabelBounds, visibleLabelBoundsList, boundsForNodeAttribute, boundsListForNodeAttribute, evidencePanelBounds, evidenceMinimumHeight, referenceProductsSection } = require('./hierarchy')
+const { iterNodes, nodeAttr, hierarchyIsLoading, parseBounds, boundsIntersect, boundsCenterY, estimateVerticalScrollShift, replyTailOnScreen, questionVisible, findChatScrollBounds, validateCaptureViewport, replyCaptureBounds, visibleLabelBounds, visibleLabelBoundsList, boundsForNodeAttribute, boundsListForNodeAttribute, evidencePanelBounds, evidenceMinimumHeight, referenceProductsSection } = require('./hierarchy')
 const { imageInfo, cropImage, imagesSimilar, imageRegionsStable, imageLooksLoaded, alignCropToWhitespace, verifyFrameOverlap, composeLongImages } = require('./images')
 
 const DEFAULT_PACKAGE = 'com.aurora.xiaohe.aidoctor'
@@ -72,6 +69,51 @@ function adbCommand(adbPath, serial, args) {
       else resolve(String(stdout))
     })
   })
+}
+
+function adbBinaryCommand(adbPath, serial, args) {
+  return new Promise((resolve, reject) => {
+    execFile(adbPath, ['-s', serial, ...args], { encoding: null, maxBuffer: 32 * 1024 * 1024 }, (error, stdout, stderr) => {
+      if (error) reject(new Error(`${error.message}: ${Buffer.from(stderr || stdout || '').toString('utf8').trim()}`))
+      else resolve(Buffer.from(stdout))
+    })
+  })
+}
+
+async function adbHierarchy(adbPath, serial) {
+  const remotePath = `/sdcard/geoauto-window-${process.pid}.xml`
+  await adbCommandWithReconnect(adbPath, serial, ['shell', 'uiautomator', 'dump', '--compressed', remotePath])
+  return adbCommandWithReconnect(adbPath, serial, ['exec-out', 'cat', remotePath])
+}
+
+async function adbScreenshot(adbPath, serial) {
+  await waitForAdbDevice(adbPath, serial)
+  try {
+    return await adbBinaryCommand(adbPath, serial, ['exec-out', 'screencap', '-p'])
+  } catch (error) {
+    if (!adbConnectionLost(error)) throw error
+    await waitForAdbDevice(adbPath, serial)
+    return adbBinaryCommand(adbPath, serial, ['exec-out', 'screencap', '-p'])
+  }
+}
+
+function escapeAdbInputText(value) {
+  return String(value).replace(/[()<>|;&*\\~^"'$`]/g, '\\$&').replace(/ /g, '%s')
+}
+
+async function adbTypeUnicode(adbPath, serial, appiumHome, text) {
+  const { imap } = require(path.join(appiumHome, 'node_modules', 'appium-uiautomator2-driver', 'node_modules', 'io.appium.settings', 'build', 'lib', 'commands', 'utf7.js'))
+  const unicodeIme = 'io.appium.settings/.UnicodeIME'
+  const originalIme = (await adbCommandWithReconnect(adbPath, serial, ['shell', 'settings', 'get', 'secure', 'default_input_method'])).trim()
+  await adbCommandWithReconnect(adbPath, serial, ['shell', 'ime', 'enable', unicodeIme])
+  await adbCommandWithReconnect(adbPath, serial, ['shell', 'ime', 'set', unicodeIme])
+  await sleep(300)
+  try {
+    const encoded = `''${escapeAdbInputText(imap.encode(String(text)))}''`
+    await adbCommandWithReconnect(adbPath, serial, ['shell', 'input', 'text', encoded])
+  } finally {
+    if (originalIme && originalIme !== 'null' && originalIme !== unicodeIme) await adbCommandWithReconnect(adbPath, serial, ['shell', 'ime', 'set', originalIme]).catch(() => {})
+  }
 }
 
 function adbConnectionLost(error) {
@@ -200,6 +242,16 @@ function conservativeFallbackOverlap(frameHeight, measuredShift, _requestedShift
   return Math.max(0, Math.floor(Math.min(...estimates) - uncertainty))
 }
 
+function chatSwipePlan(bounds, fraction = 0.6, { maxFraction = 0.7, speed = 1400 } = {}) {
+  const height = bounds[3] - bounds[1]
+  const distance = Math.max(80, Math.floor(height * Math.min(maxFraction, Math.max(0.2, fraction))))
+  return { distance, percent: distance / height, speed, durationMs: distance / speed * 1_000 }
+}
+
+function scrollEndConfirmed(canScrollMore, unchangedCount) {
+  return canScrollMore === false || unchangedCount >= 2
+}
+
 async function buildReplyImages(frames, { transitions = [], maxHeight = DEFAULT_MAX_LONG_IMAGE_HEIGHT } = {}) {
   return composeLongImages(frames, { transitions, maxHeight, separatorHeight: 24 })
 }
@@ -228,47 +280,44 @@ function createRunner(options) {
   let cancelled = false
   let driver = null
   let server = null
-  let nativeScrollGestureSupported = true
+  let activeSerial = null
+  let cachedInputBounds = null
+  let cachedSendBounds = null
   const checkCancelled = () => { if (cancelled) throw new CancelledError() }
   const log = text => options.log(`${text}${String(text).endsWith('\n') ? '' : '\n'}`)
 
   async function screenshot() {
     checkCancelled()
-    return Buffer.from(await driver.takeScreenshot(), 'base64')
+    return adbScreenshot(options.adbPath, activeSerial)
   }
 
   async function source() {
     checkCancelled()
-    return driver.getPageSource()
+    return adbHierarchy(options.adbPath, activeSerial)
   }
 
   async function tap(x, y) {
     checkCancelled()
-    await driver.performActions([{ type: 'pointer', id: 'finger-1', parameters: { pointerType: 'touch' }, actions: [
-      { type: 'pointerMove', duration: 0, x: Math.round(x), y: Math.round(y) }, { type: 'pointerDown', button: 0 }, { type: 'pause', duration: 80 }, { type: 'pointerUp', button: 0 },
-    ] }])
-    await driver.releaseActions()
+    await adbCommandWithReconnect(options.adbPath, activeSerial, ['shell', 'input', 'tap', String(Math.round(x)), String(Math.round(y))])
   }
 
   async function swipe(x, fromY, toY, duration = 250) {
     checkCancelled()
-    await driver.performActions([{ type: 'pointer', id: 'finger-1', parameters: { pointerType: 'touch' }, actions: [
-      { type: 'pointerMove', duration: 0, x: Math.round(x), y: Math.round(fromY) }, { type: 'pointerDown', button: 0 },
-      { type: 'pointerMove', duration, x: Math.round(x), y: Math.round(toY) }, { type: 'pointerUp', button: 0 },
-    ] }])
-    await driver.releaseActions()
+    await adbCommandWithReconnect(options.adbPath, activeSerial, ['shell', 'input', 'swipe', String(Math.round(x)), String(Math.round(fromY)), String(Math.round(x)), String(Math.round(toY)), String(Math.round(duration))])
   }
 
-  async function elementExists(selector) {
-    return findOptionalElement(driver, selector)
+  async function windowSize() {
+    const { width, height } = await imageInfo(await screenshot())
+    return { width, height }
   }
 
   async function waitForInput(timeout = 10_000) {
     const deadline = Date.now() + timeout
     while (Date.now() < deadline) {
       checkCancelled()
-      if (historyOnboardingVisible(await source())) {
-        const size = await driver.getWindowSize()
+      const xml = await source()
+      if (historyOnboardingVisible(xml)) {
+        const size = await windowSize()
         // The first-launch history hint is a full-screen Compose overlay. Tap
         // a neutral blank area to dismiss it before looking up the input.
         await tap(Math.floor(size.width * 0.8), Math.floor(size.height * 0.22))
@@ -276,10 +325,15 @@ function createRunner(options) {
         await sleep(500)
         continue
       }
-      const edit = await elementExists('android=new UiSelector().className("android.widget.EditText")')
-      if (edit) return edit
-      const hint = await elementExists('android=new UiSelector().textContains("输入问题")')
-      if (hint) { await hint.click(); await sleep(500) }
+      const editBounds = boundsForNodeAttribute(xml, 'class', 'android.widget.EditText')
+      if (editBounds) {
+        cachedInputBounds = editBounds
+        cachedSendBounds = boundsForNodeAttribute(xml, 'content-desc', '发送')
+        const attrs = iterNodes(xml).find(item => nodeAttr(item, 'class') === 'android.widget.EditText')
+        return { bounds: editBounds, text: attrs ? nodeAttr(attrs, 'text') : '' }
+      }
+      const hint = visibleLabelBounds(xml, '输入问题')
+      if (hint) { await tap((hint[0] + hint[2]) / 2, (hint[1] + hint[3]) / 2); await sleep(500) }
       await sleep(500)
     }
     throw new Error('未能在小荷聊天页面找到输入框。')
@@ -290,11 +344,26 @@ function createRunner(options) {
     for (let attempt = 0; attempt < 3; attempt += 1) {
       try {
         const edit = await waitForInput()
-        await edit.click()
-        await sleep(500 + attempt * 400)
-        await edit.clearValue()
-        await edit.setValue(question)
-        await sleep(800)
+        await tap((edit.bounds[0] + edit.bounds[2]) / 2, (edit.bounds[1] + edit.bounds[3]) / 2)
+        await sleep(300 + attempt * 300)
+        // Compose's clearElement / setElementValue endpoints may never return
+        // on some real devices even though the field has already gained focus.
+        // Keyboard key events plus Settings' Unicode typer avoid that endpoint
+        // and work for both classic Views and Compose text fields.
+        if (edit.text) {
+          await adbCommandWithReconnect(options.adbPath, activeSerial, ['shell', 'input', 'keyevent', '123'])
+          const deletes = Array(Math.min(200, edit.text.length + 8)).fill('67')
+          await adbCommandWithReconnect(options.adbPath, activeSerial, ['shell', 'input', 'keyevent', ...deletes])
+        }
+        await adbTypeUnicode(options.adbPath, activeSerial, options.appiumHome, question)
+        // Restore the pre-keyboard layout so the cached send-button bounds are
+        // valid again. ADB input remains responsive when UiAutomator2's Compose
+        // semantics query is temporarily stuck.
+        await adbCommandWithReconnect(options.adbPath, activeSerial, ['shell', 'input', 'keyevent', '4'])
+        await sleep(350)
+        const restoredXml = await source()
+        cachedInputBounds = boundsForNodeAttribute(restoredXml, 'class', 'android.widget.EditText') || cachedInputBounds
+        cachedSendBounds = boundsForNodeAttribute(restoredXml, 'content-desc', '发送') || cachedSendBounds
         return
       } catch (error) {
         lastError = error
@@ -304,35 +373,35 @@ function createRunner(options) {
     throw new Error(`问题输入失败：${lastError?.message || '未知错误'}`)
   }
 
-  async function elementRect(element) {
-    // WebdriverIO element instances do not expose getRect() across all versions;
-    // fall back to the WebDriver protocol command keyed by element id.
-    if (typeof element.getRect === 'function') return element.getRect()
-    return driver.getElementRect(element.elementId)
-  }
-
   async function tapSend() {
-    const send = await elementExists('~发送')
-    if (send) { await send.click(); return }
-    const edit = await waitForInput()
-    const rect = await elementRect(edit)
-    const window = await driver.getWindowSize()
-    const x = Math.min(window.width - Math.floor(rect.height / 2), Math.floor(rect.x + rect.width + rect.height / 2))
-    await tap(x, Math.floor(rect.y + rect.height * 2 / 3))
+    // Re-querying Compose semantics after Unicode input can block UiAutomator2
+    // indefinitely. The send control is already present in the hierarchy read
+    // by waitForInput, so use that cached hit target instead.
+    if (cachedSendBounds) {
+      const x = Math.round((cachedSendBounds[0] + cachedSendBounds[2]) / 2)
+      const y = Math.round((cachedSendBounds[1] + cachedSendBounds[3]) / 2)
+      await adbCommandWithReconnect(options.adbPath, activeSerial, ['shell', 'input', 'tap', String(x), String(y)])
+      return
+    }
+    if (!cachedInputBounds) await waitForInput()
+    const [left, top, right, bottom] = cachedInputBounds
+    const height = bottom - top
+    const x = Math.round(right - Math.min(80, height * 0.24))
+    const y = Math.round(bottom + Math.min(48, height * 0.2))
+    await adbCommandWithReconnect(options.adbPath, activeSerial, ['shell', 'input', 'tap', String(x), String(y)])
   }
 
   async function tapNewSession() {
     // Compose exposes the icon's label on a non-clickable child while its
     // clickable hit target is the parent. Clicking the label works on some
     // devices but silently fails on others, so prefer the parent when present.
-    const newSession = await elementExists('//*[@content-desc="开启新会话"]/..')
-      || await elementExists('android=new UiSelector().description("开启新会话")')
+    const newSession = boundsForNodeAttribute(await source(), 'content-desc', '开启新会话')
     if (!newSession) return false
-    await newSession.click()
+    await tap((newSession[0] + newSession[2]) / 2, (newSession[1] + newSession[3]) / 2)
     await sleep(1_000)
     for (const text of ['确定', '确认', '开始', '新会话']) {
-      const button = await elementExists(`android=new UiSelector().text("${text}")`)
-      if (button) { await button.click(); await sleep(1_000); break }
+      const button = visibleLabelBounds(await source(), text)
+      if (button) { await tap((button[0] + button[2]) / 2, (button[1] + button[3]) / 2); await sleep(1_000); break }
     }
     return true
   }
@@ -346,55 +415,46 @@ function createRunner(options) {
     const stableMilliseconds = 5_000
     const pollInterval = 1_500
     const start = Date.now()
-    let lastDigest = ''
     let lastChange = start
     let lastXml = ''
+    let lastFrame = null
     let lastProgress = 0
     while (Date.now() - start < timeout) {
       checkCancelled()
       try {
         const xml = await normalizedHierarchy()
-        const digest = crypto.createHash('sha256').update(xml).digest('hex')
+        const frame = await screenshot()
         const now = Date.now()
         const loading = hierarchyIsLoading(xml)
         if (loading && now - lastProgress >= 5_000) { log('waiting: reply still generating…'); lastProgress = now }
-        if (digest !== lastDigest) { lastDigest = digest; lastChange = now; lastXml = xml }
-        else if (!loading && now - start >= minWait && now - lastChange >= stableMilliseconds) return { status: 'stable', xml }
-        else if (loading) lastChange = now
+        const pixelsStable = lastFrame && await imageRegionsStable(lastFrame, frame)
+        lastXml = xml
+        lastFrame = frame
+        if (loading || !pixelsStable) lastChange = now
+        else if (now - start >= minWait && now - lastChange >= stableMilliseconds) return { status: 'stable', xml }
       } catch { /* transient hierarchy failure; retry */ }
       await sleep(pollInterval)
     }
     return { status: hierarchyIsLoading(lastXml) ? 'loading_timeout' : 'timeout', xml: lastXml }
   }
 
-  async function swipeChat(bounds, direction, fraction = 0.6) {
+  async function swipeChat(bounds, direction, fraction = 0.6, {
+    maxFraction = 0.7,
+    speed = 1400,
+    settle = 150,
+    fallbackDuration = 900,
+  } = {}) {
     const [left, top, right, bottom] = bounds
     const height = bottom - top
-    const distance = Math.max(80, Math.floor(height * Math.min(0.7, Math.max(0.2, fraction))))
-    const percent = distance / height
-    if (nativeScrollGestureSupported) {
-      try {
-        await driver.execute('mobile: scrollGesture', {
-          left: Math.round(left),
-          top: Math.round(top),
-          width: Math.round(right - left),
-          height: Math.round(height),
-          direction,
-          percent,
-          speed: 800,
-        })
-      } catch {
-        nativeScrollGestureSupported = false
-      }
-    }
-    if (!nativeScrollGestureSupported) {
-      const x = left + (right - left) * 0.84
-      const center = Math.floor((top + bottom) / 2)
-      if (direction === 'up') await swipe(x, center - Math.floor(distance / 2), center + Math.ceil(distance / 2), 900)
-      else await swipe(x, center + Math.ceil(distance / 2), center - Math.floor(distance / 2), 900)
-    }
-    await sleep(300)
-    return distance
+    const { distance, percent } = chatSwipePlan(bounds, fraction, { maxFraction, speed })
+    const canScrollMore = null
+    const x = left + (right - left) * 0.84
+    const center = Math.floor((top + bottom) / 2)
+    const duration = Math.max(120, Math.round(distance / speed * 1_000))
+    if (direction === 'up') await swipe(x, center - Math.floor(distance / 2), center + Math.ceil(distance / 2), duration || fallbackDuration)
+    else await swipe(x, center + Math.ceil(distance / 2), center - Math.floor(distance / 2), duration || fallbackDuration)
+    await sleep(settle)
+    return { distance, canScrollMore }
   }
 
   async function waitForRegionPixelsStable(bounds, timeout = 8_000) {
@@ -426,30 +486,44 @@ function createRunner(options) {
   async function scrollQuestionIntoView(question, bounds, maxSwipes = 25) {
     for (let index = 0; index < maxSwipes; index += 1) {
       if (questionVisible(await source(), question, bounds)) return true
-      await swipeChat(bounds, 'up')
+      await swipeChat(bounds, 'up', 0.65, { speed: 3200, settle: 80 })
     }
     return questionVisible(await source(), question, bounds)
   }
 
   async function captureFullReplyFrames(question, maxPages = 30, { scrollFraction = 0.45, allowFullRetry = true } = {}) {
-    const size = await driver.getWindowSize()
+    const size = await windowSize()
     const initialXml = await source()
-    const bounds = findChatScrollBounds(initialXml, size)
-    const floatingControl = floatingScrollControlBounds(initialXml, bounds)
-    if (floatingControl) {
-      const safeBottom = floatingControl[1] - Math.max(8, Math.floor((bounds[3] - bounds[1]) * 0.008))
-      if (safeBottom - bounds[1] >= size.height * 0.3) bounds[3] = safeBottom
-    }
-    validateCaptureViewport(size, bounds)
-    log(`capture: chat bounds=${bounds.join(',')}${floatingControl ? '（已避开固定向下按钮）' : ''}`)
-    if (!(await scrollQuestionIntoView(question, bounds))) log('capture: question not found while scrolling up; capturing from current position')
+    const navigationBounds = findChatScrollBounds(initialXml, size)
+    validateCaptureViewport(size, navigationBounds)
+    const topNavigationStarted = Date.now()
+    if (!(await scrollQuestionIntoView(question, navigationBounds))) log('capture: question not found while scrolling up; capturing from current position')
+    const topNavigationMs = Date.now() - topNavigationStarted
+    log(`capture: 快速定位当前问题顶部耗时=${topNavigationMs}ms`)
     const evidence = await prepareEmbeddedEvidence({
       source,
       tap,
       delay: sleep,
       waitForStable: waitForStableReplyRegion,
       log,
-    }, bounds)
+    }, navigationBounds)
+    const { bounds, floatingControl } = replyCaptureBounds(evidence.capture.xml || await source(), size)
+    validateCaptureViewport(size, bounds)
+    log(`capture: chat bounds=${bounds.join(',')}${floatingControl ? '（已在顶部稳定后避开固定向下按钮）' : ''}`)
+    const contained = bounds[0] >= navigationBounds[0] && bounds[1] >= navigationBounds[1]
+      && bounds[2] <= navigationBounds[2] && bounds[3] <= navigationBounds[3]
+    let initialCapture = evidence.capture
+    if (contained) {
+      initialCapture = {
+        ...evidence.capture,
+        frame: await cropImage(evidence.capture.frame, [
+          bounds[0] - navigationBounds[0],
+          bounds[1] - navigationBounds[1],
+          bounds[2] - navigationBounds[0],
+          bounds[3] - navigationBounds[1],
+        ]),
+      }
+    } else initialCapture = await waitForStableReplyRegion(bounds)
     const frames = []
     const transitions = []
     let noProgress = 0
@@ -461,7 +535,7 @@ function createRunner(options) {
         || visibleLabelBounds(xml, '参考药品')
         || visibleLabelBounds(xml, '推荐药品'))
     }
-    let capture = evidence.capture
+    let capture = initialCapture
     let frame = capture.frame
     for (let page = 0; page < maxPages; page += 1) {
       const xml = capture.xml || await source()
@@ -469,12 +543,16 @@ function createRunner(options) {
       if (!frames.length || !(await imagesSimilar(frames.at(-1), frame, 3))) { frames.push(frame); log(`capture: page ${frames.length}`) }
       if (replyTailOnScreen(xml, bounds) && !hierarchyIsLoading(xml)) { log('capture: reached on-screen reply tail'); break }
       const before = frame
-      const shift = await swipeChat(bounds, 'down', scrollFraction)
+      const scroll = await swipeChat(bounds, 'down', scrollFraction)
+      const shift = scroll.distance
       let afterCapture = await waitForStableReplyRegion(bounds)
       let after = afterCapture.frame
       if (await imagesSimilar(before, after, 3)) {
         noProgress += 1
-        if (noProgress >= 3) { log('capture: scroll ended'); break }
+        if (scrollEndConfirmed(scroll.canScrollMore, noProgress)) {
+          log(`capture: scroll ended（${scroll.canScrollMore === false ? '设备确认已到底' : '连续两次画面无变化'}）`)
+          break
+        }
       } else {
         let afterXml = afterCapture.xml || await source()
         observeAuxiliaryCards(afterXml)
@@ -519,6 +597,7 @@ function createRunner(options) {
         frame = after
         capture = afterCapture
         if (replyTailOnScreen(afterXml, bounds) && !hierarchyIsLoading(afterXml)) { log('capture: reached on-screen reply tail after swipe'); break }
+        if (scroll.canScrollMore === false) { log('capture: reached device-reported scroll boundary'); break }
       }
     }
     const result = {
@@ -528,6 +607,7 @@ function createRunner(options) {
       recaptureCount,
       fullRetryCount: 0,
       fallbackReasons,
+      topNavigationMs,
       evidenceEmbedded: evidence.found,
       evidenceExpanded: evidence.expanded,
       productsSeen,
@@ -537,6 +617,7 @@ function createRunner(options) {
       const retry = await captureFullReplyFrames(question, maxPages, { scrollFraction: 0.3, allowFullRetry: false })
       retry.recaptureCount += recaptureCount
       retry.fullRetryCount = 1
+      retry.topNavigationMs += topNavigationMs
       return retry
     }
     return result
@@ -607,14 +688,14 @@ function createRunner(options) {
       await tap(right - Math.max(24, Math.floor((right - left) / 16)), top + Math.max(24, Math.floor((bottom - top) / 10)))
       await sleep(600)
       if (!boundsForNodeAttribute(await source(), 'resource-id', `${DEFAULT_PACKAGE}:id/bullet_container`)) return
-      await driver.back()
+      await adbCommandWithReconnect(options.adbPath, activeSerial, ['shell', 'input', 'keyevent', '4'])
       await sleep(600)
     }
   }
 
   async function captureReferenceProducts(question, { seenDuringReply = true } = {}) {
     if (!seenDuringReply) { log('capture: 回答滚动过程中未发现参考/推荐药品卡片，跳过重复扫描'); return null }
-    const size = await driver.getWindowSize()
+    const size = await windowSize()
     const chatBounds = findChatScrollBounds(await source(), size)
     validateCaptureViewport(size, chatBounds)
     const productLabels = ['参考药品', '推荐药品']
@@ -685,7 +766,7 @@ function createRunner(options) {
     if (stitch) {
       const replyCaptureStarted = Date.now()
       const capture = await captureFullReplyFrames(question)
-      const { frames, transitions, bounds, recaptureCount, fullRetryCount, fallbackReasons, evidenceEmbedded, evidenceExpanded, productsSeen } = capture
+      const { frames, transitions, bounds, recaptureCount, fullRetryCount, fallbackReasons, topNavigationMs, evidenceEmbedded, evidenceExpanded, productsSeen } = capture
       const seamsTotal = Math.max(0, frames.length - 1)
       const seamsVerified = transitions.filter(transition => transition.verified).length
       const continuityVerified = transitions.length === seamsTotal && seamsVerified === seamsTotal
@@ -706,6 +787,7 @@ function createRunner(options) {
         reply_seams_with_safe_overlap: seamsTotal - seamsVerified,
         reply_recapture_count: recaptureCount,
         reply_full_retry_count: fullRetryCount,
+        reply_top_navigation_ms: topNavigationMs,
         reply_evidence_embedded: evidenceEmbedded,
         reply_evidence_expanded: evidenceExpanded,
         reply_capture_ms: replyCaptureMs,
@@ -738,23 +820,30 @@ function createRunner(options) {
   }
 
   async function askOnce(payload, batchDirectory, question, index) {
-    if (payload.newSession) await tapNewSession()
+    if (payload.newSession) {
+      log('stage: 正在切换到新会话')
+      await tapNewSession()
+    }
+    log('stage: 正在输入问题')
     await inputQuestion(question)
     const directory = questionArtifactDirectory(batchDirectory, index, question)
     const meta = { serial: payload.serial, batch_id: path.basename(batchDirectory), question_index: index, question_directory: directory }
+    log('stage: 正在发送问题')
     await tapSend()
+    log('stage: 问题已发送，等待回答稳定')
     await sleep(2_000)
     const result = await waitForStableReply(payload.timeout * 1_000)
+    log(`stage: 回答等待结束（${result.status}），开始截图`)
     return saveArtifacts({ outDir: directory, stem: '回答', question, status: result.status, xml: result.xml, meta })
   }
 
   return {
     async run(payload) {
+      activeSerial = payload.serial
       payloadMaxLongImageHeight = maxLongImageHeight(payload.maxLongImageHeight)
       const outputRoot = path.resolve(payload.outputDir)
       const batchDirectory = await createBatchDirectory(outputRoot)
       try {
-        server = await startAppium({ root: options.root, appiumHome: options.appiumHome, adbPath: options.adbPath, log })
         const expectedServerVersion = bundledUiAutomator2ServerVersion(options.appiumHome)
         let helpersReady = await appiumHelpersAlreadyInstalled(options.adbPath, payload.serial, expectedServerVersion)
         if (helpersReady) log(`Appium 辅助组件版本匹配（UiAutomator2 ${expectedServerVersion}），跳过重装`)
@@ -765,28 +854,9 @@ function createRunner(options) {
           if (!helpersReady) throw new Error('内置 UiAutomator2 安装后版本校验失败。请确认手机已授权 USB 调试。')
           log(`Appium 辅助组件已更新为 UiAutomator2 ${expectedServerVersion}`)
         }
-        try {
-          driver = await remote({
-            protocol: 'http', hostname: '127.0.0.1', port: server.port, path: '/',
-            logLevel: 'silent', connectionRetryCount: 0,
-            capabilities: sessionCapabilities(payload.serial, { skipHelperInstall: helpersReady }),
-          })
-        } catch (error) {
-          if (helpersReady) {
-            log('会话启动失败，重新安装内置辅助组件后重试一次…')
-            try {
-              await installAppiumHelpers(options.adbPath, payload.serial, options.appiumHome)
-              driver = await remote({
-                protocol: 'http', hostname: '127.0.0.1', port: server.port, path: '/',
-                logLevel: 'silent', connectionRetryCount: 0,
-                capabilities: sessionCapabilities(payload.serial, { skipHelperInstall: true }),
-              })
-            } catch (retryError) { throw explainSessionError(retryError) }
-          } else {
-            throw explainSessionError(error)
-          }
-        }
-        await driver.activateApp(DEFAULT_PACKAGE)
+        await adbCommandWithReconnect(options.adbPath, payload.serial, ['shell', 'monkey', '-p', DEFAULT_PACKAGE, '-c', 'android.intent.category.LAUNCHER', '1'])
+        log('已切换为纯 ADB 真机采集，避免动态 Compose 与 UiAutomator2 会话冲突')
+        await sleep(800)
         await waitForInput(15_000)
         log(`device=${payload.serial} package=${DEFAULT_PACKAGE} batch=${batchDirectory}`)
         for (const [zeroIndex, question] of payload.questions.entries()) {
@@ -795,13 +865,16 @@ function createRunner(options) {
           log(JSON.stringify(await askOnce(payload, batchDirectory, question, zeroIndex + 1)))
         }
       } finally {
-        if (driver) { await driver.deleteSession().catch(() => {}); driver = null }
+        if (driver) {
+          await Promise.race([driver.deleteSession().catch(() => {}), sleep(2_000)])
+          driver = null
+        }
         if (server) { await server.stop(); server = null }
       }
     },
     async stop() {
       cancelled = true
-      if (driver) await driver.deleteSession().catch(() => {})
+      if (driver) await Promise.race([driver.deleteSession().catch(() => {}), sleep(2_000)])
       if (server) await server.stop().catch(() => {})
     },
   }
@@ -815,6 +888,8 @@ module.exports = {
   findOptionalElement,
   buildReplyImages,
   conservativeFallbackOverlap,
+  chatSwipePlan,
+  scrollEndConfirmed,
   prepareEmbeddedEvidence,
   appiumHelpersAlreadyInstalled,
   adbPackageVersion,
