@@ -65,7 +65,7 @@ tests/node/      # Node 内置 test runner 测试
 ## 使用前检查
 
 - 手机必须完成 USB 调试授权（打包版已内置 adb，无需本机安装）。
-- 打包命令 `npm run dist` 会下载并内置 Android Platform Tools、Appium 与 UiAutomator2 驱动；运营不需要安装 Node、Python、ADB 或 Appium。
+- 仓库内置 macOS 与 Windows 两套 Android Platform Tools；打包命令 `npm run dist` 会直接使用目标平台对应的 ADB，并内置 Appium 与 UiAutomator2 驱动。运营不需要安装 Node、Python、ADB 或 Appium。
 - 首次连接手机时，Appium 会自动安装必要的辅助组件；手机需保持 USB 调试已授权。
 - `captures/` 已被 Git 忽略，因为截图、UI XML 和元数据可能包含敏感健康信息。
 - 健康问题和截图可能包含个人信息，请勿上传到公共仓库。

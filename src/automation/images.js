@@ -31,6 +31,43 @@ async function imagesMeanDiff(first, second) {
 
 async function imagesSimilar(first, second, threshold = 6) { return (await imagesMeanDiff(first, second)) <= threshold }
 
+async function imageRegionsStable(first, second, {
+  globalThreshold = 1.5,
+  tileMeanThreshold = 2.5,
+  changedPixelThreshold = 12,
+  changedRatioThreshold = 0.02,
+  tileSize = 60,
+} = {}) {
+  const [a, b] = await Promise.all([rawImage(first), rawImage(second)])
+  if (a.width !== b.width || a.height !== b.height || a.channels !== b.channels) return false
+  let globalDiff = 0
+  let globalPixels = 0
+  for (let top = 0; top < a.height; top += tileSize) {
+    for (let left = 0; left < a.width; left += tileSize) {
+      const bottom = Math.min(a.height, top + tileSize)
+      const right = Math.min(a.width, left + tileSize)
+      let tileDiff = 0
+      let changed = 0
+      let pixels = 0
+      for (let y = top; y < bottom; y += 1) {
+        for (let x = left; x < right; x += 1) {
+          const offset = (y * a.width + x) * a.channels
+          const diff = (Math.abs(a.data[offset] - b.data[offset]) + Math.abs(a.data[offset + 1] - b.data[offset + 1]) + Math.abs(a.data[offset + 2] - b.data[offset + 2])) / 3
+          tileDiff += diff
+          if (diff >= changedPixelThreshold) changed += 1
+          pixels += 1
+        }
+      }
+      const mean = tileDiff / Math.max(1, pixels)
+      const changedRatio = changed / Math.max(1, pixels)
+      if (mean > tileMeanThreshold || changedRatio > changedRatioThreshold) return false
+      globalDiff += tileDiff
+      globalPixels += pixels
+    }
+  }
+  return globalDiff / Math.max(1, globalPixels) <= globalThreshold
+}
+
 async function imageHasVisibleContent(image) {
   const { data } = await rawImage(image)
   let bright = 0
@@ -92,50 +129,123 @@ async function stackFramesInGroups(frames, groupSize = 3) {
   return output
 }
 
+function luminosity(data, offset) {
+  return (data[offset] * 77 + data[offset + 1] * 150 + data[offset + 2] * 29) >> 8
+}
+
+function overlapScore(previous, current, overlap, band, { xStep, yStep }) {
+  const width = Math.min(previous.width, current.width)
+  const height = Math.min(overlap, previous.height, current.height)
+  const previousTop = previous.height - height
+  const left = Math.max(0, Math.floor(width * band[0]))
+  const right = Math.min(width, Math.ceil(width * band[1]))
+  let difference = 0
+  let content = 0
+  let samples = 0
+  for (let y = 0; y < height; y += yStep) {
+    for (let x = left; x < right; x += xStep) {
+      const previousOffset = ((previousTop + y) * previous.width + x) * previous.channels
+      const currentOffset = (y * current.width + x) * current.channels
+      const a = luminosity(previous.data, previousOffset)
+      const b = luminosity(current.data, currentOffset)
+      difference += Math.abs(a - b)
+      if (a < 245 || b < 245) content += 1
+      samples += 1
+    }
+  }
+  return { score: difference / Math.max(1, samples), contentRatio: content / Math.max(1, samples) }
+}
+
+function candidateRange(low, high, step) {
+  const values = []
+  for (let value = low; value <= high; value += step) values.push(value)
+  if (values.at(-1) !== high) values.push(high)
+  return values
+}
+
+function bestBandOverlap(previous, current, band, low, high) {
+  let best = { overlap: low, score: Number.POSITIVE_INFINITY, contentRatio: 0 }
+  for (const overlap of candidateRange(low, high, 4)) {
+    const result = overlapScore(previous, current, overlap, band, { xStep: 8, yStep: 10 })
+    if (result.score < best.score) best = { overlap, ...result }
+  }
+  const refineLow = Math.max(low, best.overlap - 6)
+  const refineHigh = Math.min(high, best.overlap + 6)
+  for (let overlap = refineLow; overlap <= refineHigh; overlap += 1) {
+    const result = overlapScore(previous, current, overlap, band, { xStep: 4, yStep: 4 })
+    if (result.score < best.score) best = { overlap, ...result }
+  }
+  return best
+}
+
+function overlapTilesStable(previous, current, overlap, band) {
+  const width = Math.min(previous.width, current.width)
+  const height = Math.min(overlap, previous.height, current.height)
+  const previousTop = previous.height - height
+  const left = Math.max(0, Math.floor(width * band[0]))
+  const right = Math.min(width, Math.ceil(width * band[1]))
+  const tileSize = 64
+  for (let top = 0; top < height; top += tileSize) {
+    for (let tileLeft = left; tileLeft < right; tileLeft += tileSize) {
+      const bottom = Math.min(height, top + tileSize)
+      const tileRight = Math.min(right, tileLeft + tileSize)
+      let difference = 0
+      let changed = 0
+      let content = 0
+      let pixels = 0
+      for (let y = top; y < bottom; y += 2) {
+        for (let x = tileLeft; x < tileRight; x += 2) {
+          const previousOffset = ((previousTop + y) * previous.width + x) * previous.channels
+          const currentOffset = (y * current.width + x) * current.channels
+          const a = luminosity(previous.data, previousOffset)
+          const b = luminosity(current.data, currentOffset)
+          const diff = Math.abs(a - b)
+          difference += diff
+          if (diff >= 12) changed += 1
+          if (a < 245 || b < 245) content += 1
+          pixels += 1
+        }
+      }
+      if (content / Math.max(1, pixels) >= 0.004
+        && (difference / Math.max(1, pixels) > 3 || changed / Math.max(1, pixels) > 0.08)) return false
+    }
+  }
+  return true
+}
+
 async function findVerticalOverlapWithScore(previous, current, expected = null) {
-  const prevSize = await imageInfo(previous)
-  const currSize = await imageInfo(current)
-  const width = Math.min(prevSize.width, currSize.width)
-  // Ignore the centre of the viewport where the app pins a floating down-arrow
-  // button. Compare two text bands and keep the better score so a fixed overlay
-  // or one lazy-loaded card cannot invalidate an otherwise continuous page.
-  const bands = [[0.06, 0.43], [0.57, 0.94]]
-  const pairs = await Promise.all(bands.map(async ([from, to]) => ({
-    previous: await cropImage(previous, [Math.floor(width * from), 0, Math.floor(width * to), prevSize.height]),
-    current: await cropImage(current, [Math.floor(width * from), 0, Math.floor(width * to), currSize.height]),
-  })))
-  const prevCropSize = await imageInfo(pairs[0].previous)
-  const currCropSize = await imageInfo(pairs[0].current)
-  const maxOverlap = Math.min(prevCropSize.height, currCropSize.height) - 8
+  const [previousRaw, currentRaw] = await Promise.all([rawImage(previous), rawImage(current)])
+  const maxOverlap = Math.min(previousRaw.height, currentRaw.height) - 8
   const minOverlap = Math.min(40, Math.floor(maxOverlap / 2))
-  if (maxOverlap <= minOverlap) return { overlap: Math.max(0, Math.floor(Math.min(prevCropSize.height, currCropSize.height) / 3)), score: 255 }
+  if (maxOverlap <= minOverlap) return { overlap: Math.max(0, Math.floor(Math.min(previousRaw.height, currentRaw.height) / 3)), score: 255, valid: false, reason: '截图高度不足' }
   let low = minOverlap
   let high = maxOverlap
   if (expected !== null) {
-    low = Math.max(minOverlap, expected - 260)
-    high = Math.min(maxOverlap, expected + 260)
+    low = Math.max(minOverlap, Math.round(expected) - 260)
+    high = Math.min(maxOverlap, Math.round(expected) + 260)
     if (low >= high) { low = minOverlap; high = maxOverlap }
   }
-  let bestOverlap = Math.floor((low + high) / 2)
-  let bestScore = 255
-  for (let overlap = high; overlap >= low; overlap -= 3) {
-    const scores = await Promise.all(pairs.map(async pair => {
-      const prevTail = await cropImage(pair.previous, [0, prevCropSize.height - overlap, prevCropSize.width, prevCropSize.height])
-      const currHead = await cropImage(pair.current, [0, 0, currCropSize.width, overlap])
-      return imagesMeanDiff(prevTail, currHead)
-    }))
-    const score = Math.min(...scores)
-    if (score < bestScore - 0.35 || (Math.abs(score - bestScore) <= 0.35 && overlap > bestOverlap)) { bestScore = score; bestOverlap = overlap }
+  // The centre gap masks the app's pinned down-arrow. Both remaining text
+  // regions must independently find the same vertical displacement.
+  const bands = [[0.06, 0.43], [0.57, 0.94]]
+  const results = bands.map(band => bestBandOverlap(previousRaw, currentRaw, band, low, high))
+  const usable = results.filter(result => result.contentRatio >= 0.004)
+  if (usable.length < 2) return { overlap: expected ?? results[0].overlap, score: Math.max(...results.map(result => result.score)), valid: false, reason: '相邻截图缺少足够的可比内容' }
+  const overlaps = usable.map(result => result.overlap)
+  if (Math.max(...overlaps) - Math.min(...overlaps) > 3) {
+    return { overlap: Math.round(overlaps.reduce((sum, value) => sum + value, 0) / overlaps.length), score: Math.max(...usable.map(result => result.score)), valid: false, reason: `不同图像区域测得的滚动位移不一致（重叠 ${overlaps.join('/')}px）` }
   }
-  return { overlap: bestScore > 16 ? (expected ?? Math.max(minOverlap, Math.floor(Math.min(prevCropSize.height, currCropSize.height) / 3))) : bestOverlap, score: bestScore }
+  const overlap = Math.round(overlaps.reduce((sum, value) => sum + value, 0) / overlaps.length)
+  const validation = bands.map(band => overlapScore(previousRaw, currentRaw, overlap, band, { xStep: 2, yStep: 2 }))
+  const score = Math.max(...validation.map(result => result.score))
+  const tilesStable = bands.every(band => overlapTilesStable(previousRaw, currentRaw, overlap, band))
+  const valid = score <= 8 && tilesStable
+  return { overlap, score, valid, reason: valid ? null : (tilesStable ? `差异分数 ${score.toFixed(1)}` : '局部内容发生变化') }
 }
 
 async function verifyFrameOverlap(previous, current, expected) {
-  // The swipe distance gives us a reliable narrow search window. A second
-  // full-height scan is extremely expensive on high-resolution phones and is
-  // unnecessary: callers preserve complete viewports when this check fails.
   const result = await findVerticalOverlapWithScore(previous, current, expected)
-  if (result.score > 24) throw new Error(`无法验证相邻截图连续性（差异分数 ${result.score.toFixed(1)}）；已停止保存以避免漏图。`)
+  if (!result.valid) throw new Error(`无法验证相邻截图连续性（${result.reason || `差异分数 ${result.score.toFixed(1)}`}）；已停止无缝拼接以避免叠字或漏图。`)
   return result.overlap
 }
 
@@ -257,4 +367,4 @@ async function textSeamsAreValid(frames, seams) {
   })
 }
 
-module.exports = { imageInfo, cropImage, imagesMeanDiff, imagesSimilar, imageHasVisibleContent, imageLooksLoaded, stackFramesInGroups, verifyFrameOverlap, stitchFramesInGroups, stitchFramesWithOverlaps, stackFramesWithSeparators, composeLongImages, cropFramesAtTextSeams, textSeamsAreValid }
+module.exports = { imageInfo, cropImage, imagesMeanDiff, imagesSimilar, imageRegionsStable, imageHasVisibleContent, imageLooksLoaded, stackFramesInGroups, verifyFrameOverlap, stitchFramesInGroups, stitchFramesWithOverlaps, stackFramesWithSeparators, composeLongImages, cropFramesAtTextSeams, textSeamsAreValid }

@@ -5,7 +5,11 @@ captures/
 test_captures/
 build/
 dist/
-vendor/platform-tools/
+vendor/platform-tools/*
+!vendor/platform-tools/darwin/
+!vendor/platform-tools/darwin/**
+!vendor/platform-tools/win32/
+!vendor/platform-tools/win32/**
 vendor/appium-home/
 vendor/appium-home.zip
 node_modules/

@@ -13,8 +13,12 @@ function bundledAssetsRoot({ isPackaged = false, resourcesPath = '', root = proj
   return isPackaged ? resourcesPath : root
 }
 
+function bundledPlatformToolsDirectory(options = {}) {
+  return path.join(bundledAssetsRoot(options), 'vendor', 'platform-tools', process.platform)
+}
+
 function bundledAdbPath(options = {}) {
-  return path.join(bundledAssetsRoot(options), 'vendor', 'platform-tools', adbExecutableName())
+  return path.join(bundledPlatformToolsDirectory(options), adbExecutableName())
 }
 
 function resolveAdbPath(options = {}) {
@@ -38,6 +42,7 @@ module.exports = {
   projectRoot,
   adbExecutableName,
   bundledAssetsRoot,
+  bundledPlatformToolsDirectory,
   bundledAdbPath,
   resolveAdbPath,
   vendorAppiumHome,

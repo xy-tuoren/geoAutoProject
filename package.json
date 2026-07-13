@@ -33,7 +33,8 @@
       "package.json"
     ],
     "extraResources": [
-      { "from": "vendor/platform-tools", "to": "vendor/platform-tools" },
+      { "from": "vendor/platform-tools/darwin", "to": "vendor/platform-tools/darwin" },
+      { "from": "vendor/platform-tools/win32", "to": "vendor/platform-tools/win32" },
       { "from": "vendor/appium-home.zip", "to": "vendor/appium-home.zip" }
     ],
     "mac": { "target": ["dmg"], "category": "public.app-category.productivity" },

@@ -5,8 +5,8 @@ const { execFile } = require('node:child_process')
 const { remote } = require('webdriverio')
 const { startAppium } = require('./appium-server')
 const { sleep, createBatchDirectory, findResumableBatch, questionArtifactDirectory } = require('./utils')
-const { hierarchyIsLoading, parseBounds, boundsIntersect, boundsCenterY, estimateVerticalScrollShift, sharedTextSeam, replyTailOnScreen, questionVisible, findChatScrollBounds, validateCaptureViewport, visibleLabelBounds, visibleLabelBoundsList, boundsForNodeAttribute, boundsListForNodeAttribute, evidencePanelBounds, panelIsClipped, evidenceMinimumHeight, referenceProductsSection } = require('./hierarchy')
-const { imageInfo, cropImage, imagesSimilar, imageHasVisibleContent, imageLooksLoaded, verifyFrameOverlap, composeLongImages, cropFramesAtTextSeams, textSeamsAreValid } = require('./images')
+const { hierarchyIsLoading, parseBounds, boundsIntersect, boundsCenterY, estimateVerticalScrollShift, replyTailOnScreen, questionVisible, findChatScrollBounds, validateCaptureViewport, visibleLabelBounds, visibleLabelBoundsList, boundsForNodeAttribute, boundsListForNodeAttribute, evidencePanelBounds, panelIsClipped, evidenceMinimumHeight, referenceProductsSection } = require('./hierarchy')
+const { imageInfo, cropImage, imagesSimilar, imageRegionsStable, imageHasVisibleContent, imageLooksLoaded, verifyFrameOverlap, composeLongImages } = require('./images')
 
 const DEFAULT_PACKAGE = 'com.aurora.xiaohe.aidoctor'
 const APPIUM_HELPER_PACKAGES = [
@@ -179,22 +179,8 @@ function explainSessionError(error) {
   return error
 }
 
-async function buildReplyImages(frames, continuityVerified, overlaps = [], maxHeight = DEFAULT_MAX_LONG_IMAGE_HEIGHT, textSeams = []) {
-  // Prefer semantic seams at complete text-node boundaries. Pixel overlap is
-  // the second choice: it proves visual continuity but does not understand
-  // whether a cut crosses a glyph or line of text.
-  if (await textSeamsAreValid(frames, textSeams)) {
-    try {
-      const segments = await cropFramesAtTextSeams(frames, textSeams)
-      return composeLongImages(segments, { maxHeight, separatorHeight: 0 })
-    } catch {
-      // A dynamic reflow can make two individually valid seams cross inside a
-      // middle frame. Preserve full viewports instead of failing the task.
-    }
-  }
+async function buildReplyImages(frames, continuityVerified, overlaps = [], maxHeight = DEFAULT_MAX_LONG_IMAGE_HEIGHT) {
   if (continuityVerified) return composeLongImages(frames, { overlaps, continuityVerified, maxHeight })
-  // Unverified frames keep all pixels and use visible separators, so the
-  // result never pretends a dynamic reflow was a seamless overlap.
   return composeLongImages(frames, { maxHeight })
 }
 
@@ -364,6 +350,20 @@ function createRunner(options) {
     return frame
   }
 
+  async function waitForStableReplyRegion(bounds, timeout = 8_000) {
+    let before = await cropImage(await screenshot(), bounds)
+    let lastXml = ''
+    const deadline = Date.now() + timeout
+    while (Date.now() < deadline) {
+      lastXml = await source()
+      await sleep(220)
+      const after = await cropImage(await screenshot(), bounds)
+      if (!hierarchyIsLoading(lastXml) && await imageRegionsStable(before, after)) return { frame: after, xml: lastXml, stable: true }
+      before = after
+    }
+    return { frame: before, xml: lastXml || await source(), stable: false }
+  }
+
   async function scrollQuestionIntoView(question, bounds, maxSwipes = 25) {
     for (let index = 0; index < maxSwipes; index += 1) {
       if (questionVisible(await source(), question, bounds)) return true
@@ -380,40 +380,56 @@ function createRunner(options) {
     if (!(await scrollQuestionIntoView(question, bounds))) log('capture: question not found while scrolling up; capturing from current position')
     const frames = []
     const overlaps = []
-    const textSeams = []
     let noProgress = 0
     let continuityVerified = true
-    let frame = await waitForRegionPixelsStable(bounds)
+    let recaptureCount = 0
+    let fallbackReason = null
+    let evidenceSeen = false
+    let productsSeen = false
+    const observeAuxiliaryCards = xml => {
+      evidenceSeen ||= Boolean(evidencePanelBounds(xml, evidenceMinimumHeight(bounds)))
+      productsSeen ||= Boolean(referenceProductsSection(xml)
+        || visibleLabelBounds(xml, '参考药品')
+        || visibleLabelBounds(xml, '推荐药品'))
+    }
+    let capture = await waitForStableReplyRegion(bounds)
+    let frame = capture.frame
     for (let page = 0; page < maxPages; page += 1) {
-      const xml = await source()
+      const xml = capture.xml || await source()
+      observeAuxiliaryCards(xml)
       if (!frames.length || !(await imagesSimilar(frames.at(-1), frame, 3))) { frames.push(frame); log(`capture: page ${frames.length}`) }
       if (replyTailOnScreen(xml, bounds) && !hierarchyIsLoading(xml)) { log('capture: reached on-screen reply tail'); break }
       const before = frame
-      const shift = await swipeChat(bounds, 'down', 0.25)
-      let after = await waitForRegionPixelsStable(bounds)
+      const shift = await swipeChat(bounds, 'down', 0.45)
+      let afterCapture = await waitForStableReplyRegion(bounds)
+      let after = afterCapture.frame
       if (await imagesSimilar(before, after, 3)) {
         noProgress += 1
         if (noProgress >= 3) { log('capture: scroll ended'); break }
       } else {
-        const afterXml = await source()
+        let afterXml = afterCapture.xml || await source()
+        observeAuxiliaryCards(afterXml)
         const measuredShift = estimateVerticalScrollShift(xml, afterXml, bounds)
-        const seam = sharedTextSeam(xml, afterXml, bounds)
-        if (seam) textSeams.push(seam)
         const expectedOverlap = Math.max(12, (await imageInfo(before)).height - (measuredShift || shift))
         if (continuityVerified) {
           let verifiedOverlap = null
           try {
+            if (!afterCapture.stable) throw new Error('滚动后的局部画面未稳定')
             verifiedOverlap = await verifyFrameOverlap(before, after, expectedOverlap)
           } catch (error) {
-            // Lazy cards may reflow once after a swipe. Let them settle and
-            // retry the same seam before degrading to separate screen files.
-            await sleep(900)
-            after = await waitForRegionPixelsStable(bounds, 3_000)
+            recaptureCount += 1
+            await sleep(450)
+            afterCapture = await waitForStableReplyRegion(bounds, 3_000)
+            after = afterCapture.frame
+            afterXml = afterCapture.xml || await source()
+            observeAuxiliaryCards(afterXml)
             try {
+              if (!afterCapture.stable) throw new Error('重采后的局部画面仍未稳定')
               verifiedOverlap = await verifyFrameOverlap(before, after, expectedOverlap)
-            } catch {
+            } catch (retryError) {
               continuityVerified = false
-              log(`capture: 无法校验相邻页面重叠，改为分屏保存：${error.message}`)
+              fallbackReason = retryError.message || error.message
+              log(`capture: 无法校验相邻页面重叠，改为完整分屏保存：${fallbackReason}`)
             }
           }
           if (verifiedOverlap !== null) overlaps.push(verifiedOverlap)
@@ -421,10 +437,20 @@ function createRunner(options) {
         if (!(await imagesSimilar(frames.at(-1), after, 3))) { frames.push(after); log(`capture: page ${frames.length}`) }
         noProgress = 0
         frame = after
+        capture = afterCapture
         if (replyTailOnScreen(afterXml, bounds) && !hierarchyIsLoading(afterXml)) { log('capture: reached on-screen reply tail after swipe'); break }
       }
     }
-    return { frames: frames.length ? frames : [await cropImage(await screenshot(), bounds)], overlaps, textSeams, bounds, continuityVerified }
+    return {
+      frames: frames.length ? frames : [await cropImage(await screenshot(), bounds)],
+      overlaps,
+      bounds,
+      continuityVerified,
+      recaptureCount,
+      fallbackReason,
+      evidenceSeen,
+      productsSeen,
+    }
   }
 
   async function waitForProductImagesReady(listBounds, timeout = 12_000) {
@@ -497,7 +523,8 @@ function createRunner(options) {
     }
   }
 
-  async function captureReferenceProducts(question) {
+  async function captureReferenceProducts(question, { seenDuringReply = true } = {}) {
+    if (!seenDuringReply) { log('capture: 回答滚动过程中未发现参考/推荐药品卡片，跳过重复扫描'); return null }
     const size = await driver.getWindowSize()
     const chatBounds = findChatScrollBounds(await source(), size)
     validateCaptureViewport(size, chatBounds)
@@ -558,7 +585,8 @@ function createRunner(options) {
     } finally { await closeReferenceProductsDrawer() }
   }
 
-  async function captureEvidence(question) {
+  async function captureEvidence(question, { seenDuringReply = true } = {}) {
+    if (!seenDuringReply) { log('capture: 回答滚动过程中未发现可展开的引用资料卡片，跳过重复扫描'); return null }
     const size = await driver.getWindowSize()
     const chatBounds = findChatScrollBounds(await source(), size)
     validateCaptureViewport(size, chatBounds)
@@ -593,9 +621,13 @@ function createRunner(options) {
     let screenshotPath = path.join(outDir, `${stem}.png`)
     let resultMeta = { ...meta }
     if (stitch) {
-      const { frames, overlaps, textSeams, bounds, continuityVerified } = await captureFullReplyFrames(question)
-      const textSeamsVerified = await textSeamsAreValid(frames, textSeams)
-      const images = await buildReplyImages(frames, continuityVerified, overlaps, payloadMaxLongImageHeight, textSeams)
+      const replyCaptureStarted = Date.now()
+      const capture = await captureFullReplyFrames(question)
+      const { frames, overlaps, bounds, recaptureCount, fallbackReason, evidenceSeen, productsSeen } = capture
+      const seamsTotal = Math.max(0, frames.length - 1)
+      const continuityVerified = capture.continuityVerified && overlaps.length === seamsTotal
+      const images = await buildReplyImages(frames, continuityVerified, overlaps, payloadMaxLongImageHeight)
+      const replyCaptureMs = Date.now() - replyCaptureStarted
       const paths = []
       for (const [index, image] of images.entries()) { const file = path.join(outDir, `${stem}_${String(index + 1).padStart(3, '0')}.png`); await fs.writeFile(file, image); paths.push(file) }
       screenshotPath = paths[0]
@@ -604,14 +636,19 @@ function createRunner(options) {
         stitched_pages: frames.length,
         screenshot_parts: paths,
         chat_bounds: bounds,
-        reply_capture_mode: textSeamsVerified ? 'shared_text_seam_long_image' : (continuityVerified ? 'verified_overlap_long_image' : 'separated_viewports_long_image'),
+        reply_capture_mode: continuityVerified ? 'verified_overlap_long_image' : 'separated_viewports_long_image',
         reply_continuity_verified: continuityVerified,
-        reply_text_seams_verified: textSeamsVerified,
+        reply_seams_total: seamsTotal,
+        reply_seams_verified: overlaps.length,
+        reply_recapture_count: recaptureCount,
+        reply_capture_ms: replyCaptureMs,
+        ...(fallbackReason ? { reply_fallback_reason: fallbackReason } : {}),
         long_image_max_height: payloadMaxLongImageHeight,
       }
-      const evidence = await captureEvidence(question)
-      if (evidence) { const file = path.join(outDir, `${stem}_资料.png`); await fs.writeFile(file, evidence); resultMeta.evidence_screenshot = file }
-      const products = await captureReferenceProducts(question)
+      log(`capture: 回答截图完成，帧=${frames.length}，接缝=${overlaps.length}/${seamsTotal}，重采=${recaptureCount}，模式=${resultMeta.reply_capture_mode}，耗时=${replyCaptureMs}ms`)
+      // The main reply sweep ends near the tail. Check products first, then
+      // return to the question once for evidence instead of traversing twice.
+      const products = await captureReferenceProducts(question, { seenDuringReply: productsSeen })
       if (products) {
         const paths = []
         for (const [index, image] of products.images.entries()) { const file = path.join(outDir, `${stem}_参考药品_${String(index + 1).padStart(3, '0')}.png`); await fs.writeFile(file, image); paths.push(file) }
@@ -627,6 +664,8 @@ function createRunner(options) {
           reference_products_capture_complete: products.imagesReady && products.confirmedEnd,
         })
       }
+      const evidence = await captureEvidence(question, { seenDuringReply: evidenceSeen })
+      if (evidence) { const file = path.join(outDir, `${stem}_资料.png`); await fs.writeFile(file, evidence); resultMeta.evidence_screenshot = file }
     } else await fs.writeFile(screenshotPath, await screenshot())
     await fs.writeFile(xmlPath, xml || await normalizedHierarchy(), 'utf8')
     await fs.writeFile(metadataPath, JSON.stringify({ question, status, created_at: new Date().toISOString().replace(/\.\d{3}Z$/, ''), screenshot: screenshotPath, hierarchy: xmlPath, ...resultMeta }, null, 2), 'utf8')

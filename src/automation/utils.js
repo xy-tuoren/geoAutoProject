@@ -34,13 +34,11 @@ async function findResumableBatch(outputRoot, questions) {
       const metadata = path.join(questionArtifactDirectory(batchDirectory, index + 1, question), '回答.json')
       try {
         const artifact = JSON.parse(await fs.readFile(metadata, 'utf8'))
-        const modes = new Set(['verified_overlap_long_image', 'shared_text_seam_long_image', 'separated_viewports_long_image'])
+        const modes = new Set(['verified_overlap_long_image', 'separated_viewports_long_image'])
         const validMode = modes.has(artifact.reply_capture_mode)
         const validContinuity = artifact.reply_capture_mode === 'verified_overlap_long_image'
           ? artifact.reply_continuity_verified === true
-          : artifact.reply_capture_mode === 'shared_text_seam_long_image'
-            ? artifact.reply_text_seams_verified === true
-            : artifact.reply_capture_mode === 'separated_viewports_long_image'
+          : artifact.reply_capture_mode === 'separated_viewports_long_image'
         const screenshots = Array.isArray(artifact.screenshot_parts) ? artifact.screenshot_parts : []
         if (artifact.status !== 'stable' || !validMode || !validContinuity || !screenshots.length) continue
         await Promise.all(screenshots.map(file => fs.access(file)))

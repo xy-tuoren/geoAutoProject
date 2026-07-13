@@ -6,7 +6,7 @@ const path = require('node:path')
 const sharp = require('sharp')
 const XLSX = require('xlsx')
 const { questionVisible, replyTailOnScreen, findChatScrollBounds, validateCaptureViewport, estimateVerticalScrollShift, sharedTextSeam, evidencePanelBounds, visibleLabelBounds, visibleLabelBoundsList, boundsListForNodeAttribute, referenceProductsSection } = require('../../src/automation/hierarchy')
-const { stackFramesInGroups, verifyFrameOverlap, imageInfo, imageLooksLoaded, stitchFramesWithOverlaps, composeLongImages, cropFramesAtTextSeams } = require('../../src/automation/images')
+const { stackFramesInGroups, verifyFrameOverlap, imageInfo, imageLooksLoaded, imagesSimilar, imageRegionsStable, stitchFramesWithOverlaps, composeLongImages, cropFramesAtTextSeams } = require('../../src/automation/images')
 const { createBatchDirectory, findResumableBatch, questionArtifactDirectory } = require('../../src/automation/utils')
 const { loadQuestionFile } = require('../../src/questions')
 const { adbConnectionLost, appiumHelperApks, explainSessionError, findOptionalElement, buildReplyImages, historyOnboardingVisible, maxLongImageHeight, parsePackageVersion, sessionCapabilities } = require('../../src/automation/runner')
@@ -129,7 +129,7 @@ test('断点续跑只复用题目位置匹配且尚未完成的批次', async ()
   } finally { await fs.rm(root, { recursive: true, force: true }) }
 })
 
-test('断点续跑不会复用旧版无接缝拼图或连续性失败的截图', async () => {
+test('断点续跑不会复用旧版文字接缝截图', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'node-resume-quality-test-'))
   try {
     const questions = ['旧坏图', '待执行']
@@ -141,8 +141,8 @@ test('断点续跑不会复用旧版无接缝拼图或连续性失败的截图',
     await fs.writeFile(path.join(first, '回答.json'), JSON.stringify({
       status: 'stable',
       screenshot_parts: [screenshot],
-      reply_capture_mode: 'full_viewport_no_crop',
-      reply_continuity_verified: false,
+      reply_capture_mode: 'shared_text_seam_long_image',
+      reply_text_seams_verified: true,
     }))
     assert.equal(await findResumableBatch(root, questions), null)
   } finally { await fs.rm(root, { recursive: true, force: true }) }
@@ -155,10 +155,45 @@ test('回答截图无法验证相邻重叠时，用分隔线组成长图而不�
   assert.deepEqual(await imageInfo(images[0]), { width: 20, height: 78 })
 })
 
-test('文字接缝和像素重叠都有效时优先按完整文字节点拼接', async () => {
+test('文字接缝参数不再改变已经过像素验证的拼接结果', async () => {
   const frame = await sharp({ create: { width: 20, height: 100, channels: 3, background: 'white' } }).png().toBuffer()
   const images = await buildReplyImages([frame, frame], true, [0], 3000, [{ previousEnd: 70, currentStart: 50 }])
-  assert.deepEqual(await imageInfo(images[0]), { width: 20, height: 120 })
+  assert.deepEqual(await imageInfo(images[0]), { width: 20, height: 200 })
+})
+
+test('像素连续性失败时绝不使用看似合法的文字接缝', async () => {
+  const frame = await sharp({ create: { width: 20, height: 100, channels: 3, background: 'white' } }).png().toBuffer()
+  const images = await buildReplyImages([frame, frame], false, [], 3000, [{ previousEnd: 70, currentStart: 50 }])
+  assert.deepEqual(await imageInfo(images[0]), { width: 20, height: 224 })
+})
+
+test('局部文字区域变化不会被全屏平均差异掩盖', async () => {
+  const first = await sharp({ create: { width: 240, height: 240, channels: 3, background: 'white' } }).png().toBuffer()
+  const patch = await sharp({ create: { width: 20, height: 10, channels: 3, background: 'black' } }).png().toBuffer()
+  const second = await sharp(first).composite([{ input: patch, left: 24, top: 96 }]).png().toBuffer()
+  assert.equal(await imagesSimilar(first, second, 1), true)
+  assert.equal(await imageRegionsStable(first, second), false)
+})
+
+test('不同内容区域测得不同滚动位移时拒绝拼接', async () => {
+  const width = 240
+  const height = 300
+  const raw = Buffer.alloc(width * height * 3)
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const offset = (y * width + x) * 3
+      const value = (y * 37 + x * 17 + ((y * x) % 97)) % 256
+      raw[offset] = value
+      raw[offset + 1] = (value * 3) % 256
+      raw[offset + 2] = (value * 7) % 256
+    }
+  }
+  const previous = await sharp(raw, { raw: { width, height, channels: 3 } }).png().toBuffer()
+  const left = await sharp(previous).extract({ left: 0, top: 80, width: 120, height: 220 }).extend({ bottom: 80, background: 'white' }).png().toBuffer()
+  const right = await sharp(previous).extract({ left: 120, top: 100, width: 120, height: 200 }).extend({ bottom: 100, background: 'white' }).png().toBuffer()
+  const current = await sharp({ create: { width, height, channels: 3, background: 'white' } })
+    .composite([{ input: left, left: 0, top: 0 }, { input: right, left: 120, top: 0 }]).png().toBuffer()
+  await assert.rejects(() => verifyFrameOverlap(previous, current, 210), /区域.*不一致|连续性/)
 })
 
 test('长截图超过高度上限时只在视口边界拆分', async () => {
