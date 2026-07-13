@@ -10,7 +10,7 @@
   <body>
     <main class="shell">
       <header class="topbar">
-        <div>
+        <div class="brand">
           <p class="eyebrow">OPERATIONS CONSOLE</p>
           <h1>提问自动化</h1>
         </div>
@@ -19,39 +19,87 @@
 
       <section class="workspace">
         <aside class="settings panel">
-          <div class="section-heading"><h2>任务配置</h2><p>连接 Android 设备</p></div>
-          <fieldset>
-            <legend>Android 设备</legend>
-            <div class="inline-control"><select id="device" aria-label="ADB 设备"><option value="">正在读取设备…</option></select><button id="refresh-devices" class="secondary" type="button">刷新</button></div>
-          </fieldset>
-          <label class="field"><span>截图目录</span><div class="inline-control"><input id="output-dir" type="text" /><button id="select-directory" class="secondary" type="button">选择</button></div></label>
-          <p class="support-note">iOS 自动化驱动待接入</p>
+          <div class="section-heading">
+            <h2>任务配置</h2>
+            <p>Android 设备</p>
+          </div>
+          <div class="settings-body">
+            <label class="field tight">
+              <span>设备</span>
+              <div class="inline-control">
+                <select id="device" aria-label="ADB 设备"><option value="">正在读取设备…</option></select>
+                <button id="refresh-devices" class="secondary" type="button">刷新</button>
+              </div>
+            </label>
+            <label class="field tight">
+              <span>截图目录</span>
+              <div class="inline-control">
+                <input id="output-dir" type="text" />
+                <button id="select-directory" class="secondary" type="button">选择</button>
+              </div>
+            </label>
+            <p class="support-note">iOS 自动化驱动待接入</p>
+          </div>
         </aside>
 
-        <section class="questions panel">
+        <section class="questions panel" id="questions-panel">
           <div class="questions-head">
-            <div class="section-heading"><h2>问题队列</h2><p>每行一题，按显示顺序发送</p></div>
-            <div class="queue-tools"><span id="question-count">0 条问题</span><label>列名 <input id="column-name" value="问题" /></label><button id="import-questions" class="secondary" type="button">导入问题文件</button></div>
+            <div class="section-heading">
+              <h2>问题队列</h2>
+              <p>每行一题 · 可拖入文件</p>
+            </div>
+            <div class="queue-tools">
+              <span id="question-count" class="count-pill">0 条问题</span>
+              <label class="column-label">列名 <input id="column-name" value="问题" /></label>
+              <button id="import-questions" class="secondary" type="button">导入问题文件</button>
+            </div>
           </div>
-          <textarea id="questions" aria-label="问题列表" spellcheck="false" placeholder="在这里输入问题，每行一题"></textarea>
-          <p class="capture-note">自动截图：回答 · 药品卡 · 智能总结 · 引用资料</p>
+          <textarea id="questions" aria-label="问题列表" spellcheck="false" placeholder="在这里输入问题，每行一题；也可直接拖入 TXT / CSV / JSON / XLSX 文件"></textarea>
+          <div class="drop-hint" aria-hidden="true">松开以导入问题文件</div>
+          <p class="capture-note">自动截图：回答 · 推荐药品 · 引用资料</p>
         </section>
       </section>
 
       <section class="bottom-grid">
         <section class="execution panel">
-          <div class="section-heading"><h2>执行计划</h2><p id="plan">0 台设备 × 0 条问题 = 0 次计划</p></div>
-          <div class="execution-controls">
-            <label class="field compact"><span>单题超时</span><input id="timeout" value="90" inputmode="decimal" /><em>秒</em></label>
-            <label class="option session"><input id="new-session" type="checkbox" /><span>每题新建会话</span></label>
+          <div class="section-heading">
+            <h2>执行计划</h2>
+            <p id="plan">0 台设备 × 0 条问题 = 0 次计划</p>
+          </div>
+          <div class="execution-body">
+            <div class="execution-fields">
+              <label class="field compact">
+                <span>单题超时</span>
+                <span class="input-with-unit"><input id="timeout" value="90" inputmode="decimal" /><em>秒</em></span>
+              </label>
+              <label class="field compact">
+                <span>长图上限</span>
+                <span class="input-with-unit"><input id="max-long-image-height" value="12000" inputmode="numeric" /><em>px</em></span>
+              </label>
+            </div>
+            <div class="execution-options">
+              <label class="option session"><input id="new-session" type="checkbox" checked /><span>每题新建会话</span></label>
+              <label class="option session"><input id="resume" type="checkbox" checked /><span>断点续跑</span></label>
+            </div>
             <div class="action-buttons">
               <button id="start" class="primary" type="button">开始批量执行</button>
               <button id="stop" class="danger" type="button" disabled>停止</button>
             </div>
           </div>
         </section>
+
         <section class="logs panel">
-          <div class="log-head"><div class="section-heading"><h2>执行日志</h2><p>实时显示命令与任务进度</p></div><button id="clear-log" class="text-button" type="button">清空</button></div>
+          <div class="log-head">
+            <div class="section-heading">
+              <h2>执行日志</h2>
+              <p>实时命令与任务进度</p>
+            </div>
+            <div class="log-tools">
+              <button id="export-log" class="text-button" type="button">导出</button>
+              <button id="copy-log" class="text-button" type="button">复制</button>
+              <button id="clear-log" class="text-button" type="button">清空</button>
+            </div>
+          </div>
           <pre id="log" aria-live="polite"></pre>
         </section>
       </section>

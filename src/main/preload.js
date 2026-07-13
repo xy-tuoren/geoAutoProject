@@ -1,4 +1,4 @@
-const { contextBridge, ipcRenderer } = require('electron')
+const { contextBridge, ipcRenderer, webUtils } = require('electron')
 
 contextBridge.exposeInMainWorld('automation', {
   defaultOutputDirectory: () => ipcRenderer.invoke('app:default-output-directory'),
@@ -6,8 +6,11 @@ contextBridge.exposeInMainWorld('automation', {
   selectQuestions: () => ipcRenderer.invoke('dialog:select-questions'),
   listDevices: () => ipcRenderer.invoke('automation:devices'),
   importQuestions: payload => ipcRenderer.invoke('questions:import', payload),
+  getPathForFile: file => webUtils.getPathForFile(file),
   start: payload => ipcRenderer.invoke('automation:start', payload),
   stop: () => ipcRenderer.invoke('automation:stop'),
+  copyText: text => ipcRenderer.invoke('clipboard:write', text),
+  exportLog: text => ipcRenderer.invoke('log:export', text),
   onLog: callback => ipcRenderer.on('automation:log', (_event, text) => callback(text)),
   onFinished: callback => ipcRenderer.on('automation:finished', (_event, result) => callback(result)),
 })

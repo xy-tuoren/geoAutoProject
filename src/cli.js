@@ -4,7 +4,7 @@ const { createRunner } = require('./automation/runner')
 const { bundledAdbPath, projectRoot, vendorAppiumHome } = require('./runtime-paths')
 
 function usage() {
-  console.log('用法：npm run run:android -- --serial <设备序列号> --output-dir <目录> [--timeout <秒>] [--new-session] <问题>')
+  console.log('用法：npm run run:android -- --serial <设备序列号> --output-dir <目录> [--timeout <秒>] [--max-long-image-height <像素>] [--new-session] [--resume] <问题>')
 }
 
 function parseArguments(argv) {
@@ -14,7 +14,9 @@ function parseArguments(argv) {
     if (value === '--serial') options.serial = argv[++index]
     else if (value === '--output-dir') options.outputDir = argv[++index]
     else if (value === '--timeout') options.timeout = Number(argv[++index])
+    else if (value === '--max-long-image-height') options.maxLongImageHeight = Number(argv[++index])
     else if (value === '--new-session') options.newSession = true
+    else if (value === '--resume') options.resume = true
     else if (value === '--help' || value === '-h') options.help = true
     else options.questions.push(value)
   }

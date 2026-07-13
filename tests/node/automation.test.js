@@ -5,11 +5,11 @@ const os = require('node:os')
 const path = require('node:path')
 const sharp = require('sharp')
 const XLSX = require('xlsx')
-const { questionVisible, replyTailOnScreen, findChatScrollBounds, validateCaptureViewport, evidencePanelBounds, visibleLabelBounds } = require('../../src/automation/hierarchy')
-const { stackFramesInGroups, verifyFrameOverlap, imageInfo } = require('../../src/automation/images')
-const { createBatchDirectory, questionArtifactDirectory } = require('../../src/automation/utils')
+const { questionVisible, replyTailOnScreen, findChatScrollBounds, validateCaptureViewport, estimateVerticalScrollShift, sharedTextSeam, evidencePanelBounds, visibleLabelBounds, visibleLabelBoundsList, boundsListForNodeAttribute, referenceProductsSection } = require('../../src/automation/hierarchy')
+const { stackFramesInGroups, verifyFrameOverlap, imageInfo, imageLooksLoaded, stitchFramesWithOverlaps, composeLongImages, cropFramesAtTextSeams } = require('../../src/automation/images')
+const { createBatchDirectory, findResumableBatch, questionArtifactDirectory } = require('../../src/automation/utils')
 const { loadQuestionFile } = require('../../src/questions')
-const { explainSessionError, findOptionalElement, buildReplyImages } = require('../../src/automation/runner')
+const { adbConnectionLost, appiumHelperApks, explainSessionError, findOptionalElement, buildReplyImages, historyOnboardingVisible, maxLongImageHeight, parsePackageVersion, sessionCapabilities } = require('../../src/automation/runner')
 
 const CHAT_BOUNDS = [0, 200, 1080, 1800]
 
@@ -42,6 +42,29 @@ test('聊天区域会避开底部输入框，并拒绝横屏', () => {
   assert.throws(() => validateCaptureViewport({ width: 1600, height: 720 }, [0, 100, 1600, 600]), /竖屏/)
 })
 
+test('根据相同文本节点测量真实滚动距离，忽略固定控件', () => {
+  const before = '<hierarchy><node text="固定标题" displayed="true" bounds="[0,100][500,160]" /><node text="回答中的同一段文字" displayed="true" bounds="[20,900][1000,1000]" /></hierarchy>'
+  const after = '<hierarchy><node text="固定标题" displayed="true" bounds="[0,100][500,160]" /><node text="回答中的同一段文字" displayed="true" bounds="[20,400][1000,500]" /></hierarchy>'
+  assert.equal(estimateVerticalScrollShift(before, after, [0, 200, 1080, 1800]), 500)
+  assert.deepEqual(sharedTextSeam(before, after, [0, 200, 1080, 1800]), { previousEnd: 700, currentStart: 200 })
+})
+
+test('在共享文字顶部切换视口，避免接缝切过文字行', async () => {
+  const frame = await sharp({ create: { width: 20, height: 100, channels: 3, background: 'white' } }).png().toBuffer()
+  const segments = await cropFramesAtTextSeams([frame, frame], [{ previousEnd: 70, currentStart: 20 }])
+  assert.deepEqual(await imageInfo(segments[0]), { width: 20, height: 70 })
+  assert.deepEqual(await imageInfo(segments[1]), { width: 20, height: 80 })
+})
+
+test('共享文字接缝拒绝同一视口内重复出现的标题', () => {
+  const before = '<hierarchy>'
+    + '<node text="重复标题" displayed="true" bounds="[20,700][800,760]" />'
+    + '<node text="重复标题" displayed="true" bounds="[20,1100][800,1160]" />'
+    + '</hierarchy>'
+  const after = '<hierarchy><node text="重复标题" displayed="true" bounds="[20,300][800,360]" /></hierarchy>'
+  assert.equal(sharedTextSeam(before, after, [0, 200, 1080, 1800]), null)
+})
+
 test('拼接参考药品时保留完整视口，并阻止无法验证的跨屏拼接', async () => {
   const make = color => sharp({ create: { width: 20, height: 10, channels: 3, background: color } }).png().toBuffer()
   const chunks = await stackFramesInGroups([await make('red'), await make('green'), await make('blue'), await make('white')], 3)
@@ -50,6 +73,13 @@ test('拼接参考药品时保留完整视口，并阻止无法验证的跨屏�
   const black = await make('black')
   const white = await make('white')
   await assert.rejects(() => verifyFrameOverlap(black, white, 4), /连续性/)
+})
+
+test('按已验证的精确重叠高度拼接，不再二次猜测滚动距离', async () => {
+  const first = await sharp({ create: { width: 20, height: 20, channels: 3, background: 'red' } }).png().toBuffer()
+  const second = await sharp({ create: { width: 20, height: 20, channels: 3, background: 'blue' } }).png().toBuffer()
+  const [stitched] = await stitchFramesWithOverlaps([first, second], [6])
+  assert.deepEqual(await imageInfo(stitched), { width: 20, height: 34 })
 })
 
 test('批次和问题目录保持与旧版一致，CSV 默认读取问题列', async () => {
@@ -74,14 +104,138 @@ test('UiAutomator2 服务启动失败会给出设备后台冻结的处理提示'
   assert.match(error.message, /后台管理/)
 })
 
-test('输入框尚未出现时，将 Appium 的 404 作为可重试状态而不是任务错误', async () => {
-  const driver = { $: async () => { throw new Error('NoSuchElementError: An element could not be located on the page') } }
+test('可选元素使用 findElements 空列表，避免制造 Appium 404', async () => {
+  const driver = { $$: async () => [] }
   assert.equal(await findOptionalElement(driver, 'android=new UiSelector().className("android.widget.EditText")'), null)
 })
 
-test('回答截图无法验证相邻重叠时，保留完整视口而不裁图', async () => {
+test('断点续跑只复用题目位置匹配且尚未完成的批次', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'node-resume-test-'))
+  try {
+    const questions = ['问题一', '问题二']
+    const batch = await createBatchDirectory(root, new Date(2026, 6, 12, 10, 0, 0))
+    const first = questionArtifactDirectory(batch, 1, questions[0])
+    await fs.mkdir(first, { recursive: true })
+    const screenshot = path.join(first, '回答_001.png')
+    await fs.writeFile(screenshot, 'png')
+    await fs.writeFile(path.join(first, '回答.json'), JSON.stringify({
+      status: 'stable',
+      screenshot_parts: [screenshot],
+      reply_capture_mode: 'verified_overlap_long_image',
+      reply_continuity_verified: true,
+    }))
+    assert.deepEqual(await findResumableBatch(root, questions), { batchDirectory: batch, completed: [0] })
+    assert.equal(await findResumableBatch(root, ['其他问题']), null)
+  } finally { await fs.rm(root, { recursive: true, force: true }) }
+})
+
+test('断点续跑不会复用旧版无接缝拼图或连续性失败的截图', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'node-resume-quality-test-'))
+  try {
+    const questions = ['旧坏图', '待执行']
+    const batch = await createBatchDirectory(root, new Date(2026, 6, 12, 11, 0, 0))
+    const first = questionArtifactDirectory(batch, 1, questions[0])
+    await fs.mkdir(first, { recursive: true })
+    const screenshot = path.join(first, '回答_001.png')
+    await fs.writeFile(screenshot, 'png')
+    await fs.writeFile(path.join(first, '回答.json'), JSON.stringify({
+      status: 'stable',
+      screenshot_parts: [screenshot],
+      reply_capture_mode: 'full_viewport_no_crop',
+      reply_continuity_verified: false,
+    }))
+    assert.equal(await findResumableBatch(root, questions), null)
+  } finally { await fs.rm(root, { recursive: true, force: true }) }
+})
+
+test('回答截图无法验证相邻重叠时，用分隔线组成长图而不丢像素', async () => {
   const make = color => sharp({ create: { width: 20, height: 10, channels: 3, background: color } }).png().toBuffer()
   const images = await buildReplyImages([await make('red'), await make('green'), await make('blue')], false)
   assert.equal(images.length, 1)
-  assert.deepEqual(await imageInfo(images[0]), { width: 20, height: 30 })
+  assert.deepEqual(await imageInfo(images[0]), { width: 20, height: 78 })
+})
+
+test('文字接缝和像素重叠都有效时优先按完整文字节点拼接', async () => {
+  const frame = await sharp({ create: { width: 20, height: 100, channels: 3, background: 'white' } }).png().toBuffer()
+  const images = await buildReplyImages([frame, frame], true, [0], 3000, [{ previousEnd: 70, currentStart: 50 }])
+  assert.deepEqual(await imageInfo(images[0]), { width: 20, height: 120 })
+})
+
+test('长截图超过高度上限时只在视口边界拆分', async () => {
+  const frame = await sharp({ create: { width: 20, height: 1000, channels: 3, background: 'white' } }).png().toBuffer()
+  const images = await composeLongImages([frame, frame, frame, frame], { maxHeight: 3000 })
+  assert.equal(images.length, 2)
+  for (const image of images) assert.ok((await imageInfo(image)).height <= 3000)
+  assert.equal(maxLongImageHeight(undefined), 12000)
+  assert.throws(() => maxLongImageHeight(2999), /3000/)
+})
+
+test('药品图片检测拒绝纯色占位区并接受有实际图像细节的区域', async () => {
+  const blank = await sharp({ create: { width: 80, height: 60, channels: 3, background: '#000' } }).png().toBuffer()
+  const detailed = await sharp({ create: { width: 80, height: 60, channels: 3, background: '#fff' } })
+    .composite([{ input: await sharp({ create: { width: 36, height: 30, channels: 3, background: '#d22' } }).png().toBuffer(), left: 10, top: 12 }]).png().toBuffer()
+  assert.equal(await imageLooksLoaded(blank), false)
+  assert.equal(await imageLooksLoaded(detailed), true)
+})
+
+test('可枚举当前药品列表内的说明书按钮与图片节点', () => {
+  const xml = '<hierarchy>'
+    + '<node class="android.widget.ImageView" displayed="true" bounds="[20,100][220,260]" />'
+    + '<node class="android.widget.ImageView" displayed="true" bounds="[20,300][220,460]" />'
+    + '<node text="查看说明书" displayed="true" bounds="[30,250][200,290]" />'
+    + '<node text="查看说明书" displayed="true" bounds="[30,450][200,490]" />'
+    + '</hierarchy>'
+  assert.equal(boundsListForNodeAttribute(xml, 'class', 'android.widget.ImageView').length, 2)
+  assert.equal(visibleLabelBoundsList(xml, '查看说明书').length, 2)
+})
+
+test('参考药品卡片虽无文本，也能凭结构（Compose 面板+横向列表）定位入口箭头', () => {
+  const xml = '<hierarchy>'
+    + '<node class="androidx.compose.ui.viewinterop.ViewFactoryHolder" bounds="[0,673][1080,1714]">'
+    + '<node class="android.widget.ImageView" bounds="[942,682][1020,760]" />'
+    + '<node class="android.widget.HorizontalScrollView" scrollable="true" bounds="[0,817][1080,1714]">'
+    + '<node class="android.view.ViewGroup" bounds="[48,817][504,1714]" />'
+    + '</node></node></hierarchy>'
+  const section = referenceProductsSection(xml)
+  assert.deepEqual(section.panel, [0, 673, 1080, 1714])
+  assert.deepEqual(section.tap, [981, 721])
+})
+
+test('普通资料卡（Compose 面板但无横向药品列表）不会被误判为参考药品', () => {
+  const xml = '<hierarchy>'
+    + '<node class="androidx.compose.ui.viewinterop.ViewFactoryHolder" displayed="true" bounds="[40,700][1040,980]">'
+    + '<node class="android.widget.TextView" text="引用资料" displayed="true" bounds="[60,720][300,780]" />'
+    + '</node></hierarchy>'
+  assert.equal(referenceProductsSection(xml), null)
+})
+
+test('辅助组件已存在时会话能力会跳过 Settings / UiAutomator2 重装', () => {
+  const skip = sessionCapabilities('SERIAL', { skipHelperInstall: true })
+  assert.equal(skip['appium:skipServerInstallation'], true)
+  assert.equal(skip['appium:skipDeviceInitialization'], true)
+  const fresh = sessionCapabilities('SERIAL', { skipHelperInstall: false })
+  assert.equal(fresh['appium:skipServerInstallation'], undefined)
+  assert.equal(fresh['appium:skipDeviceInitialization'], undefined)
+})
+
+test('从 adb 包信息读取 UiAutomator2 的已安装版本', () => {
+  assert.equal(parsePackageVersion('Packages:\n  versionName=10.3.2\n  versionCode=214\n'), '10.3.2')
+  assert.equal(parsePackageVersion('Package [io.appium.uiautomator2.server]'), null)
+})
+
+test('内置辅助 APK 路径随 UiAutomator2 服务版本变化', () => {
+  const apks = appiumHelperApks('/runtime/appium-home', '10.3.2')
+  assert.equal(apks.length, 3)
+  assert.match(apks[1], /appium-uiautomator2-server-v10\.3\.2\.apk$/)
+  assert.match(apks[2], /appium-uiautomator2-server-debug-androidTest\.apk$/)
+})
+
+test('仅为 ADB 短暂断连启用安装重试', () => {
+  assert.equal(adbConnectionLost(new Error('adb: device offline')), true)
+  assert.equal(adbConnectionLost(new Error('INSTALL_FAILED_UPDATE_INCOMPATIBLE')), false)
+})
+
+test('识别首次启动时遮挡输入框的历史对话引导', () => {
+  assert.equal(historyOnboardingVisible('<node text="在这里查看「历史对话」" />'), true)
+  assert.equal(historyOnboardingVisible('<node text="输入问题 或 按住说话" />'), false)
 })
