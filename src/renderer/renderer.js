@@ -136,7 +136,6 @@ start.addEventListener('click', async () => {
       outputDir: $('#output-dir').value.trim(),
       timeout,
       newSession: $('#new-session').checked,
-      resume: $('#resume').checked,
       maxLongImageHeight,
     })
     start.disabled = true; stop.disabled = false; status.textContent = '任务正在执行…'; appendLog('\n$ 启动自动化任务\n')

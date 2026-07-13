@@ -106,6 +106,53 @@ async function imageLooksLoaded(image) {
   return deviation >= 10 && (brightRatio >= 0.015 || edgeRatio >= 0.008)
 }
 
+async function alignCropToWhitespace(image, target, {
+  searchBefore = null,
+  searchAfter = null,
+  minimumBand = 8,
+  returnNullIfMissing = false,
+} = {}) {
+  const raw = await rawImage(image)
+  const wanted = Math.max(1, Math.min(raw.height - 1, Math.round(target)))
+  const before = searchBefore ?? Math.max(60, Math.round(raw.height * 0.06))
+  const after = searchAfter ?? Math.max(32, Math.round(raw.height * 0.025))
+  const top = Math.max(1, wanted - before)
+  const bottom = Math.min(raw.height - 2, wanted + after)
+  const left = Math.max(1, Math.floor(raw.width * 0.06))
+  const right = Math.min(raw.width - 1, Math.ceil(raw.width * 0.94))
+  const blank = []
+  for (let y = top; y <= bottom; y += 1) {
+    let edges = 0
+    let samples = 0
+    for (let x = left; x < right; x += 2) {
+      const offset = (y * raw.width + x) * raw.channels
+      const previous = offset - raw.channels * 2
+      if (Math.abs(luminosity(raw.data, offset) - luminosity(raw.data, previous)) >= 12) edges += 1
+      samples += 1
+    }
+    blank.push(edges / Math.max(1, samples) <= 0.004)
+  }
+
+  const halfBand = Math.floor(minimumBand / 2)
+  const candidates = []
+  let start = -1
+  for (let index = 0; index <= blank.length; index += 1) {
+    if (blank[index] && start < 0) start = index
+    if ((!blank[index] || index === blank.length) && start >= 0) {
+      const end = index - 1
+      if (end - start + 1 >= minimumBand) {
+        const low = top + start + halfBand
+        const high = top + end - (minimumBand - halfBand - 1)
+        candidates.push(Math.max(low, Math.min(high, wanted)))
+      }
+      start = -1
+    }
+  }
+  if (!candidates.length) return returnNullIfMissing ? null : wanted
+  candidates.sort((a, b) => Math.abs(a - wanted) - Math.abs(b - wanted) || b - a)
+  return candidates[0]
+}
+
 async function createCanvas(width, height) {
   return sharp({ create: { width, height, channels: 3, background: { r: 0, g: 0, b: 0 } } })
 }
@@ -217,7 +264,7 @@ async function findVerticalOverlapWithScore(previous, current, expected = null) 
   const [previousRaw, currentRaw] = await Promise.all([rawImage(previous), rawImage(current)])
   const maxOverlap = Math.min(previousRaw.height, currentRaw.height) - 8
   const minOverlap = Math.min(40, Math.floor(maxOverlap / 2))
-  if (maxOverlap <= minOverlap) return { overlap: Math.max(0, Math.floor(Math.min(previousRaw.height, currentRaw.height) / 3)), score: 255, valid: false, reason: '截图高度不足' }
+  if (maxOverlap <= minOverlap) return { overlap: Math.max(0, Math.floor(Math.min(previousRaw.height, currentRaw.height) / 3)), candidateOverlaps: [], score: 255, valid: false, reason: '截图高度不足' }
   let low = minOverlap
   let high = maxOverlap
   if (expected !== null) {
@@ -230,22 +277,27 @@ async function findVerticalOverlapWithScore(previous, current, expected = null) 
   const bands = [[0.06, 0.43], [0.57, 0.94]]
   const results = bands.map(band => bestBandOverlap(previousRaw, currentRaw, band, low, high))
   const usable = results.filter(result => result.contentRatio >= 0.004)
-  if (usable.length < 2) return { overlap: expected ?? results[0].overlap, score: Math.max(...results.map(result => result.score)), valid: false, reason: '相邻截图缺少足够的可比内容' }
+  if (usable.length < 2) return { overlap: expected ?? results[0].overlap, candidateOverlaps: usable.map(result => result.overlap), score: Math.max(...results.map(result => result.score)), valid: false, reason: '相邻截图缺少足够的可比内容' }
   const overlaps = usable.map(result => result.overlap)
   if (Math.max(...overlaps) - Math.min(...overlaps) > 3) {
-    return { overlap: Math.round(overlaps.reduce((sum, value) => sum + value, 0) / overlaps.length), score: Math.max(...usable.map(result => result.score)), valid: false, reason: `不同图像区域测得的滚动位移不一致（重叠 ${overlaps.join('/')}px）` }
+    return { overlap: Math.round(overlaps.reduce((sum, value) => sum + value, 0) / overlaps.length), candidateOverlaps: overlaps, score: Math.max(...usable.map(result => result.score)), valid: false, reason: `不同图像区域测得的滚动位移不一致（重叠 ${overlaps.join('/')}px）` }
   }
   const overlap = Math.round(overlaps.reduce((sum, value) => sum + value, 0) / overlaps.length)
   const validation = bands.map(band => overlapScore(previousRaw, currentRaw, overlap, band, { xStep: 2, yStep: 2 }))
   const score = Math.max(...validation.map(result => result.score))
   const tilesStable = bands.every(band => overlapTilesStable(previousRaw, currentRaw, overlap, band))
   const valid = score <= 8 && tilesStable
-  return { overlap, score, valid, reason: valid ? null : (tilesStable ? `差异分数 ${score.toFixed(1)}` : '局部内容发生变化') }
+  return { overlap, candidateOverlaps: overlaps, score, valid, reason: valid ? null : (tilesStable ? `差异分数 ${score.toFixed(1)}` : '局部内容发生变化') }
 }
 
 async function verifyFrameOverlap(previous, current, expected) {
   const result = await findVerticalOverlapWithScore(previous, current, expected)
-  if (!result.valid) throw new Error(`无法验证相邻截图连续性（${result.reason || `差异分数 ${result.score.toFixed(1)}`}）；已停止无缝拼接以避免叠字或漏图。`)
+  if (!result.valid) {
+    const error = new Error(`无法验证相邻截图连续性（${result.reason || `差异分数 ${result.score.toFixed(1)}`}）；已停止无缝拼接以避免叠字或漏图。`)
+    error.candidateOverlaps = result.candidateOverlaps || []
+    error.suggestedOverlap = result.overlap
+    throw error
+  }
   return result.overlap
 }
 
@@ -314,18 +366,50 @@ async function stackFramesWithSeparators(frames, separatorHeight = 24) {
   return (await createCanvas(width, height)).composite(composite).png().toBuffer()
 }
 
-async function composeLongImages(frames, { overlaps = [], continuityVerified = false, maxHeight = 12_000, separatorHeight = 24 } = {}) {
+async function stitchFramesWithTransitions(frames, transitions, separatorHeight = 24, separatorColor = '#eef1f4') {
+  if (!frames.length) throw new Error('没有可拼接的截图。')
+  if (transitions.length !== Math.max(0, frames.length - 1)) throw new Error('每对相邻截图都必须提供接缝状态。')
+  let result = frames[0]
+  for (let index = 1; index < frames.length; index += 1) {
+    const frame = frames[index]
+    const size = await imageInfo(frame)
+    const transition = transitions[index - 1]
+    const cropTop = Math.max(0, Math.min(
+      transition.verified ? transition.overlap : transition.fallbackOverlap,
+      size.height - 1,
+    ))
+    const addition = await cropImage(frame, [0, cropTop, size.width, size.height])
+    const resultSize = await imageInfo(result)
+    const additionSize = await imageInfo(addition)
+    const gap = transition.verified ? 0 : separatorHeight
+    const composite = [{ input: result, left: 0, top: 0 }]
+    if (gap > 0) {
+      const separator = await sharp({ create: { width: Math.max(resultSize.width, additionSize.width), height: gap, channels: 3, background: separatorColor } }).png().toBuffer()
+      composite.push({ input: separator, left: 0, top: resultSize.height })
+    }
+    composite.push({ input: addition, left: 0, top: resultSize.height + gap })
+    result = await (await createCanvas(Math.max(resultSize.width, additionSize.width), resultSize.height + gap + additionSize.height))
+      .composite(composite).png().toBuffer()
+  }
+  return result
+}
+
+async function composeLongImages(frames, { overlaps = [], continuityVerified = false, transitions = null, maxHeight = 12_000, separatorHeight = 24 } = {}) {
   if (!frames.length) throw new Error('没有可拼接的截图。')
   if (!Number.isInteger(maxHeight) || maxHeight < 1_000) throw new Error('内部拼图高度必须是不小于 1000 的整数。')
+  if (transitions && transitions.length !== Math.max(0, frames.length - 1)) throw new Error('每对相邻截图都必须提供接缝状态。')
   if (continuityVerified && overlaps.length !== Math.max(0, frames.length - 1)) throw new Error('每对相邻截图都必须提供已验证的重叠高度。')
   const sizes = await Promise.all(frames.map(imageInfo))
   const groups = []
   let start = 0
   let height = sizes[0].height
   for (let index = 1; index < frames.length; index += 1) {
-    const addition = continuityVerified
-      ? Math.max(1, sizes[index].height - overlaps[index - 1])
-      : sizes[index].height + separatorHeight
+    const transition = transitions?.[index - 1]
+    const cropTop = transition
+      ? (transition.verified ? transition.overlap : transition.fallbackOverlap)
+      : (continuityVerified ? overlaps[index - 1] : 0)
+    const addition = Math.max(1, sizes[index].height - Math.max(0, cropTop))
+      + ((transition && !transition.verified) || (!transitions && !continuityVerified) ? separatorHeight : 0)
     if (height + addition > maxHeight) {
       groups.push([start, index])
       start = index
@@ -336,7 +420,9 @@ async function composeLongImages(frames, { overlaps = [], continuityVerified = f
   const output = []
   for (const [groupStart, groupEnd] of groups) {
     const chunk = frames.slice(groupStart, groupEnd)
-    if (continuityVerified) {
+    if (transitions) {
+      output.push(await stitchFramesWithTransitions(chunk, transitions.slice(groupStart, groupEnd - 1), separatorHeight))
+    } else if (continuityVerified) {
       const chunkOverlaps = overlaps.slice(groupStart, groupEnd - 1)
       output.push((await stitchFramesWithOverlaps(chunk, chunkOverlaps, chunk.length))[0])
     } else output.push(await stackFramesWithSeparators(chunk, separatorHeight))
@@ -367,4 +453,4 @@ async function textSeamsAreValid(frames, seams) {
   })
 }
 
-module.exports = { imageInfo, cropImage, imagesMeanDiff, imagesSimilar, imageRegionsStable, imageHasVisibleContent, imageLooksLoaded, stackFramesInGroups, verifyFrameOverlap, stitchFramesInGroups, stitchFramesWithOverlaps, stackFramesWithSeparators, composeLongImages, cropFramesAtTextSeams, textSeamsAreValid }
+module.exports = { imageInfo, cropImage, imagesMeanDiff, imagesSimilar, imageRegionsStable, imageHasVisibleContent, imageLooksLoaded, alignCropToWhitespace, stackFramesInGroups, verifyFrameOverlap, stitchFramesInGroups, stitchFramesWithOverlaps, stackFramesWithSeparators, stitchFramesWithTransitions, composeLongImages, cropFramesAtTextSeams, textSeamsAreValid }

@@ -9,6 +9,7 @@
     "check": "node --check src/main/index.js && node --check src/main/preload.js && node --check src/renderer/renderer.js && node --check src/questions.js && node --check src/runtime-paths.js && node --check src/cli.js && node --check src/automation/*.js && node --check scripts/*.js",
     "test": "node --test tests/node/**/*.test.js",
     "run:android": "node src/cli.js",
+    "setup": "npm install && npm run prepare:runtime",
     "prepare:runtime": "node scripts/prepare-runtime.js && node scripts/prepare-appium.js",
     "dist": "npm run prepare:runtime && electron-builder"
   },

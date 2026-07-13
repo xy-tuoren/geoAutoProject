@@ -4,9 +4,9 @@ const crypto = require('node:crypto')
 const { execFile } = require('node:child_process')
 const { remote } = require('webdriverio')
 const { startAppium } = require('./appium-server')
-const { sleep, createBatchDirectory, findResumableBatch, questionArtifactDirectory } = require('./utils')
-const { hierarchyIsLoading, parseBounds, boundsIntersect, boundsCenterY, estimateVerticalScrollShift, replyTailOnScreen, questionVisible, findChatScrollBounds, validateCaptureViewport, visibleLabelBounds, visibleLabelBoundsList, boundsForNodeAttribute, boundsListForNodeAttribute, evidencePanelBounds, panelIsClipped, evidenceMinimumHeight, referenceProductsSection } = require('./hierarchy')
-const { imageInfo, cropImage, imagesSimilar, imageRegionsStable, imageHasVisibleContent, imageLooksLoaded, verifyFrameOverlap, composeLongImages } = require('./images')
+const { sleep, createBatchDirectory, questionArtifactDirectory } = require('./utils')
+const { hierarchyIsLoading, parseBounds, boundsIntersect, boundsCenterY, estimateVerticalScrollShift, replyTailOnScreen, questionVisible, findChatScrollBounds, validateCaptureViewport, floatingScrollControlBounds, visibleLabelBounds, visibleLabelBoundsList, boundsForNodeAttribute, boundsListForNodeAttribute, evidencePanelBounds, evidenceMinimumHeight, referenceProductsSection } = require('./hierarchy')
+const { imageInfo, cropImage, imagesSimilar, imageRegionsStable, imageLooksLoaded, alignCropToWhitespace, verifyFrameOverlap, composeLongImages } = require('./images')
 
 const DEFAULT_PACKAGE = 'com.aurora.xiaohe.aidoctor'
 const APPIUM_HELPER_PACKAGES = [
@@ -179,15 +179,56 @@ function explainSessionError(error) {
   return error
 }
 
-async function buildReplyImages(frames, continuityVerified, overlaps = [], maxHeight = DEFAULT_MAX_LONG_IMAGE_HEIGHT) {
-  if (continuityVerified) return composeLongImages(frames, { overlaps, continuityVerified, maxHeight })
-  return composeLongImages(frames, { maxHeight })
+function fallbackOverlapEstimates(frameHeight, measuredShift, candidateOverlaps = []) {
+  const hasMeasuredShift = Number.isFinite(measuredShift) && measuredShift >= 0 && measuredShift < frameHeight
+  const candidates = candidateOverlaps
+    .filter(value => Number.isFinite(value) && value >= 0 && value < frameHeight)
+    .sort((a, b) => a - b)
+  const estimates = candidates.length >= 2 && candidates.at(-1) - candidates[0] <= 3 ? candidates : []
+  if (hasMeasuredShift) estimates.push(frameHeight - measuredShift)
+  return { estimates, hasMeasuredShift }
+}
+
+function conservativeFallbackOverlap(frameHeight, measuredShift, _requestedShift, candidateOverlaps = []) {
+  const { estimates, hasMeasuredShift } = fallbackOverlapEstimates(frameHeight, measuredShift, candidateOverlaps)
+  if (!estimates.length) return 0
+  // Crop no farther than the smallest independent overlap estimate, leaving
+  // roughly two text lines as insurance against hierarchy/layout jitter.
+  const uncertainty = hasMeasuredShift
+    ? Math.max(72, Math.ceil(frameHeight * 0.06))
+    : Math.max(96, Math.ceil(frameHeight * 0.08))
+  return Math.max(0, Math.floor(Math.min(...estimates) - uncertainty))
+}
+
+async function buildReplyImages(frames, { transitions = [], maxHeight = DEFAULT_MAX_LONG_IMAGE_HEIGHT } = {}) {
+  return composeLongImages(frames, { transitions, maxHeight, separatorHeight: 24 })
+}
+
+async function prepareEmbeddedEvidence({ source, tap, delay, waitForStable, log }, bounds) {
+  const minimum = evidenceMinimumHeight(bounds)
+  const xml = await source()
+  const panel = evidencePanelBounds(xml, minimum)
+  if (!panel) return { found: false, expanded: false, capture: await waitForStable(bounds) }
+  const viewportHeight = bounds[3] - bounds[1]
+  const collapsed = panel[3] - panel[1] <= viewportHeight * 0.16
+  if (collapsed) {
+    log('capture: 在回答截图前展开引用资料，使其直接进入回答长图')
+    await tap((panel[0] + panel[2]) / 2, (panel[1] + panel[3]) / 2)
+    await delay(800)
+  }
+  const capture = await waitForStable(bounds)
+  const finalPanel = evidencePanelBounds(capture.xml || '', minimum)
+  const expanded = Boolean(finalPanel && finalPanel[3] - finalPanel[1] > viewportHeight * 0.16)
+  if (expanded) log('capture: 引用资料已展开并合并到回答截图')
+  else if (collapsed) log('capture: 引用资料点击后未确认展开，保留当前状态继续回答截图')
+  return { found: true, expanded, capture }
 }
 
 function createRunner(options) {
   let cancelled = false
   let driver = null
   let server = null
+  let nativeScrollGestureSupported = true
   const checkCancelled = () => { if (cancelled) throw new CancelledError() }
   const log = text => options.log(`${text}${String(text).endsWith('\n') ? '' : '\n'}`)
 
@@ -329,11 +370,29 @@ function createRunner(options) {
   async function swipeChat(bounds, direction, fraction = 0.6) {
     const [left, top, right, bottom] = bounds
     const height = bottom - top
-    const x = left + (right - left) * 0.84
     const distance = Math.max(80, Math.floor(height * Math.min(0.7, Math.max(0.2, fraction))))
-    const center = Math.floor((top + bottom) / 2)
-    if (direction === 'up') await swipe(x, center - Math.floor(distance / 2), center + Math.ceil(distance / 2), 650)
-    else await swipe(x, center + Math.ceil(distance / 2), center - Math.floor(distance / 2), 650)
+    const percent = distance / height
+    if (nativeScrollGestureSupported) {
+      try {
+        await driver.execute('mobile: scrollGesture', {
+          left: Math.round(left),
+          top: Math.round(top),
+          width: Math.round(right - left),
+          height: Math.round(height),
+          direction,
+          percent,
+          speed: 800,
+        })
+      } catch {
+        nativeScrollGestureSupported = false
+      }
+    }
+    if (!nativeScrollGestureSupported) {
+      const x = left + (right - left) * 0.84
+      const center = Math.floor((top + bottom) / 2)
+      if (direction === 'up') await swipe(x, center - Math.floor(distance / 2), center + Math.ceil(distance / 2), 900)
+      else await swipe(x, center + Math.ceil(distance / 2), center - Math.floor(distance / 2), 900)
+    }
     await sleep(300)
     return distance
   }
@@ -372,27 +431,37 @@ function createRunner(options) {
     return questionVisible(await source(), question, bounds)
   }
 
-  async function captureFullReplyFrames(question, maxPages = 30) {
+  async function captureFullReplyFrames(question, maxPages = 30, { scrollFraction = 0.45, allowFullRetry = true } = {}) {
     const size = await driver.getWindowSize()
-    const bounds = findChatScrollBounds(await source(), size)
+    const initialXml = await source()
+    const bounds = findChatScrollBounds(initialXml, size)
+    const floatingControl = floatingScrollControlBounds(initialXml, bounds)
+    if (floatingControl) {
+      const safeBottom = floatingControl[1] - Math.max(8, Math.floor((bounds[3] - bounds[1]) * 0.008))
+      if (safeBottom - bounds[1] >= size.height * 0.3) bounds[3] = safeBottom
+    }
     validateCaptureViewport(size, bounds)
-    log(`capture: chat bounds=${bounds.join(',')}`)
+    log(`capture: chat bounds=${bounds.join(',')}${floatingControl ? '（已避开固定向下按钮）' : ''}`)
     if (!(await scrollQuestionIntoView(question, bounds))) log('capture: question not found while scrolling up; capturing from current position')
+    const evidence = await prepareEmbeddedEvidence({
+      source,
+      tap,
+      delay: sleep,
+      waitForStable: waitForStableReplyRegion,
+      log,
+    }, bounds)
     const frames = []
-    const overlaps = []
+    const transitions = []
     let noProgress = 0
-    let continuityVerified = true
     let recaptureCount = 0
-    let fallbackReason = null
-    let evidenceSeen = false
+    const fallbackReasons = []
     let productsSeen = false
     const observeAuxiliaryCards = xml => {
-      evidenceSeen ||= Boolean(evidencePanelBounds(xml, evidenceMinimumHeight(bounds)))
       productsSeen ||= Boolean(referenceProductsSection(xml)
         || visibleLabelBounds(xml, '参考药品')
         || visibleLabelBounds(xml, '推荐药品'))
     }
-    let capture = await waitForStableReplyRegion(bounds)
+    let capture = evidence.capture
     let frame = capture.frame
     for (let page = 0; page < maxPages; page += 1) {
       const xml = capture.xml || await source()
@@ -400,7 +469,7 @@ function createRunner(options) {
       if (!frames.length || !(await imagesSimilar(frames.at(-1), frame, 3))) { frames.push(frame); log(`capture: page ${frames.length}`) }
       if (replyTailOnScreen(xml, bounds) && !hierarchyIsLoading(xml)) { log('capture: reached on-screen reply tail'); break }
       const before = frame
-      const shift = await swipeChat(bounds, 'down', 0.45)
+      const shift = await swipeChat(bounds, 'down', scrollFraction)
       let afterCapture = await waitForStableReplyRegion(bounds)
       let after = afterCapture.frame
       if (await imagesSimilar(before, after, 3)) {
@@ -409,48 +478,68 @@ function createRunner(options) {
       } else {
         let afterXml = afterCapture.xml || await source()
         observeAuxiliaryCards(afterXml)
-        const measuredShift = estimateVerticalScrollShift(xml, afterXml, bounds)
-        const expectedOverlap = Math.max(12, (await imageInfo(before)).height - (measuredShift || shift))
-        if (continuityVerified) {
-          let verifiedOverlap = null
+        const frameHeight = (await imageInfo(before)).height
+        let measuredShift = estimateVerticalScrollShift(xml, afterXml, bounds)
+        let reliableMeasuredShift = measuredShift !== null && measuredShift <= shift * 1.35 ? measuredShift : null
+        const expectedShift = reliableMeasuredShift ?? shift
+        let expectedOverlap = Math.max(12, frameHeight - expectedShift)
+        let transition
+        try {
+          if (!afterCapture.stable) throw new Error('滚动后的局部画面未稳定')
+          transition = { verified: true, overlap: await verifyFrameOverlap(before, after, expectedOverlap) }
+        } catch (error) {
+          recaptureCount += 1
+          await sleep(450)
+          afterCapture = await waitForStableReplyRegion(bounds, 3_000)
+          after = afterCapture.frame
+          afterXml = afterCapture.xml || await source()
+          observeAuxiliaryCards(afterXml)
+          measuredShift = estimateVerticalScrollShift(xml, afterXml, bounds)
+          reliableMeasuredShift = measuredShift !== null && measuredShift <= shift * 1.35 ? measuredShift : null
+          const retryExpectedShift = reliableMeasuredShift ?? shift
+          expectedOverlap = Math.max(12, frameHeight - retryExpectedShift)
           try {
-            if (!afterCapture.stable) throw new Error('滚动后的局部画面未稳定')
-            verifiedOverlap = await verifyFrameOverlap(before, after, expectedOverlap)
-          } catch (error) {
-            recaptureCount += 1
-            await sleep(450)
-            afterCapture = await waitForStableReplyRegion(bounds, 3_000)
-            after = afterCapture.frame
-            afterXml = afterCapture.xml || await source()
-            observeAuxiliaryCards(afterXml)
-            try {
-              if (!afterCapture.stable) throw new Error('重采后的局部画面仍未稳定')
-              verifiedOverlap = await verifyFrameOverlap(before, after, expectedOverlap)
-            } catch (retryError) {
-              continuityVerified = false
-              fallbackReason = retryError.message || error.message
-              log(`capture: 无法校验相邻页面重叠，改为完整分屏保存：${fallbackReason}`)
-            }
+            if (!afterCapture.stable) throw new Error('重采后的局部画面仍未稳定')
+            transition = { verified: true, overlap: await verifyFrameOverlap(before, after, expectedOverlap) }
+          } catch (retryError) {
+            const reason = retryError.message || error.message
+            const fallbackTarget = conservativeFallbackOverlap(frameHeight, reliableMeasuredShift, shift, retryError.candidateOverlaps)
+            const fallbackOverlap = fallbackTarget > 0 ? await alignCropToWhitespace(after, fallbackTarget) : 0
+            transition = { verified: false, fallbackOverlap, reason }
+            fallbackReasons.push(reason)
+            log(`capture: 接缝无法精确校验，下一屏安全起点=${fallbackOverlap}px，并保留重复内容和浅色留白：${reason}`)
           }
-          if (verifiedOverlap !== null) overlaps.push(verifiedOverlap)
         }
-        if (!(await imagesSimilar(frames.at(-1), after, 3))) { frames.push(after); log(`capture: page ${frames.length}`) }
-        noProgress = 0
+        if (!(await imagesSimilar(frames.at(-1), after, 3))) {
+          frames.push(after)
+          transitions.push(transition)
+          log(`capture: page ${frames.length}`)
+          noProgress = 0
+        } else noProgress += 1
         frame = after
         capture = afterCapture
         if (replyTailOnScreen(afterXml, bounds) && !hierarchyIsLoading(afterXml)) { log('capture: reached on-screen reply tail after swipe'); break }
       }
     }
-    return {
+    const result = {
       frames: frames.length ? frames : [await cropImage(await screenshot(), bounds)],
-      overlaps,
+      transitions,
       bounds,
-      continuityVerified,
       recaptureCount,
-      fallbackReason,
-      evidenceSeen,
+      fullRetryCount: 0,
+      fallbackReasons,
+      evidenceEmbedded: evidence.found,
+      evidenceExpanded: evidence.expanded,
       productsSeen,
     }
+    if (fallbackReasons.length && allowFullRetry) {
+      log('capture: 首轮存在不可靠接缝，从问题顶部以 30% 步长整题重采一次')
+      const retry = await captureFullReplyFrames(question, maxPages, { scrollFraction: 0.3, allowFullRetry: false })
+      retry.recaptureCount += recaptureCount
+      retry.fullRetryCount = 1
+      return retry
+    }
+    return result
   }
 
   async function waitForProductImagesReady(listBounds, timeout = 12_000) {
@@ -585,33 +674,6 @@ function createRunner(options) {
     } finally { await closeReferenceProductsDrawer() }
   }
 
-  async function captureEvidence(question, { seenDuringReply = true } = {}) {
-    if (!seenDuringReply) { log('capture: 回答滚动过程中未发现可展开的引用资料卡片，跳过重复扫描'); return null }
-    const size = await driver.getWindowSize()
-    const chatBounds = findChatScrollBounds(await source(), size)
-    validateCaptureViewport(size, chatBounds)
-    if (!(await scrollQuestionIntoView(question, chatBounds))) { log('capture: 未定位当前问题，跳过引用资料卡片'); return null }
-    const minimum = evidenceMinimumHeight(chatBounds)
-    let panel = evidencePanelBounds(await source(), minimum)
-    if (!panel) { log('capture: 本回答未出现可展开的引用资料卡片'); return null }
-    log('capture: 已发现引用资料卡片，正在展开并截图')
-    const tolerance = Math.max(2, Math.floor((chatBounds[3] - chatBounds[1]) * 0.006))
-    for (let attempt = 0; attempt < 3 && panelIsClipped(panel, chatBounds, tolerance); attempt += 1) {
-      await swipeChat(chatBounds, panel[3] >= chatBounds[3] - tolerance ? 'down' : 'up')
-      panel = evidencePanelBounds(await source(), minimum) || panel
-    }
-    if (panel[3] - panel[1] <= (chatBounds[3] - chatBounds[1]) * 0.16) {
-      await tap((panel[0] + panel[2]) / 2, (panel[1] + panel[3]) / 2)
-      await sleep(800)
-      panel = evidencePanelBounds(await source(), minimum) || panel
-    }
-    const padding = 18
-    const image = await cropImage(await screenshot(), [panel[0] - padding, panel[1] - padding, panel[2] + padding, panel[3] + padding])
-    if (!(await imageHasVisibleContent(image))) { log('capture: 引用资料卡片截图为空，已跳过'); return null }
-    log('capture: 引用资料截图完成')
-    return image
-  }
-
   let payloadMaxLongImageHeight = DEFAULT_MAX_LONG_IMAGE_HEIGHT
 
   async function saveArtifacts({ outDir, stem, question, status, xml, meta, stitch = true }) {
@@ -623,10 +685,11 @@ function createRunner(options) {
     if (stitch) {
       const replyCaptureStarted = Date.now()
       const capture = await captureFullReplyFrames(question)
-      const { frames, overlaps, bounds, recaptureCount, fallbackReason, evidenceSeen, productsSeen } = capture
+      const { frames, transitions, bounds, recaptureCount, fullRetryCount, fallbackReasons, evidenceEmbedded, evidenceExpanded, productsSeen } = capture
       const seamsTotal = Math.max(0, frames.length - 1)
-      const continuityVerified = capture.continuityVerified && overlaps.length === seamsTotal
-      const images = await buildReplyImages(frames, continuityVerified, overlaps, payloadMaxLongImageHeight)
+      const seamsVerified = transitions.filter(transition => transition.verified).length
+      const continuityVerified = transitions.length === seamsTotal && seamsVerified === seamsTotal
+      const images = await buildReplyImages(frames, { transitions, maxHeight: payloadMaxLongImageHeight })
       const replyCaptureMs = Date.now() - replyCaptureStarted
       const paths = []
       for (const [index, image] of images.entries()) { const file = path.join(outDir, `${stem}_${String(index + 1).padStart(3, '0')}.png`); await fs.writeFile(file, image); paths.push(file) }
@@ -636,18 +699,22 @@ function createRunner(options) {
         stitched_pages: frames.length,
         screenshot_parts: paths,
         chat_bounds: bounds,
-        reply_capture_mode: continuityVerified ? 'verified_overlap_long_image' : 'separated_viewports_long_image',
+        reply_capture_mode: continuityVerified ? 'verified_overlap_long_image' : 'safe_overlap_long_image',
         reply_continuity_verified: continuityVerified,
         reply_seams_total: seamsTotal,
-        reply_seams_verified: overlaps.length,
+        reply_seams_verified: seamsVerified,
+        reply_seams_with_safe_overlap: seamsTotal - seamsVerified,
         reply_recapture_count: recaptureCount,
+        reply_full_retry_count: fullRetryCount,
+        reply_evidence_embedded: evidenceEmbedded,
+        reply_evidence_expanded: evidenceExpanded,
         reply_capture_ms: replyCaptureMs,
-        ...(fallbackReason ? { reply_fallback_reason: fallbackReason } : {}),
+        ...(fallbackReasons.length ? { reply_fallback_reason: fallbackReasons.join('；') } : {}),
         long_image_max_height: payloadMaxLongImageHeight,
       }
-      log(`capture: 回答截图完成，帧=${frames.length}，接缝=${overlaps.length}/${seamsTotal}，重采=${recaptureCount}，模式=${resultMeta.reply_capture_mode}，耗时=${replyCaptureMs}ms`)
-      // The main reply sweep ends near the tail. Check products first, then
-      // return to the question once for evidence instead of traversing twice.
+      log(`capture: 回答截图完成，帧=${frames.length}，精确接缝=${seamsVerified}/${seamsTotal}，安全重复接缝=${seamsTotal - seamsVerified}，重采=${recaptureCount}，模式=${resultMeta.reply_capture_mode}，耗时=${replyCaptureMs}ms`)
+      // Evidence is already expanded into the first reply frame. Only the
+      // interactive reference-products drawer still needs a separate capture.
       const products = await captureReferenceProducts(question, { seenDuringReply: productsSeen })
       if (products) {
         const paths = []
@@ -664,8 +731,6 @@ function createRunner(options) {
           reference_products_capture_complete: products.imagesReady && products.confirmedEnd,
         })
       }
-      const evidence = await captureEvidence(question, { seenDuringReply: evidenceSeen })
-      if (evidence) { const file = path.join(outDir, `${stem}_资料.png`); await fs.writeFile(file, evidence); resultMeta.evidence_screenshot = file }
     } else await fs.writeFile(screenshotPath, await screenshot())
     await fs.writeFile(xmlPath, xml || await normalizedHierarchy(), 'utf8')
     await fs.writeFile(metadataPath, JSON.stringify({ question, status, created_at: new Date().toISOString().replace(/\.\d{3}Z$/, ''), screenshot: screenshotPath, hierarchy: xmlPath, ...resultMeta }, null, 2), 'utf8')
@@ -687,10 +752,7 @@ function createRunner(options) {
     async run(payload) {
       payloadMaxLongImageHeight = maxLongImageHeight(payload.maxLongImageHeight)
       const outputRoot = path.resolve(payload.outputDir)
-      const resumable = payload.resume === true ? await findResumableBatch(outputRoot, payload.questions) : null
-      const batchDirectory = resumable?.batchDirectory || await createBatchDirectory(outputRoot)
-      const completed = new Set(resumable?.completed || [])
-      if (resumable) log(`断点续跑：复用 ${batchDirectory}，跳过 ${completed.size} 个已完成问题`)
+      const batchDirectory = await createBatchDirectory(outputRoot)
       try {
         server = await startAppium({ root: options.root, appiumHome: options.appiumHome, adbPath: options.adbPath, log })
         const expectedServerVersion = bundledUiAutomator2ServerVersion(options.appiumHome)
@@ -729,7 +791,6 @@ function createRunner(options) {
         log(`device=${payload.serial} package=${DEFAULT_PACKAGE} batch=${batchDirectory}`)
         for (const [zeroIndex, question] of payload.questions.entries()) {
           checkCancelled()
-          if (completed.has(zeroIndex)) { log(`[${zeroIndex + 1}/${payload.questions.length}] skipped: ${question}`); continue }
           log(`[${zeroIndex + 1}/${payload.questions.length}] asking: ${question}`)
           log(JSON.stringify(await askOnce(payload, batchDirectory, question, zeroIndex + 1)))
         }
@@ -753,6 +814,8 @@ module.exports = {
   explainSessionError,
   findOptionalElement,
   buildReplyImages,
+  conservativeFallbackOverlap,
+  prepareEmbeddedEvidence,
   appiumHelpersAlreadyInstalled,
   adbPackageVersion,
   adbConnectionLost,

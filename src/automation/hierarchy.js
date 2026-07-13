@@ -34,13 +34,15 @@ function boundsCenterY(bounds) { return Math.floor((bounds[1] + bounds[3]) / 2) 
 function estimateVerticalScrollShift(beforeXml, afterXml, region) {
   const labels = xml => {
     const result = new Map()
+    const ambiguous = new Set()
     for (const attrs of iterNodes(xml)) {
       if (!nodeIsVisible(attrs)) continue
       const label = nodeAttr(attrs, 'text') || nodeAttr(attrs, 'content-desc')
       const rawBounds = nodeAttr(attrs, 'bounds')
-      if (!label || label.length < 3 || !rawBounds) continue
+      if (!label || label.length < 3 || !rawBounds || ambiguous.has(label)) continue
       const bounds = parseBounds(rawBounds)
-      if (!boundsIntersect(bounds, region) || result.has(label)) continue
+      if (!boundsIntersect(bounds, region)) continue
+      if (result.has(label)) { result.delete(label); ambiguous.add(label); continue }
       result.set(label, boundsCenterY(bounds))
     }
     return result
@@ -56,7 +58,12 @@ function estimateVerticalScrollShift(beforeXml, afterXml, region) {
   }
   if (!shifts.length) return null
   shifts.sort((a, b) => a - b)
-  return shifts[Math.floor(shifts.length / 2)]
+  if (shifts.length === 1) return shifts[0]
+  const median = shifts[Math.floor(shifts.length / 2)]
+  const tolerance = Math.max(24, Math.floor(maxShift * 0.025))
+  const inliers = shifts.filter(shift => Math.abs(shift - median) <= tolerance)
+  if (inliers.length < Math.ceil(shifts.length * 0.6)) return null
+  return inliers[Math.floor(inliers.length / 2)]
 }
 
 function sharedTextSeam(beforeXml, afterXml, region) {
@@ -165,6 +172,28 @@ function validateCaptureViewport(screenSize, bounds) {
   if (right - left < screenSize.width * 0.7 || bottom - top < screenSize.height * 0.2) throw new Error(`无法可靠识别聊天区域：${bounds.join(',')}，请确认小荷停留在聊天页面。`)
 }
 
+function floatingScrollControlBounds(xml, chatBounds) {
+  const width = chatBounds[2] - chatBounds[0]
+  const height = chatBounds[3] - chatBounds[1]
+  const centerX = (chatBounds[0] + chatBounds[2]) / 2
+  const candidates = iterNodes(xml).flatMap(attrs => {
+    if (!nodeIsVisible(attrs) || nodeAttr(attrs, 'clickable') !== 'true') return []
+    if (nodeAttr(attrs, 'text') || nodeAttr(attrs, 'content-desc')) return []
+    const rawBounds = nodeAttr(attrs, 'bounds')
+    if (!rawBounds) return []
+    const bounds = parseBounds(rawBounds)
+    const itemWidth = bounds[2] - bounds[0]
+    const itemHeight = bounds[3] - bounds[1]
+    const itemCenterX = (bounds[0] + bounds[2]) / 2
+    if (bounds[0] < chatBounds[0] || bounds[2] > chatBounds[2] || bounds[1] < chatBounds[1] || bounds[3] > chatBounds[3]) return []
+    if (itemWidth < width * 0.07 || itemWidth > width * 0.2 || itemHeight < itemWidth * 0.75 || itemHeight > itemWidth * 1.25) return []
+    if (Math.abs(itemCenterX - centerX) > width * 0.08 || bounds[1] < chatBounds[1] + height * 0.6) return []
+    return [bounds]
+  })
+  candidates.sort((a, b) => b[1] - a[1])
+  return candidates[0] || null
+}
+
 function visibleLabelBounds(xml, label) { return visibleNodesWithLabel(xml, label)[0] || null }
 
 function visibleLabelBoundsList(xml, label) { return visibleNodesWithLabel(xml, label) }
@@ -266,4 +295,4 @@ function referenceProductsSection(xml) {
   return { panel, cardsTop, tap }
 }
 
-module.exports = { LOADING_TEXT_MARKERS, iterNodes, nodeAttr, nodeIsVisible, parseBounds, boundsIntersect, boundsCenterY, estimateVerticalScrollShift, sharedTextSeam, hierarchyIsLoading, visibleNodesWithLabel, replyTailOnScreen, questionVisible, findChatScrollBounds, validateCaptureViewport, visibleLabelBounds, visibleLabelBoundsList, boundsForNodeAttribute, boundsListForNodeAttribute, evidencePanelBounds, panelIsClipped, evidenceMinimumHeight, parseNodeTree, referenceProductsSection }
+module.exports = { LOADING_TEXT_MARKERS, iterNodes, nodeAttr, nodeIsVisible, parseBounds, boundsIntersect, boundsCenterY, estimateVerticalScrollShift, sharedTextSeam, hierarchyIsLoading, visibleNodesWithLabel, replyTailOnScreen, questionVisible, findChatScrollBounds, validateCaptureViewport, floatingScrollControlBounds, visibleLabelBounds, visibleLabelBoundsList, boundsForNodeAttribute, boundsListForNodeAttribute, evidencePanelBounds, panelIsClipped, evidenceMinimumHeight, parseNodeTree, referenceProductsSection }

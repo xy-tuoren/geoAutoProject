@@ -30,20 +30,34 @@ async function waitForServer(port, processRef) {
   throw new Error(`Appium 服务启动超时：${lastError?.message || '未返回状态'}。`)
 }
 
+function prepareAndroidSdk({ appiumHome, adbPath }) {
+  const bundledTools = path.dirname(adbPath)
+  const sdkRoot = path.join(appiumHome, 'android-sdk')
+  const platformTools = path.join(sdkRoot, 'platform-tools')
+  const expectedAdb = path.join(platformTools, path.basename(adbPath))
+  if (!fs.existsSync(expectedAdb)) {
+    if (!fs.existsSync(adbPath)) throw new Error(`内置 ADB 不可用：${adbPath}`)
+    fs.mkdirSync(sdkRoot, { recursive: true })
+    fs.cpSync(bundledTools, platformTools, { recursive: true, force: true })
+  }
+  return sdkRoot
+}
+
 async function startAppium({ root, appiumHome, adbPath, log }) {
   if (!fs.existsSync(appiumEntry(root))) throw new Error('Appium 未安装。请重新安装桌面应用。')
   if (!fs.existsSync(path.join(appiumHome, 'node_modules', '.cache', 'appium', 'extensions.yaml'))) {
     throw new Error('内置 UiAutomator2 驱动缺失。请重新安装桌面应用。')
   }
   const port = await choosePort()
+  const androidSdkRoot = prepareAndroidSdk({ appiumHome, adbPath })
   const env = {
     ...process.env,
     APPIUM_HOME: appiumHome,
-    // UiAutomator2 only needs platform-tools for this application. Present the
-    // bundled directory as a minimal Android SDK so Appium never depends on a
-    // developer-installed SDK.
-    ANDROID_HOME: path.dirname(path.dirname(adbPath)),
-    ANDROID_SDK_ROOT: path.dirname(path.dirname(adbPath)),
+    // Appium requires the standard Android SDK layout: platform-tools/adb.
+    // The bundled binaries are platform-specific, so copy them into a writable
+    // cache that presents exactly that layout.
+    ANDROID_HOME: androidSdkRoot,
+    ANDROID_SDK_ROOT: androidSdkRoot,
     PATH: `${path.dirname(adbPath)}${path.delimiter}${process.env.PATH || ''}`,
   }
   if (process.versions.electron) env.ELECTRON_RUN_AS_NODE = '1'
@@ -73,4 +87,4 @@ async function startAppium({ root, appiumHome, adbPath, log }) {
   }
 }
 
-module.exports = { startAppium }
+module.exports = { startAppium, prepareAndroidSdk }

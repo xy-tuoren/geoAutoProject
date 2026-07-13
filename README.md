@@ -10,11 +10,12 @@
 ./start_electron.sh
 ```
 
-Windows 开发环境执行 `npm install` 后运行 `npm start`。Electron 面板支持设备刷新、问题文件导入、目录选择、日志流、停止任务和响应式布局；底层由 Appium UiAutomator2 执行。
+Windows 开发环境在项目目录执行一次 `npm run setup`，再运行 `npm start`。`setup` 会安装 npm 依赖、准备内置 ADB，并注册 UiAutomator2 驱动。Electron 面板支持设备刷新、问题文件导入、目录选择、日志流、停止任务和响应式布局；底层由 Appium UiAutomator2 执行。
 
 常用开发命令：
 
 ```bash
+npm run setup      # 首次初始化：安装依赖及自动化运行时
 npm run check      # Node 语法检查
 npm test           # 自动化核心逻辑测试
 npm run dist       # 准备内置运行时并打包桌面应用
