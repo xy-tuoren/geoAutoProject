@@ -295,7 +295,11 @@ function createRunner(options) {
   }
 
   async function tapNewSession() {
-    const newSession = await elementExists('android=new UiSelector().description("开启新会话")')
+    // Compose exposes the icon's label on a non-clickable child while its
+    // clickable hit target is the parent. Clicking the label works on some
+    // devices but silently fails on others, so prefer the parent when present.
+    const newSession = await elementExists('//*[@content-desc="开启新会话"]/..')
+      || await elementExists('android=new UiSelector().description("开启新会话")')
     if (!newSession) return false
     await newSession.click()
     await sleep(1_000)
