@@ -13,3 +13,7 @@ vendor/platform-tools/*
 vendor/appium-home/
 vendor/appium-home.zip
 node_modules/
+python/.venv/
+python/build/
+python/dist/
+vendor/u2-runtime/

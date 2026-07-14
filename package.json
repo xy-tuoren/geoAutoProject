@@ -10,7 +10,8 @@
     "test": "node --test tests/node/**/*.test.js",
     "run:android": "node src/cli.js",
     "setup": "npm install && npm run prepare:runtime",
-    "prepare:runtime": "node scripts/prepare-runtime.js && node scripts/prepare-appium.js",
+    "prepare:u2": "node scripts/build-u2-runtime.js",
+    "prepare:runtime": "node scripts/prepare-runtime.js && npm run prepare:u2",
     "dist": "npm run prepare:runtime && electron-builder"
   },
   "devDependencies": {
@@ -19,10 +20,7 @@
   },
   "dependencies": {
     "adm-zip": "^0.5.18",
-    "appium": "^3.5.2",
-    "appium-uiautomator2-driver": "^8.1.0",
     "sharp": "^0.35.3",
-    "webdriverio": "^9.29.1",
     "xlsx": "^0.18.5"
   },
   "build": {
@@ -36,7 +34,7 @@
     "extraResources": [
       { "from": "vendor/platform-tools/darwin", "to": "vendor/platform-tools/darwin" },
       { "from": "vendor/platform-tools/win32", "to": "vendor/platform-tools/win32" },
-      { "from": "vendor/appium-home.zip", "to": "vendor/appium-home.zip" }
+      { "from": "vendor/u2-runtime", "to": "vendor/u2-runtime" }
     ],
     "mac": { "target": ["dmg"], "category": "public.app-category.productivity" },
     "win": { "target": ["nsis"] }

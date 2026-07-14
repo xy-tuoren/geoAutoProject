@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 const { createRunner } = require('./automation/runner')
-const { bundledAdbPath, projectRoot, vendorAppiumHome } = require('./runtime-paths')
+const { bundledAdbPath, projectRoot } = require('./runtime-paths')
 
 function usage() {
   console.log('用法：npm run run:android -- --serial <设备序列号> --output-dir <目录> [--timeout <秒>] [--max-long-image-height <像素>] [--new-session] <问题>')
@@ -33,7 +33,7 @@ async function main() {
   const adb = bundledAdbPath({ root })
   const runner = createRunner({
     root,
-    appiumHome: vendorAppiumHome(root),
+    isPackaged: false,
     adbPath: adb,
     log: text => process.stdout.write(text),
   })

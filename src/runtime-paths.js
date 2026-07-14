@@ -26,16 +26,23 @@ function resolveAdbPath(options = {}) {
   return fs.existsSync(bundled) ? bundled : (process.env.ADBUTILS_ADB_PATH || adbExecutableName())
 }
 
-function vendorAppiumHome(root = projectRoot()) {
-  return path.join(root, 'vendor', 'appium-home')
+function u2RuntimePlatformDirectory(options = {}) {
+  const platform = options.platform || process.platform
+  const arch = options.arch || process.arch
+  return path.join(bundledAssetsRoot(options), 'vendor', 'u2-runtime', `${platform}-${arch}`)
 }
 
-function vendorAppiumHomeArchive(root = projectRoot()) {
-  return path.join(root, 'vendor', 'appium-home.zip')
+function u2ExecutableName(platform = process.platform) {
+  return platform === 'win32' ? 'geoauto-u2.exe' : 'geoauto-u2'
 }
 
-function appiumEntry(root = projectRoot()) {
-  return path.join(root, 'node_modules', 'appium', 'build', 'lib', 'main.js')
+function bundledU2Executable(options = {}) {
+  const platform = options.platform || process.platform
+  return path.join(u2RuntimePlatformDirectory(options), u2ExecutableName(platform))
+}
+
+function pythonProjectDirectory(root = projectRoot()) {
+  return path.join(root, 'python')
 }
 
 module.exports = {
@@ -45,7 +52,8 @@ module.exports = {
   bundledPlatformToolsDirectory,
   bundledAdbPath,
   resolveAdbPath,
-  vendorAppiumHome,
-  vendorAppiumHomeArchive,
-  appiumEntry,
+  u2RuntimePlatformDirectory,
+  u2ExecutableName,
+  bundledU2Executable,
+  pythonProjectDirectory,
 }

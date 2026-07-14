@@ -1,12 +1,10 @@
 const { app, BrowserWindow, dialog, ipcMain, clipboard } = require('electron')
 const { execFile } = require('node:child_process')
 const fs = require('node:fs/promises')
-const fsSync = require('node:fs')
 const path = require('node:path')
-const AdmZip = require('adm-zip')
 const { createRunner, CancelledError } = require('../automation/runner')
 const { loadQuestionFile } = require('../questions')
-const { projectRoot, bundledAssetsRoot, resolveAdbPath, vendorAppiumHome, vendorAppiumHomeArchive } = require('../runtime-paths')
+const { projectRoot, resolveAdbPath } = require('../runtime-paths')
 
 const root = projectRoot()
 let activeTask = null
@@ -28,28 +26,6 @@ function adbCommand() {
 }
 
 function appRoot() { return app.getAppPath() }
-
-async function appiumHome() {
-  const assetsRoot = bundledAssetsRoot({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath, root })
-  const source = vendorAppiumHome(assetsRoot)
-  if (!app.isPackaged) return source
-  const archive = vendorAppiumHomeArchive(assetsRoot)
-  const target = path.join(app.getPath('userData'), 'appium-home')
-  const marker = path.join(target, '.bundled-version')
-  const version = app.getVersion()
-  const installed = await fs.readFile(marker, 'utf8').catch(() => '')
-  if (installed !== version) {
-    log('解压内置 Appium 驱动到', target)
-    await fs.rm(target, { recursive: true, force: true })
-    if (!fsSync.existsSync(archive)) throw new Error('内置 UiAutomator2 驱动资源缺失。请重新安装桌面应用。')
-    new AdmZip(archive).extractAllTo(target, true)
-    const manifest = path.join(target, 'node_modules', '.cache', 'appium', 'extensions.yaml')
-    const contents = await fs.readFile(manifest, 'utf8')
-    await fs.writeFile(manifest, contents.replace(/^\s+installPath: .*$/m, `    installPath: ${path.join(target, 'node_modules', 'appium-uiautomator2-driver')}`))
-    await fs.writeFile(marker, version, 'utf8')
-  }
-  return target
-}
 
 function run(command, args, options = {}) {
   return new Promise((resolve, reject) => {
@@ -152,7 +128,8 @@ ipcMain.handle('automation:start', async (event, payload) => {
   log('启动任务:', `serial=${payload.serial}`, `questions=${payload.questions.length}`, `output=${payload.outputDir}`)
   const runner = createRunner({
     root: appRoot(),
-    appiumHome: await appiumHome(),
+    isPackaged: app.isPackaged,
+    resourcesPath: process.resourcesPath,
     adbPath: adbCommand(),
     log: text => {
       process.stdout.write(text.endsWith('\n') ? text : `${text}\n`)

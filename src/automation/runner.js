@@ -4,13 +4,9 @@ const { execFile } = require('node:child_process')
 const { sleep, createBatchDirectory, questionArtifactDirectory } = require('./utils')
 const { iterNodes, nodeAttr, hierarchyIsLoading, parseBounds, boundsIntersect, boundsCenterY, estimateVerticalScrollShift, replyTailOnScreen, questionVisible, findChatScrollBounds, validateCaptureViewport, replyCaptureBounds, visibleLabelBounds, visibleLabelBoundsList, boundsForNodeAttribute, boundsListForNodeAttribute, evidencePanelBounds, evidenceMinimumHeight, referenceProductsSection } = require('./hierarchy')
 const { imageInfo, cropImage, imagesSimilar, imageRegionsStable, imageLooksLoaded, alignCropToWhitespace, verifyFrameOverlap, composeLongImages } = require('./images')
+const { U2Client } = require('./u2-client')
 
 const DEFAULT_PACKAGE = 'com.aurora.xiaohe.aidoctor'
-const APPIUM_HELPER_PACKAGES = [
-  'io.appium.settings',
-  'io.appium.uiautomator2.server',
-  'io.appium.uiautomator2.server.test',
-]
 const DEFAULT_MAX_LONG_IMAGE_HEIGHT = 12_000
 
 function maxLongImageHeight(value) {
@@ -19,47 +15,8 @@ function maxLongImageHeight(value) {
   return parsed
 }
 
-function adbPackages(adbPath, serial) {
-  return new Promise((resolve, reject) => {
-    execFile(adbPath, ['-s', serial, 'shell', 'pm', 'list', 'packages'], { encoding: 'utf8' }, (error, stdout) => {
-      if (error) reject(error)
-      else resolve(String(stdout))
-    })
-  })
-}
-
-function adbPackageVersion(adbPath, serial, packageName) {
-  return new Promise((resolve, reject) => {
-    execFile(adbPath, ['-s', serial, 'shell', 'dumpsys', 'package', packageName], { encoding: 'utf8' }, (error, stdout) => {
-      if (error) reject(error)
-      else resolve(parsePackageVersion(stdout))
-    })
-  })
-}
-
-function parsePackageVersion(output) {
-  return String(output).match(/^\s*versionName=(.+?)\s*$/m)?.[1] || null
-}
-
 function historyOnboardingVisible(xml) {
   return /在这里查看[「"]?历史对话/.test(String(xml))
-}
-
-function bundledUiAutomator2ServerVersion(appiumHome) {
-  try {
-    return require(path.join(appiumHome, 'node_modules', 'appium-uiautomator2-driver', 'node_modules', 'appium-uiautomator2-server', 'package.json')).version
-  } catch {
-    return null
-  }
-}
-
-function appiumHelperApks(appiumHome, serverVersion = bundledUiAutomator2ServerVersion(appiumHome)) {
-  const driverModules = path.join(appiumHome, 'node_modules', 'appium-uiautomator2-driver', 'node_modules')
-  return [
-    path.join(driverModules, 'io.appium.settings', 'apks', 'settings_apk-debug.apk'),
-    path.join(driverModules, 'appium-uiautomator2-server', 'apks', `appium-uiautomator2-server-v${serverVersion}.apk`),
-    path.join(driverModules, 'appium-uiautomator2-server', 'apks', 'appium-uiautomator2-server-debug-androidTest.apk'),
-  ]
 }
 
 function adbCommand(adbPath, serial, args) {
@@ -80,12 +37,6 @@ function adbBinaryCommand(adbPath, serial, args) {
   })
 }
 
-async function adbHierarchy(adbPath, serial) {
-  const remotePath = `/sdcard/geoauto-window-${process.pid}.xml`
-  await adbCommandWithReconnect(adbPath, serial, ['shell', 'uiautomator', 'dump', '--compressed', remotePath])
-  return adbCommandWithReconnect(adbPath, serial, ['exec-out', 'cat', remotePath])
-}
-
 async function adbScreenshot(adbPath, serial) {
   await waitForAdbDevice(adbPath, serial)
   try {
@@ -94,25 +45,6 @@ async function adbScreenshot(adbPath, serial) {
     if (!adbConnectionLost(error)) throw error
     await waitForAdbDevice(adbPath, serial)
     return adbBinaryCommand(adbPath, serial, ['exec-out', 'screencap', '-p'])
-  }
-}
-
-function escapeAdbInputText(value) {
-  return String(value).replace(/[()<>|;&*\\~^"'$`]/g, '\\$&').replace(/ /g, '%s')
-}
-
-async function adbTypeUnicode(adbPath, serial, appiumHome, text) {
-  const { imap } = require(path.join(appiumHome, 'node_modules', 'appium-uiautomator2-driver', 'node_modules', 'io.appium.settings', 'build', 'lib', 'commands', 'utf7.js'))
-  const unicodeIme = 'io.appium.settings/.UnicodeIME'
-  const originalIme = (await adbCommandWithReconnect(adbPath, serial, ['shell', 'settings', 'get', 'secure', 'default_input_method'])).trim()
-  await adbCommandWithReconnect(adbPath, serial, ['shell', 'ime', 'enable', unicodeIme])
-  await adbCommandWithReconnect(adbPath, serial, ['shell', 'ime', 'set', unicodeIme])
-  await sleep(300)
-  try {
-    const encoded = `''${escapeAdbInputText(imap.encode(String(text)))}''`
-    await adbCommandWithReconnect(adbPath, serial, ['shell', 'input', 'text', encoded])
-  } finally {
-    if (originalIme && originalIme !== 'null' && originalIme !== unicodeIme) await adbCommandWithReconnect(adbPath, serial, ['shell', 'ime', 'set', originalIme]).catch(() => {})
   }
 }
 
@@ -142,84 +74,7 @@ async function adbCommandWithReconnect(adbPath, serial, args) {
   }
 }
 
-async function installAppiumHelpers(adbPath, serial, appiumHome) {
-  const apks = appiumHelperApks(appiumHome)
-  const missing = apks.find(apk => !require('node:fs').existsSync(apk))
-  if (missing) throw new Error(`内置 Appium 辅助 APK 缺失：${missing}`)
-  // An old instrumentation process keeps serving its old HTTP API after the
-  // APK is upgraded. Stop it before Appium allocates its system port.
-  await adbCommandWithReconnect(adbPath, serial, ['shell', 'am', 'force-stop', 'io.appium.uiautomator2.server'])
-  for (const apk of apks) await adbCommandWithReconnect(adbPath, serial, ['install', '-r', '-g', '-t', apk])
-}
-
-async function appiumHelpersAlreadyInstalled(adbPath, serial, expectedServerVersion) {
-  const check = async () => {
-    const packages = await adbPackages(adbPath, serial)
-    if (!APPIUM_HELPER_PACKAGES.every(name => packages.includes(`package:${name}`))) return false
-    // Package presence alone is not enough: an old UiAutomator2 server accepts
-    // the connection but returns 404 for newer Appium commands.
-    if (!expectedServerVersion) return false
-    return (await adbPackageVersion(adbPath, serial, 'io.appium.uiautomator2.server')) === expectedServerVersion
-  }
-  try {
-    return await check()
-  } catch (error) {
-    // Huawei's composite USB mode can briefly re-enumerate ADB. Verify again
-    // after it returns instead of treating that transient as a version mismatch.
-    if (!adbConnectionLost(error)) return false
-    try {
-      await waitForAdbDevice(adbPath, serial)
-      return await check()
-    } catch {}
-    return false
-  }
-}
-
-function sessionCapabilities(serial, { skipHelperInstall = false } = {}) {
-  return {
-    platformName: 'Android',
-    'appium:automationName': 'UiAutomator2',
-    'appium:udid': serial,
-    'appium:deviceName': serial,
-    'appium:appPackage': DEFAULT_PACKAGE,
-    'appium:noReset': true,
-    'appium:newCommandTimeout': 0,
-    'appium:skipUnlock': true,
-    'appium:uiautomator2ServerLaunchTimeout': 180_000,
-    'appium:uiautomator2ServerInstallTimeout': 180_000,
-    // Avoid reinstalling Appium Settings / UiAutomator2 every run when already present.
-    ...(skipHelperInstall ? {
-      'appium:skipServerInstallation': true,
-      'appium:skipDeviceInitialization': true,
-    } : {}),
-  }
-}
-
 class CancelledError extends Error { constructor() { super('任务已停止。'); this.name = 'CancelledError' } }
-
-async function findOptionalElement(driver, selector) {
-  try {
-    // findElements returns an empty list for an optional miss. findElement
-    // returns HTTP 404, which is expected but floods Appium logs and allocates
-    // an exception on every poll.
-    const elements = await driver.$$(selector)
-    return elements.length ? elements[0] : null
-  } catch (error) {
-    // Appium responds with HTTP 404 for a normal “not on screen yet” lookup.
-    // WebdriverIO surfaces that response as an exception before isExisting()
-    // can return false, so it must be treated as a retryable condition.
-    if (/no such element|element could not be located/i.test(String(error?.message || error))) return null
-    throw error
-  }
-}
-
-function explainSessionError(error) {
-  const message = String(error?.message || error)
-  if (/uiautomator2|instrumentation|server.*(?:start|launch)|cannot be initialized/i.test(message)) {
-    return new Error(`UiAutomator2 服务未能在手机上启动。请在手机的“电池/后台管理”中允许提问自动化的辅助服务后台运行；部分 OnePlus / OPPO 系统会冻结该服务。原始错误：${message}`)
-  }
-  return error
-}
 
 function fallbackOverlapEstimates(frameHeight, measuredShift, candidateOverlaps = []) {
   const hasMeasuredShift = Number.isFinite(measuredShift) && measuredShift >= 0 && measuredShift < frameHeight
@@ -278,11 +133,16 @@ async function prepareEmbeddedEvidence({ source, tap, delay, waitForStable, log 
 
 function createRunner(options) {
   let cancelled = false
-  let driver = null
-  let server = null
   let activeSerial = null
   let cachedInputBounds = null
   let cachedSendBounds = null
+  const ui = options.uiClient || new U2Client({
+    root: options.root,
+    isPackaged: options.isPackaged,
+    resourcesPath: options.resourcesPath,
+    adbPath: options.adbPath,
+    log: options.log,
+  })
   const checkCancelled = () => { if (cancelled) throw new CancelledError() }
   const log = text => options.log(`${text}${String(text).endsWith('\n') ? '' : '\n'}`)
 
@@ -293,12 +153,12 @@ function createRunner(options) {
 
   async function source() {
     checkCancelled()
-    return adbHierarchy(options.adbPath, activeSerial)
+    return ui.dumpHierarchy()
   }
 
   async function tap(x, y) {
     checkCancelled()
-    await adbCommandWithReconnect(options.adbPath, activeSerial, ['shell', 'input', 'tap', String(Math.round(x)), String(Math.round(y))])
+    await ui.click(x, y)
   }
 
   async function swipe(x, fromY, toY, duration = 250) {
@@ -340,47 +200,27 @@ function createRunner(options) {
   }
 
   async function inputQuestion(question) {
-    let lastError = null
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      try {
-        const edit = await waitForInput()
-        await tap((edit.bounds[0] + edit.bounds[2]) / 2, (edit.bounds[1] + edit.bounds[3]) / 2)
-        await sleep(300 + attempt * 300)
-        // Compose's clearElement / setElementValue endpoints may never return
-        // on some real devices even though the field has already gained focus.
-        // Keyboard key events plus Settings' Unicode typer avoid that endpoint
-        // and work for both classic Views and Compose text fields.
-        if (edit.text) {
-          await adbCommandWithReconnect(options.adbPath, activeSerial, ['shell', 'input', 'keyevent', '123'])
-          const deletes = Array(Math.min(200, edit.text.length + 8)).fill('67')
-          await adbCommandWithReconnect(options.adbPath, activeSerial, ['shell', 'input', 'keyevent', ...deletes])
-        }
-        await adbTypeUnicode(options.adbPath, activeSerial, options.appiumHome, question)
-        // Restore the pre-keyboard layout so the cached send-button bounds are
-        // valid again. ADB input remains responsive when UiAutomator2's Compose
-        // semantics query is temporarily stuck.
-        await adbCommandWithReconnect(options.adbPath, activeSerial, ['shell', 'input', 'keyevent', '4'])
-        await sleep(350)
-        const restoredXml = await source()
-        cachedInputBounds = boundsForNodeAttribute(restoredXml, 'class', 'android.widget.EditText') || cachedInputBounds
-        cachedSendBounds = boundsForNodeAttribute(restoredXml, 'content-desc', '发送') || cachedSendBounds
-        return
-      } catch (error) {
-        lastError = error
-        await sleep(800)
-      }
-    }
-    throw new Error(`问题输入失败：${lastError?.message || '未知错误'}`)
+    const edit = await waitForInput()
+    await tap((edit.bounds[0] + edit.bounds[2]) / 2, (edit.bounds[1] + edit.bounds[3]) / 2)
+    await sleep(300)
+    // Use uiautomator2's device-level IME/clipboard input rather than a
+    // WebDriver element value command. Mutating UI requests are not replayed
+    // after failure, so an uncertain input state terminates the task.
+    await ui.sendKeys(question, { clear: Boolean(edit.text) })
+    await ui.press('back')
+    await sleep(350)
+    const restoredXml = await source()
+    cachedInputBounds = boundsForNodeAttribute(restoredXml, 'class', 'android.widget.EditText') || cachedInputBounds
+    cachedSendBounds = boundsForNodeAttribute(restoredXml, 'content-desc', '发送') || cachedSendBounds
   }
 
   async function tapSend() {
-    // Re-querying Compose semantics after Unicode input can block UiAutomator2
-    // indefinitely. The send control is already present in the hierarchy read
-    // by waitForInput, so use that cached hit target instead.
+    // The send control is already present in the hierarchy read by
+    // waitForInput, so use the cached hit target without a second lookup.
     if (cachedSendBounds) {
       const x = Math.round((cachedSendBounds[0] + cachedSendBounds[2]) / 2)
       const y = Math.round((cachedSendBounds[1] + cachedSendBounds[3]) / 2)
-      await adbCommandWithReconnect(options.adbPath, activeSerial, ['shell', 'input', 'tap', String(x), String(y)])
+      await tap(x, y)
       return
     }
     if (!cachedInputBounds) await waitForInput()
@@ -388,7 +228,7 @@ function createRunner(options) {
     const height = bottom - top
     const x = Math.round(right - Math.min(80, height * 0.24))
     const y = Math.round(bottom + Math.min(48, height * 0.2))
-    await adbCommandWithReconnect(options.adbPath, activeSerial, ['shell', 'input', 'tap', String(x), String(y)])
+    await tap(x, y)
   }
 
   async function tapNewSession() {
@@ -421,20 +261,26 @@ function createRunner(options) {
     let lastProgress = 0
     while (Date.now() - start < timeout) {
       checkCancelled()
-      try {
+      const frame = await screenshot()
+      const now = Date.now()
+      const pixelsStable = lastFrame && await imageRegionsStable(lastFrame, frame)
+      lastFrame = frame
+      if (!pixelsStable) lastChange = now
+      if (now - lastProgress >= 5_000) { log('waiting: reply still generating…'); lastProgress = now }
+      if (pixelsStable && now - start >= minWait && now - lastChange >= stableMilliseconds) {
+        // Only serialize the dynamic Compose hierarchy after pixels have been
+        // stable for long enough, then confirm that the UI did not reflow while
+        // the hierarchy was being read.
         const xml = await normalizedHierarchy()
-        const frame = await screenshot()
-        const now = Date.now()
-        const loading = hierarchyIsLoading(xml)
-        if (loading && now - lastProgress >= 5_000) { log('waiting: reply still generating…'); lastProgress = now }
-        const pixelsStable = lastFrame && await imageRegionsStable(lastFrame, frame)
+        const confirmedFrame = await screenshot()
         lastXml = xml
-        lastFrame = frame
-        if (loading || !pixelsStable) lastChange = now
-        else if (now - start >= minWait && now - lastChange >= stableMilliseconds) return { status: 'stable', xml }
-      } catch { /* transient hierarchy failure; retry */ }
+        lastFrame = confirmedFrame
+        if (!hierarchyIsLoading(xml) && await imageRegionsStable(frame, confirmedFrame)) return { status: 'stable', xml }
+        lastChange = Date.now()
+      }
       await sleep(pollInterval)
     }
+    if (!lastXml) lastXml = await normalizedHierarchy()
     return { status: hierarchyIsLoading(lastXml) ? 'loading_timeout' : 'timeout', xml: lastXml }
   }
 
@@ -474,10 +320,17 @@ function createRunner(options) {
     let lastXml = ''
     const deadline = Date.now() + timeout
     while (Date.now() < deadline) {
-      lastXml = await source()
-      await sleep(220)
+      await sleep(260)
       const after = await cropImage(await screenshot(), bounds)
-      if (!hierarchyIsLoading(lastXml) && await imageRegionsStable(before, after)) return { frame: after, xml: lastXml, stable: true }
+      if (await imageRegionsStable(before, after)) {
+        // screenshot → hierarchy → screenshot prevents a locally stable frame
+        // from being accepted if Compose reflows during hierarchy collection.
+        lastXml = await source()
+        const confirmed = await cropImage(await screenshot(), bounds)
+        if (!hierarchyIsLoading(lastXml) && await imageRegionsStable(after, confirmed)) return { frame: confirmed, xml: lastXml, stable: true }
+        before = confirmed
+        continue
+      }
       before = after
     }
     return { frame: before, xml: lastXml || await source(), stable: false }
@@ -688,7 +541,7 @@ function createRunner(options) {
       await tap(right - Math.max(24, Math.floor((right - left) / 16)), top + Math.max(24, Math.floor((bottom - top) / 10)))
       await sleep(600)
       if (!boundsForNodeAttribute(await source(), 'resource-id', `${DEFAULT_PACKAGE}:id/bullet_container`)) return
-      await adbCommandWithReconnect(options.adbPath, activeSerial, ['shell', 'input', 'keyevent', '4'])
+      await ui.press('back')
       await sleep(600)
     }
   }
@@ -827,7 +680,14 @@ function createRunner(options) {
     log('stage: 正在输入问题')
     await inputQuestion(question)
     const directory = questionArtifactDirectory(batchDirectory, index, question)
-    const meta = { serial: payload.serial, batch_id: path.basename(batchDirectory), question_index: index, question_directory: directory }
+    const meta = {
+      serial: payload.serial,
+      batch_id: path.basename(batchDirectory),
+      question_index: index,
+      question_directory: directory,
+      ui_backend: 'python_uiautomator2_strict',
+      ui_fallback_enabled: false,
+    }
     log('stage: 正在发送问题')
     await tapSend()
     log('stage: 问题已发送，等待回答稳定')
@@ -844,18 +704,10 @@ function createRunner(options) {
       const outputRoot = path.resolve(payload.outputDir)
       const batchDirectory = await createBatchDirectory(outputRoot)
       try {
-        const expectedServerVersion = bundledUiAutomator2ServerVersion(options.appiumHome)
-        let helpersReady = await appiumHelpersAlreadyInstalled(options.adbPath, payload.serial, expectedServerVersion)
-        if (helpersReady) log(`Appium 辅助组件版本匹配（UiAutomator2 ${expectedServerVersion}），跳过重装`)
-        else {
-          log(`Appium 辅助组件缺失或版本不匹配，正在安装内置 UiAutomator2${expectedServerVersion ? ` ${expectedServerVersion}` : ''}`)
-          await installAppiumHelpers(options.adbPath, payload.serial, options.appiumHome)
-          helpersReady = await appiumHelpersAlreadyInstalled(options.adbPath, payload.serial, expectedServerVersion)
-          if (!helpersReady) throw new Error('内置 UiAutomator2 安装后版本校验失败。请确认手机已授权 USB 调试。')
-          log(`Appium 辅助组件已更新为 UiAutomator2 ${expectedServerVersion}`)
-        }
-        await adbCommandWithReconnect(options.adbPath, payload.serial, ['shell', 'monkey', '-p', DEFAULT_PACKAGE, '-c', 'android.intent.category.LAUNCHER', '1'])
-        log('已切换为纯 ADB 真机采集，避免动态 Compose 与 UiAutomator2 会话冲突')
+        await waitForAdbDevice(options.adbPath, payload.serial)
+        await ui.start(payload.serial)
+        await ui.appStart(DEFAULT_PACKAGE)
+        log('UI节点、点击和输入严格使用Python uiautomator2；ADB仅用于无损截图和长图滚动')
         await sleep(800)
         await waitForInput(15_000)
         log(`device=${payload.serial} package=${DEFAULT_PACKAGE} batch=${batchDirectory}`)
@@ -864,18 +716,24 @@ function createRunner(options) {
           log(`[${zeroIndex + 1}/${payload.questions.length}] asking: ${question}`)
           log(JSON.stringify(await askOnce(payload, batchDirectory, question, zeroIndex + 1)))
         }
+      } catch (error) {
+        await fs.writeFile(path.join(batchDirectory, 'automation-failure.json'), JSON.stringify({
+          created_at: new Date().toISOString(),
+          serial: payload.serial,
+          ui_backend: 'python_uiautomator2_strict',
+          ui_fallback_enabled: false,
+          error_name: error?.name || 'Error',
+          error_message: error?.message || String(error),
+          stack: error?.stack || null,
+        }, null, 2), 'utf8').catch(() => {})
+        throw error
       } finally {
-        if (driver) {
-          await Promise.race([driver.deleteSession().catch(() => {}), sleep(2_000)])
-          driver = null
-        }
-        if (server) { await server.stop(); server = null }
+        await ui.stop().catch(() => {})
       }
     },
     async stop() {
       cancelled = true
-      if (driver) await Promise.race([driver.deleteSession().catch(() => {}), sleep(2_000)])
-      if (server) await server.stop().catch(() => {})
+      await ui.stop().catch(() => {})
     },
   }
 }
@@ -884,21 +742,12 @@ module.exports = {
   createRunner,
   CancelledError,
   DEFAULT_PACKAGE,
-  explainSessionError,
-  findOptionalElement,
   buildReplyImages,
   conservativeFallbackOverlap,
   chatSwipePlan,
   scrollEndConfirmed,
   prepareEmbeddedEvidence,
-  appiumHelpersAlreadyInstalled,
-  adbPackageVersion,
   adbConnectionLost,
-  appiumHelperApks,
-  bundledUiAutomator2ServerVersion,
   historyOnboardingVisible,
   maxLongImageHeight,
-  installAppiumHelpers,
-  parsePackageVersion,
-  sessionCapabilities,
 }

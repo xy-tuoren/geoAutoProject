@@ -1,0 +1,62 @@
+name: Build Windows
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          working-directory: python
+          python-version: "3.11"
+          enable-cache: true
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Validate Python lock
+        working-directory: python
+        run: uv lock --check
+
+      - name: Run Python tests
+        working-directory: python
+        run: |
+          uv sync --locked
+          uv run --locked pytest -q
+
+      - name: Run Node checks
+        run: |
+          npm run check
+          npm test
+
+      - name: Build NSIS installer
+        run: npm run dist -- --win nsis --x64
+
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: question-automation-windows-x64
+          path: |
+            dist/*.exe
+            dist/*.blockmap
+          if-no-files-found: error

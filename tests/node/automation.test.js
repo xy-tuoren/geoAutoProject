@@ -9,29 +9,9 @@ const { questionVisible, replyTailOnScreen, findChatScrollBounds, validateCaptur
 const { stackFramesInGroups, verifyFrameOverlap, imageInfo, imageLooksLoaded, imagesSimilar, imageRegionsStable, alignCropToWhitespace, stitchFramesWithOverlaps, composeLongImages, cropFramesAtTextSeams } = require('../../src/automation/images')
 const { createBatchDirectory, questionArtifactDirectory } = require('../../src/automation/utils')
 const { loadQuestionFile } = require('../../src/questions')
-const { adbConnectionLost, appiumHelperApks, chatSwipePlan, conservativeFallbackOverlap, explainSessionError, findOptionalElement, buildReplyImages, historyOnboardingVisible, maxLongImageHeight, parsePackageVersion, prepareEmbeddedEvidence, scrollEndConfirmed, sessionCapabilities } = require('../../src/automation/runner')
-const { prepareAndroidSdk } = require('../../src/automation/appium-server')
+const { adbConnectionLost, chatSwipePlan, conservativeFallbackOverlap, buildReplyImages, historyOnboardingVisible, maxLongImageHeight, prepareEmbeddedEvidence, scrollEndConfirmed } = require('../../src/automation/runner')
 
 const CHAT_BOUNDS = [0, 200, 1080, 1800]
-
-test('为 Appium 建立标准 Android SDK platform-tools 目录', async () => {
-  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'appium-sdk-test-'))
-  try {
-    const bundledTools = path.join(directory, 'vendor', 'platform-tools', 'win32')
-    const appiumHome = path.join(directory, 'vendor', 'appium-home')
-    await fs.mkdir(bundledTools, { recursive: true })
-    await fs.writeFile(path.join(bundledTools, 'adb.exe'), 'adb')
-    await fs.writeFile(path.join(bundledTools, 'AdbWinApi.dll'), 'dll')
-
-    const sdkRoot = prepareAndroidSdk({ appiumHome, adbPath: path.join(bundledTools, 'adb.exe') })
-
-    assert.equal(sdkRoot, path.join(appiumHome, 'android-sdk'))
-    assert.equal(await fs.readFile(path.join(sdkRoot, 'platform-tools', 'adb.exe'), 'utf8'), 'adb')
-    assert.equal(await fs.readFile(path.join(sdkRoot, 'platform-tools', 'AdbWinApi.dll'), 'utf8'), 'dll')
-  } finally {
-    await fs.rm(directory, { recursive: true, force: true })
-  }
-})
 
 test('只将聊天区域内且可见的问题视为当前问题', () => {
   const hidden = '<hierarchy><node text="这是一个很长的问题" visible-to-user="false" bounds="[20,300][1060,460]" /></hierarchy>'
@@ -45,7 +25,7 @@ test('兼容 class 命名的 UiAutomator 层级节点', () => {
   assert.equal(questionVisible(xml, '新的问题', [0, 400, 1080, 1800]), true)
 })
 
-test('系统 uiautomator dump 未写可见属性时仍按可见节点处理', () => {
+test('层级节点未写可见属性时仍按可见节点处理', () => {
   const xml = '<hierarchy><node class="android.widget.TextView" text="系统层级问题" bounds="[80,900][900,980]" /></hierarchy>'
   assert.equal(questionVisible(xml, '系统层级问题', [0, 400, 1080, 1800]), true)
 })
@@ -209,16 +189,6 @@ test('批次和问题目录保持与旧版一致，CSV 默认读取问题列', a
   } finally { await fs.rm(directory, { recursive: true, force: true }) }
 })
 
-test('UiAutomator2 服务启动失败会给出设备后台冻结的处理提示', () => {
-  const error = explainSessionError(new Error('The instrumentation process cannot be initialized'))
-  assert.match(error.message, /后台管理/)
-})
-
-test('可选元素使用 findElements 空列表，避免制造 Appium 404', async () => {
-  const driver = { $$: async () => [] }
-  assert.equal(await findOptionalElement(driver, 'android=new UiSelector().className("android.widget.EditText")'), null)
-})
-
 test('逐接缝混合拼接只在失败位置保留少量重复内容和浅色留白', async () => {
   const make = color => sharp({ create: { width: 20, height: 100, channels: 3, background: color } }).png().toBuffer()
   const frames = [await make('red'), await make('green'), await make('blue')]
@@ -326,27 +296,6 @@ test('普通资料卡（Compose 面板但无横向药品列表）不会被误判
     + '<node class="android.widget.TextView" text="引用资料" displayed="true" bounds="[60,720][300,780]" />'
     + '</node></hierarchy>'
   assert.equal(referenceProductsSection(xml), null)
-})
-
-test('辅助组件已存在时会话能力会跳过 Settings / UiAutomator2 重装', () => {
-  const skip = sessionCapabilities('SERIAL', { skipHelperInstall: true })
-  assert.equal(skip['appium:skipServerInstallation'], true)
-  assert.equal(skip['appium:skipDeviceInitialization'], true)
-  const fresh = sessionCapabilities('SERIAL', { skipHelperInstall: false })
-  assert.equal(fresh['appium:skipServerInstallation'], undefined)
-  assert.equal(fresh['appium:skipDeviceInitialization'], undefined)
-})
-
-test('从 adb 包信息读取 UiAutomator2 的已安装版本', () => {
-  assert.equal(parsePackageVersion('Packages:\n  versionName=10.3.2\n  versionCode=214\n'), '10.3.2')
-  assert.equal(parsePackageVersion('Package [io.appium.uiautomator2.server]'), null)
-})
-
-test('内置辅助 APK 路径随 UiAutomator2 服务版本变化', () => {
-  const apks = appiumHelperApks('/runtime/appium-home', '10.3.2')
-  assert.equal(apks.length, 3)
-  assert.match(apks[1], /appium-uiautomator2-server-v10\.3\.2\.apk$/)
-  assert.match(apks[2], /appium-uiautomator2-server-debug-androidTest\.apk$/)
 })
 
 test('仅为 ADB 短暂断连启用安装重试', () => {

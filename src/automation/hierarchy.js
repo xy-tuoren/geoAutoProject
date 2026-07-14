@@ -14,9 +14,9 @@ function nodeAttr(attrs, name) {
 }
 
 function nodeIsVisible(attrs) {
-  // Different UiAutomator serializers use either attribute. Older dumps use
-  // visible-to-user, while Appium exposes displayed. Android's built-in
-  // `uiautomator dump` omits both because it serializes visible nodes only.
+  // Different UiAutomator serializers use either attribute. Some versions use
+  // visible-to-user, while others expose displayed or omit both for visible
+  // nodes.
   const visible = nodeAttr(attrs, 'visible-to-user')
   const displayed = nodeAttr(attrs, 'displayed')
   if (!visible && !displayed) return Boolean(nodeAttr(attrs, 'bounds'))
@@ -276,9 +276,9 @@ function collectNodes(node, out = []) {
   return out
 }
 
-// Appium getPageSource emits displayed="true"; a plain uiautomator dump omits
-// visibility entirely. Treat a node as usable unless it is explicitly hidden so
-// structural detection works against both serializers.
+// UiAutomator serializers do not agree on visibility attributes. Treat a node
+// as usable unless it is explicitly hidden so structural detection works
+// across supported Android versions.
 function nodeNotHidden(attrs) {
   return nodeAttr(attrs, 'visible-to-user') !== 'false' && nodeAttr(attrs, 'displayed') !== 'false'
 }
@@ -292,8 +292,8 @@ function subtreeContainsClass(node, className) {
 // current reply has no medicine cards.
 function referenceProductsSection(xml) {
   const nodes = collectNodes(parseNodeTree(xml))
-  // Visibility is intentionally not required: uiautomator dumps omit the
-  // displayed/visible-to-user attribute entirely, and the structural signature
+  // Visibility is intentionally not required: some hierarchy serializers omit
+  // displayed/visible-to-user entirely, and the structural signature
   // (a Compose interop panel wrapping a horizontal carousel) is specific enough.
   const holder = nodes.find(node =>
     nodeAttr(node.attrs, 'class') === COMPOSE_PANEL_CLASS

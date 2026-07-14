@@ -1,16 +1,16 @@
 # 提问自动化
 
-这是一个通过桌面应用批量控制 Android 手机提问、截图和归档的工具。界面与自动化后端均使用 Node.js；Android 自动化采用 Electron 内置 ADB、Appium 与 UiAutomator2。
+这是一个通过桌面应用批量控制 Android 手机提问、截图和归档的工具。界面、任务调度和截图引擎使用 Electron/Node.js；UI 层级、点击和输入使用内置的 Python uiautomator2 sidecar，ADB 负责无损截图、长图滚动和设备连接。
 
 ## Electron 操作面板（推荐）
 
-开发调试环境只需要 Node.js 22+。界面使用 Electron 渲染，macOS 与 Windows 的字体、间距、控件和响应式布局保持一致。
+开发调试环境需要 Node.js 22+ 与 uv。uv 会按 `python/.python-version` 自动准备 Python 3.11，安装包用户不需要安装 Python 或 uv。界面使用 Electron 渲染，macOS 与 Windows 的字体、间距、控件和响应式布局保持一致。
 
 ```bash
 ./start_electron.sh
 ```
 
-Windows 开发环境在项目目录执行一次 `npm run setup`，再运行 `npm start`。`setup` 会安装 npm 依赖、准备内置 ADB，并注册 UiAutomator2 驱动。Electron 面板支持设备刷新、问题文件导入、目录选择、日志流、停止任务和响应式布局；底层由 Appium UiAutomator2 执行。
+Windows 开发环境在项目目录执行一次 `npm run setup`，再运行 `npm start`。`setup` 会安装 npm 依赖、准备内置 ADB，并用 uv/PyInstaller 构建 Python uiautomator2 sidecar。Electron 面板支持设备刷新、问题文件导入、目录选择、日志流、停止任务和响应式布局。
 
 常用开发命令：
 
@@ -18,6 +18,7 @@ Windows 开发环境在项目目录执行一次 `npm run setup`，再运行 `npm
 npm run setup      # 首次初始化：安装依赖及自动化运行时
 npm run check      # Node 语法检查
 npm test           # 自动化核心逻辑测试
+npm run prepare:u2 # 构建当前平台的Python uiautomator2 sidecar
 npm run dist       # 准备内置运行时并打包桌面应用
 ```
 
@@ -55,18 +56,20 @@ JSON 使用数组或 `questions` / `问题` 数组；Excel 读取第一个工作
 src/
   main/          # Electron 主进程和 preload
   renderer/      # 桌面面板页面、样式和交互
-  automation/    # Appium、UiAutomator2、截图和 UI 层级解析
+  automation/    # uiautomator2客户端、ADB截图、长图拼接和UI层级解析
   questions.js   # 问题文件导入
   runtime-paths.js
   cli.js
-scripts/         # 打包前准备 ADB 和 Appium 运行时
+python/          # uv管理的Python uiautomator2 sidecar、测试和PyInstaller配置
+scripts/         # 打包前准备ADB和Python sidecar
 tests/node/      # Node 内置 test runner 测试
 ```
 
 ## 使用前检查
 
 - 手机必须完成 USB 调试授权（打包版已内置 adb，无需本机安装）。
-- 仓库内置 macOS 与 Windows 两套 Android Platform Tools；打包命令 `npm run dist` 会直接使用目标平台对应的 ADB，并内置 Appium 与 UiAutomator2 驱动。运营不需要安装 Node、Python、ADB 或 Appium。
-- 首次连接手机时，Appium 会自动安装必要的辅助组件；手机需保持 USB 调试已授权。
+- 仓库内置 macOS 与 Windows 两套 Android Platform Tools；打包命令 `npm run dist` 会使用目标平台的ADB，并内置PyInstaller生成的Python uiautomator2 sidecar。运营不需要安装Node、Python、uv或ADB。
+- UI层没有ADB降级：uiautomator2层级读取失败时只允许重启sidecar并重试一次；点击或输入失败会直接终止任务，避免表面成功但实际走回旧路径。
+- 正式截图始终使用ADB原始PNG，不使用uiautomator2截图接口。
 - `captures/` 已被 Git 忽略，因为截图、UI XML 和元数据可能包含敏感健康信息。
 - 健康问题和截图可能包含个人信息，请勿上传到公共仓库。
