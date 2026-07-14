@@ -35,7 +35,7 @@ jobs:
       - name: Build macOS package
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
-        run: npm run dist -- --mac dmg
+        run: npm run dist -- --mac dmg --publish never
 
       - uses: actions/upload-artifact@v4
         with:
