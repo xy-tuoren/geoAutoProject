@@ -104,7 +104,7 @@ test('从scrcpy路径切换夹心校验时复用已有PNG', async () => {
 test('scrcpy确认静止后只截取一张无损PNG，并校验层级读取期间无重排', async () => {
   const events = []
   const observer = {
-    waitForQuiet: async () => { events.push('quiet'); return { quiet: true } },
+    waitForNoActivity: async () => { events.push('noActivity'); return { quiet: true } },
     mark: () => ({ frameCount: 7 }),
   }
   const result = await captureStableObserved({
@@ -116,18 +116,18 @@ test('scrcpy确认静止后只截取一张无损PNG，并校验层级读取期�
 
   assert.equal(result.stable, true)
   assert.equal(result.observer, true)
-  assert.deepEqual(events, ['quiet', 'hierarchy', 'capture', 'quiet'])
+  assert.deepEqual(events, ['noActivity', 'hierarchy', 'capture', 'noActivity'])
 })
 
 test('滑动后的稳定截图优先使用活动标记快速判静止', async () => {
   const events = []
   const settleSince = { at: 1_000, frameCount: 4, activityFrameCount: 2 }
   const observer = {
-    waitForSettleSince: async mark => {
-      events.push(['settle', mark])
+    waitForSettleSince: async (mark, options) => {
+      events.push(['settle', mark, options])
       return { settled: true, activity: true }
     },
-    waitForQuiet: async () => { events.push(['quiet']); return { quiet: true } },
+    waitForNoActivity: async () => { events.push(['noActivity']); return { quiet: true } },
     mark: () => ({ frameCount: 7, activityFrameCount: 2 }),
   }
 
@@ -141,10 +141,10 @@ test('滑动后的稳定截图优先使用活动标记快速判静止', async ()
 
   assert.equal(result.stable, true)
   assert.deepEqual(events, [
-    ['settle', settleSince],
+    ['settle', settleSince, { hardTimeout: 2500, quietMs: 650, conservativeQuietMs: 1000 }],
     ['hierarchy'],
     ['capture'],
-    ['quiet'],
+    ['noActivity'],
   ])
 })
 
@@ -169,11 +169,11 @@ test('scrcpy未等到静止时不额外读层级或截PNG', async () => {
 
 test('scrcpy二次确认失败时保留PNG给ADB夹心校验', async () => {
   const events = []
-  let quietChecks = 0
+  let noActivityChecks = 0
   const observer = {
-    waitForQuiet: async () => {
-      quietChecks += 1
-      return quietChecks === 1 ? { quiet: true } : { quiet: false }
+    waitForNoActivity: async () => {
+      noActivityChecks += 1
+      return noActivityChecks === 1 ? { quiet: true } : { quiet: false }
     },
     mark: () => ({ frameCount: 7, activityFrameCount: 2 }),
   }
@@ -191,10 +191,10 @@ test('scrcpy二次确认失败时保留PNG给ADB夹心校验', async () => {
   assert.deepEqual(events, ['hierarchy', 'capture'])
 })
 
-test('scrcpy二次确认忽略截图期间的零散编码包', async () => {
+test('scrcpy二次确认拒绝截图期间任意活动帧', async () => {
   let marks = 0
   const observer = {
-    waitForQuiet: async () => ({ quiet: true }),
+    waitForNoActivity: async () => ({ quiet: true }),
     mark: () => {
       marks += 1
       return marks === 1
@@ -210,13 +210,14 @@ test('scrcpy二次确认忽略截图期间的零散编码包', async () => {
     hierarchyLoading: () => false,
   })
 
-  assert.equal(result.stable, true)
+  assert.equal(result.stable, false)
+  assert.equal(result.reason, 'capture_activity')
 })
 
 test('scrcpy二次确认仍拒绝截图期间的连续活动突发', async () => {
   let marks = 0
   const observer = {
-    waitForQuiet: async () => ({ quiet: true }),
+    waitForNoActivity: async () => ({ quiet: true }),
     mark: () => {
       marks += 1
       return marks === 1

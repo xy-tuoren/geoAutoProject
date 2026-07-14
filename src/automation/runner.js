@@ -247,24 +247,40 @@ async function captureStableObserved({
   hierarchyLoading,
   settleSince = null,
   now = Date.now,
-  settleWaitCap = 1_300,
-}, timeout = 2_500) {
+  settleWaitCap = 2_500,
+  settleQuietMs = 650,
+  settleConservativeQuietMs = 1_000,
+  confirmQuietMs = 300,
+}, timeout = 3_500) {
   const deadline = now() + timeout
   const remaining = deadline - now()
   if (remaining <= 0) {
     return { frame: null, xml: '', stable: false, attempts: 0, observer: true, reason: 'observer_timeout' }
   }
-  // scrcpy is the cheap first gate. Do not let continuous animation consume
-  // the whole 2.5 s budget and then stack a complete ADB fallback behind it.
-  const initialWaitTimeout = Math.max(1, Math.min(settleWaitCap, remaining))
+  // scrcpy is the cheap first gate, but it must leave time for XML and PNG
+  // confirmation after the quiet window; otherwise strict quiet checks turn
+  // into avoidable capture_deadline fallbacks.
+  const reserveForCapture = Math.min(1_000, Math.max(confirmQuietMs + 150, Math.floor(remaining * 0.28)))
+  const initialWaitTimeout = Math.max(1, Math.min(settleWaitCap, remaining - reserveForCapture))
   const settled = settleSince && typeof observer.waitForSettleSince === 'function'
-    ? await observer.waitForSettleSince(settleSince, { hardTimeout: initialWaitTimeout })
-    : await observer.waitForQuiet({
-        timeout: initialWaitTimeout,
-        windowMs: 450,
-        quietMs: 250,
-        maxFrames: 1,
+    ? await observer.waitForSettleSince(settleSince, {
+        hardTimeout: initialWaitTimeout,
+        quietMs: settleQuietMs,
+        conservativeQuietMs: settleConservativeQuietMs,
       })
+    : typeof observer.waitForNoActivity === 'function'
+      ? await observer.waitForNoActivity({
+          timeout: initialWaitTimeout,
+          quietMs: settleQuietMs,
+          minWaitMs: Math.min(120, initialWaitTimeout),
+        })
+      : await observer.waitForQuiet({
+          timeout: initialWaitTimeout,
+          windowMs: settleQuietMs,
+          quietMs: settleQuietMs,
+          maxFrames: 0,
+          minWaitMs: Math.min(120, initialWaitTimeout),
+        })
   if (!(settled.settled ?? settled.quiet)) {
     return { frame: null, xml: '', stable: false, attempts: 0, observer: true, reason: 'settle_timeout' }
   }
@@ -276,27 +292,24 @@ async function captureStableObserved({
   if (confirmRemaining <= 0) {
     return { frame, xml, stable: false, attempts: 1, observer: true, reason: 'capture_deadline' }
   }
-  const confirmed = await observer.waitForQuiet({
-    timeout: confirmRemaining,
-    windowMs: 180,
-    quietMs: 80,
-    maxFrames: 1,
-    minWaitMs: Math.min(80, confirmRemaining),
-  })
+  const confirmed = typeof observer.waitForNoActivity === 'function'
+    ? await observer.waitForNoActivity({
+        timeout: confirmRemaining,
+        quietMs: confirmQuietMs,
+        minWaitMs: Math.min(confirmQuietMs, confirmRemaining),
+      })
+    : await observer.waitForQuiet({
+        timeout: confirmRemaining,
+        windowMs: confirmQuietMs,
+        quietMs: confirmQuietMs,
+        maxFrames: 0,
+        minWaitMs: Math.min(confirmQuietMs, confirmRemaining),
+      })
   const currentMark = observer.mark()
-  const burstCountersAvailable = Number.isFinite(currentMark.burstActivityFrameCount)
-    && Number.isFinite(mark.burstActivityFrameCount)
-  const activityFramesDuringCapture = burstCountersAvailable
-    ? currentMark.burstActivityFrameCount - mark.burstActivityFrameCount
-    : (currentMark.activityFrameCount ?? currentMark.frameCount)
-      - (mark.activityFrameCount ?? mark.frameCount)
+  const activityFramesDuringCapture = (currentMark.activityFrameCount ?? currentMark.frameCount)
+    - (mark.activityFrameCount ?? mark.frameCount)
   const loading = hierarchyLoading(xml)
-  // A single large H.264 packet or periodic keyframe is encoder noise on some
-  // devices. Only a short burst can invalidate the XML→PNG capture window.
-  const captureActivityAcceptable = burstCountersAvailable
-    ? activityFramesDuringCapture === 0
-    : activityFramesDuringCapture <= 1
-  if (!loading && confirmed.quiet && captureActivityAcceptable) {
+  if (!loading && confirmed.quiet && activityFramesDuringCapture === 0) {
     return { frame, xml, stable: true, attempts: 1, observer: true }
   }
   const reason = loading
@@ -680,7 +693,7 @@ function createRunner(options) {
           capture: async () => cropImage(await screenshot(), bounds),
           hierarchy: source,
           hierarchyLoading: () => false,
-        }, Math.min(timeout, 2_500))
+        }, Math.min(timeout, 3_500))
         if (observed.stable) return observed.frame
         observedFrame = observed.frame
         observerRegionFallbacks += 1
@@ -714,7 +727,7 @@ function createRunner(options) {
           hierarchy: source,
           hierarchyLoading: hierarchyIsLoading,
           settleSince,
-        }, Math.min(timeout, 2_500))
+        }, Math.min(timeout, 3_500))
         if (observed.stable) return observed
         observerRegionFallbacks += 1
         const elapsed = Date.now() - started
