@@ -130,6 +130,67 @@ test('二次确认即使已有静止历史也会观察指定时长', async () =>
   assert.ok(result.waitedMs < 200)
 })
 
+test('回答静止判定遇到任意单个活动帧都重置3秒计时', async () => {
+  let now = 0
+  let injected = false
+  const observer = new ScrcpyObserver({
+    now: () => now,
+    delay: async milliseconds => {
+      now += milliseconds
+      if (!injected && now >= 2_000) {
+        injected = true
+        observer.activityFrameCount += 1
+        observer.frames.push({ at: now, size: 2_000, keyFrame: false, activity: true })
+      }
+    },
+  })
+  observer.socket = { destroyed: false }
+  observer.session = { codec: 'h264', width: 162, height: 360 }
+  observer.startedAt = 0
+
+  const result = await observer.waitForNoActivity({ timeout: 8_000, quietMs: 3_000 })
+
+  assert.equal(result.quiet, true)
+  assert.equal(result.lastActivityAt, 2_000)
+  assert.equal(result.waitedMs, 5_000)
+  assert.equal(result.quietForMs, 3_000)
+})
+
+test('回答静止判定复用调用前已经累积的零活动时长', async () => {
+  let now = 5_000
+  const observer = new ScrcpyObserver({
+    now: () => now,
+    delay: async milliseconds => { now += milliseconds },
+  })
+  observer.socket = { destroyed: false }
+  observer.session = { codec: 'h264', width: 162, height: 360 }
+  observer.startedAt = 0
+  observer.frames = [{ at: 1_000, size: 2_000, keyFrame: false, activity: true }]
+
+  const result = await observer.waitForNoActivity({ timeout: 2_000, quietMs: 3_000 })
+
+  assert.equal(result.quiet, true)
+  assert.equal(result.waitedMs, 0)
+  assert.equal(result.quietForMs, 4_000)
+})
+
+test('回答最终层级确认即使已有静止历史也会观察最短窗口', async () => {
+  let now = 5_000
+  const observer = new ScrcpyObserver({
+    now: () => now,
+    delay: async milliseconds => { now += milliseconds },
+  })
+  observer.socket = { destroyed: false }
+  observer.session = { codec: 'h264', width: 162, height: 360 }
+  observer.startedAt = 0
+
+  const result = await observer.waitForNoActivity({ timeout: 500, quietMs: 300, minWaitMs: 120 })
+
+  assert.equal(result.quiet, true)
+  assert.ok(result.waitedMs >= 120)
+  assert.ok(result.waitedMs < 200)
+})
+
 test('活动等待在新活动帧到达后立即返回', async () => {
   let now = 1_000
   const observer = new ScrcpyObserver({

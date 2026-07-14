@@ -163,6 +163,10 @@ class ScrcpyObserver {
     this.quietChecks = 0
     this.quietSuccesses = 0
     this.quietTimeouts = 0
+    this.noActivityChecks = 0
+    this.noActivitySuccesses = 0
+    this.noActivityTimeouts = 0
+    this.noActivityWaitMs = 0
     this.activityChecks = 0
     this.activitySuccesses = 0
     this.activityTimeouts = 0
@@ -347,6 +351,35 @@ class ScrcpyObserver {
     }
   }
 
+  async waitForNoActivity({ timeout = 6_000, quietMs = 3_000, minWaitMs = 0 } = {}) {
+    if (!this.active) throw this.failure || new Error('scrcpy观察器未启动。')
+    this.noActivityChecks += 1
+    const started = this.now()
+    const deadline = started + timeout
+    while (true) {
+      if (!this.active) throw this.failure || new Error('scrcpy观察器已断开。')
+      const now = this.now()
+      const lastActivity = this.frames.findLast(frame => frame.activity ?? frameCarriesActivity(frame))
+      const lastActivityAt = Number.isFinite(lastActivity?.at)
+        ? lastActivity.at
+        : (Number.isFinite(this.startedAt) ? this.startedAt : started)
+      const quietForMs = Math.max(0, now - lastActivityAt)
+      if (quietForMs >= quietMs && now - started >= minWaitMs) {
+        const waitedMs = now - started
+        this.noActivitySuccesses += 1
+        this.noActivityWaitMs += waitedMs
+        return { quiet: true, quietForMs, lastActivityAt, waitedMs }
+      }
+      if (now >= deadline) {
+        const waitedMs = now - started
+        this.noActivityTimeouts += 1
+        this.noActivityWaitMs += waitedMs
+        return { quiet: false, quietForMs, lastActivityAt, waitedMs }
+      }
+      await this.delay(Math.min(50, deadline - now))
+    }
+  }
+
   async waitForActivity({ timeout = 1_000, since = this.mark(), minFrames = 1 } = {}) {
     if (!this.active) throw this.failure || new Error('scrcpy观察器未启动。')
     this.activityChecks += 1
@@ -433,6 +466,10 @@ class ScrcpyObserver {
       quiet_checks: this.quietChecks,
       quiet_successes: this.quietSuccesses,
       quiet_timeouts: this.quietTimeouts,
+      no_activity_checks: this.noActivityChecks,
+      no_activity_successes: this.noActivitySuccesses,
+      no_activity_timeouts: this.noActivityTimeouts,
+      no_activity_wait_ms: this.noActivityWaitMs,
       activity_checks: this.activityChecks,
       activity_successes: this.activitySuccesses,
       activity_timeouts: this.activityTimeouts,

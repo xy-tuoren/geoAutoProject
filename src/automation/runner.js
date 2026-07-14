@@ -10,6 +10,7 @@ const { bundledScrcpyServer } = require('../runtime-paths')
 
 const DEFAULT_PACKAGE = 'com.aurora.xiaohe.aidoctor'
 const DEFAULT_MAX_LONG_IMAGE_HEIGHT = 12_000
+const REPLY_STABLE_QUIET_MS = 3_000
 
 function hierarchyBelongsToPackage(xml, packageName = DEFAULT_PACKAGE) {
   return iterNodes(String(xml)).some(node => nodeAttr(node, 'package') === packageName)
@@ -360,6 +361,10 @@ function createRunner(options) {
       scrcpy_observer_quiet_checks: snapshot.quiet_checks || 0,
       scrcpy_observer_quiet_successes: snapshot.quiet_successes || 0,
       scrcpy_observer_quiet_timeouts: snapshot.quiet_timeouts || 0,
+      scrcpy_observer_no_activity_checks: snapshot.no_activity_checks || 0,
+      scrcpy_observer_no_activity_successes: snapshot.no_activity_successes || 0,
+      scrcpy_observer_no_activity_timeouts: snapshot.no_activity_timeouts || 0,
+      scrcpy_observer_no_activity_wait_ms: snapshot.no_activity_wait_ms || 0,
       scrcpy_observer_activity_checks: snapshot.activity_checks || 0,
       scrcpy_observer_activity_successes: snapshot.activity_successes || 0,
       scrcpy_observer_activity_timeouts: snapshot.activity_timeouts || 0,
@@ -378,7 +383,7 @@ function createRunner(options) {
       ...(observerFallbackReason ? { scrcpy_observer_fallback_reason: observerFallbackReason } : {}),
     }
     if (baseline) {
-      for (const key of ['frames', 'activity_frames', 'burst_activity_frames', 'sparse_activity_frames', 'noise_frames', 'quiet_checks', 'quiet_successes', 'quiet_timeouts', 'activity_checks', 'activity_successes', 'activity_timeouts', 'settle_checks', 'settle_successes', 'settle_timeouts', 'settle_fast_successes', 'settle_conservative_successes', 'settle_no_activity', 'settle_wait_ms']) {
+      for (const key of ['frames', 'activity_frames', 'burst_activity_frames', 'sparse_activity_frames', 'noise_frames', 'quiet_checks', 'quiet_successes', 'quiet_timeouts', 'no_activity_checks', 'no_activity_successes', 'no_activity_timeouts', 'no_activity_wait_ms', 'activity_checks', 'activity_successes', 'activity_timeouts', 'settle_checks', 'settle_successes', 'settle_timeouts', 'settle_fast_successes', 'settle_conservative_successes', 'settle_no_activity', 'settle_wait_ms']) {
         metadata[`scrcpy_observer_question_${key}`] = Math.max(0, Number(snapshot[key] || 0) - Number(baseline[key] || 0))
       }
     }
@@ -563,7 +568,7 @@ function createRunner(options) {
   }
 
   async function waitForStableReplyPixels(timeout, { minWait = 12_000 } = {}) {
-    const stableMilliseconds = 5_000
+    const stableMilliseconds = REPLY_STABLE_QUIET_MS
     const pollInterval = 1_500
     const start = Date.now()
     let lastChange = start
@@ -604,7 +609,6 @@ function createRunner(options) {
         { minWait: Math.max(0, minWait - initialElapsed) },
       )
     }
-    const stableMilliseconds = 5_000
     const started = startedAt
     let lastProgress = 0
     while (Date.now() - started < timeout) {
@@ -620,21 +624,19 @@ function createRunner(options) {
       }
       try {
         const remaining = timeout - elapsed
-        const quiet = await observer.waitForQuiet({
+        const quiet = await observer.waitForNoActivity({
           timeout: Math.max(100, Math.min(6_000, remaining)),
-          windowMs: 1_000,
-          quietMs: stableMilliseconds,
-          maxFrames: 1,
+          quietMs: REPLY_STABLE_QUIET_MS,
         })
         if (!quiet.quiet) continue
         const mark = observer.mark()
         const xml = await normalizedHierarchy()
-        const confirmed = await observer.waitForQuiet({ timeout: 1_200, windowMs: 250, quietMs: 120, maxFrames: 1, minWaitMs: 120 })
+        const confirmed = await observer.waitForNoActivity({ timeout: 1_200, quietMs: 300, minWaitMs: 120 })
         const currentMark = observer.mark()
         const activityFramesDuringHierarchy = (currentMark.activityFrameCount ?? currentMark.frameCount)
           - (mark.activityFrameCount ?? mark.frameCount)
-        if (!hierarchyIsLoading(xml) && confirmed.quiet && activityFramesDuringHierarchy <= 1) {
-          log('waiting: scrcpy已确认回答画面持续静止，读取最终UI层级完成')
+        if (!hierarchyIsLoading(xml) && confirmed.quiet && activityFramesDuringHierarchy === 0) {
+          log('waiting: scrcpy已确认回答画面连续3秒无活动帧，读取最终UI层级完成')
           return { status: 'stable', xml }
         }
       } catch (error) {
