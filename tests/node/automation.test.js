@@ -9,7 +9,7 @@ const { questionVisible, currentQuestionText, replyTailOnScreen, findChatScrollB
 const { stackFramesInGroups, verifyFrameOverlap, verifyProductGridOverlap, imageInfo, imageLooksLoaded, imagesSimilar, imageRegionsStable, alignCropToWhitespace, stitchFramesWithOverlaps, composeLongImages, cropFramesAtTextSeams } = require('../../src/automation/images')
 const { createBatchDirectory, questionArtifactDirectory } = require('../../src/automation/utils')
 const { loadQuestionFile } = require('../../src/questions')
-const { adbConnectionLost, automationEntries, captureStableObserved, captureStableSandwich, calibratedProductFallbackOverlap, chatSwipePlan, conservativeFallbackOverlap, buildReplyImages, CancelledError, DOUYIN_SEARCH_SUMMARY_FILENAME, TOUTIAO_SEARCH_SUMMARY_FILENAME, douyinMiniAppCaptureBounds, douyinSearchInput, douyinViewFullBounds, fillQuestionInput, hierarchyBelongsToPackage, historyOnboardingVisible, maxLongImageHeight, normalizeAutomationEntries, observerResultRequiresFreshCapture, prepareEmbeddedEvidence, referenceProductsCaptureComplete, referenceProductsTrigger, referenceProductViewportReadiness, runQuestionsWithRecovery, scrollEndConfirmed, shouldRetryFullReplyCapture, toutiaoSearchInput, toutiaoViewMoreBounds, waitForPackageHierarchy } = require('../../src/automation/runner')
+const { adbConnectionLost, automationEntries, captureStableObserved, captureStableSandwich, calibratedProductFallbackOverlap, chatSwipePlan, conservativeFallbackOverlap, buildReplyImages, CancelledError, DOUYIN_SEARCH_SUMMARY_FILENAME, TOUTIAO_SEARCH_SUMMARY_FILENAME, douyinMiniAppCaptureBounds, douyinSearchInput, douyinViewFullBounds, fillQuestionInput, hierarchyBelongsToPackage, historyOnboardingVisible, maxLongImageHeight, normalizeAutomationEntries, observerResultRequiresFreshCapture, prepareEmbeddedEvidence, referenceProductsCaptureComplete, referenceProductSheetExpanded, referenceProductsTrigger, referenceProductViewportReadiness, requireQuestionLocated, runQuestionsWithRecovery, scrollEndConfirmed, shouldRetryFullReplyCapture, toutiaoSearchInput, toutiaoViewMoreBounds, waitForPackageHierarchy } = require('../../src/automation/runner')
 
 const CHAT_BOUNDS = [0, 200, 1080, 1800]
 
@@ -134,10 +134,26 @@ test('输入完成后不盲按返回键退出App', async () => {
   assert.deepEqual(events, [
     ['tap', 300, 250],
     ['delay', 300],
-    ['sendKeys', '真机测试', { clear: false }],
+    ['sendKeys', '真机测试', { clear: true }],
     ['delay', 350],
     ['source'],
   ])
+})
+
+test('输入层级误报为空时仍先清空，避免把新问题追加到残留文本', async () => {
+  const calls = []
+  await fillQuestionInput({
+    ui: { sendKeys: async (text, options) => calls.push([text, options]) },
+    tap: async () => {},
+    source: async () => '<hierarchy />',
+    delay: async () => {},
+  }, { bounds: [0, 0, 100, 50], text: '' }, '新问题')
+  assert.deepEqual(calls, [['新问题', { clear: true }]])
+})
+
+test('定位不到刚发送的问题时拒绝截取旧回答', () => {
+  assert.doesNotThrow(() => requireQuestionLocated(true, '新问题'))
+  assert.throws(() => requireQuestionLocated(false, '新问题'), /避免截取旧回答/)
 })
 
 test('稳定帧夹心校验首轮只需要两次截图', async () => {
@@ -710,6 +726,13 @@ test('检测到回答尾部药品入口后只要求完整采集药品，不依�
   assert.equal(referenceProductsCaptureComplete({ detected: true, products: { ...complete, confirmedEnd: false } }), false)
   assert.equal(referenceProductsCaptureComplete({ detected: true, products: { ...complete, continuityVerified: false } }), false)
   assert.equal(referenceProductsCaptureComplete({ detected: true, products: complete }), true)
+})
+
+test('药品抽屉按竖屏可视比例确认展开而不依赖固定列表顶部', () => {
+  assert.equal(referenceProductSheetExpanded([0, 84, 1080, 2282], [0, 544, 1080, 2282]), true)
+  assert.equal(referenceProductSheetExpanded([0, 56, 720, 1512], [0, 362, 720, 1512]), true)
+  assert.equal(referenceProductSheetExpanded([0, 900, 1080, 2282], [0, 1180, 1080, 2282]), false)
+  assert.equal(referenceProductSheetExpanded([0, 600, 720, 1512], [0, 840, 720, 1512]), false)
 })
 
 test('新版药品抽屉无图片节点时从卡片上半部推断药品图片区域', () => {

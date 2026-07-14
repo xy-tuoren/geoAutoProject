@@ -343,6 +343,20 @@ function referenceProductsCaptureComplete({ detected, products }) {
   return !detected || Boolean(products?.firstViewportIncluded && products?.imagesReady && products?.confirmedEnd && products?.continuityVerified)
 }
 
+function referenceProductSheetExpanded(sheet, list) {
+  if (!sheet || !list) return false
+  const viewportBottom = Math.max(sheet[3], list[3])
+  const sheetHeight = sheet[3] - sheet[1]
+  const listHeight = list[3] - list[1]
+  return sheet[1] <= viewportBottom * 0.22
+    && sheetHeight >= viewportBottom * 0.72
+    && listHeight >= viewportBottom * 0.55
+}
+
+function requireQuestionLocated(found, question) {
+  if (!found) throw new Error(`未能在当前会话中定位刚发送的问题“${question}”，为避免截取旧回答已停止本题`)
+}
+
 function calibratedProductFallbackOverlap(overlaps) {
   const recent = overlaps.filter(Number.isFinite).slice(-8)
   if (recent.length < 3) return null
@@ -404,7 +418,9 @@ async function prepareEmbeddedEvidence({ source, tap, delay, waitForStable, log 
 async function fillQuestionInput({ ui, tap, source, delay = sleep }, edit, question) {
   await tap((edit.bounds[0] + edit.bounds[2]) / 2, (edit.bounds[1] + edit.bounds[3]) / 2)
   await delay(300)
-  await ui.sendKeys(question, { clear: Boolean(edit.text) })
+  // Hierarchy text can lag behind the real EditText value. Always clear so a
+  // stale value cannot be appended and silently sent as a different question.
+  await ui.sendKeys(question, { clear: true })
   // FastInputIME has no visible keyboard on this device. Pressing Back after
   // sendKeys exits the app instead of hiding an IME, so let sendKeys restore
   // the user's original IME and confirm the target hierarchy directly.
@@ -794,6 +810,11 @@ function createRunner(options) {
     // WebDriver element value command. Mutating UI requests are not replayed
     // after failure, so an uncertain input state terminates the task.
     const restoredXml = await fillQuestionInput({ ui, tap, source }, edit, question)
+    const restoredEdit = iterNodes(restoredXml).find(item => nodeIsVisible(item)
+      && nodeAttr(item, 'class') === 'android.widget.EditText')
+    if (!restoredEdit || nodeAttr(restoredEdit, 'text') !== question) {
+      throw new Error('小荷App输入框未能确认问题文本，已停止发送。')
+    }
     cachedInputBounds = boundsForNodeAttribute(restoredXml, 'class', 'android.widget.EditText') || cachedInputBounds
     cachedSendBounds = findSubmitBounds(restoredXml) || cachedSendBounds
   }
@@ -1222,7 +1243,7 @@ function createRunner(options) {
     const navigationBounds = findChatScrollBounds(initialXml, size)
     validateCaptureViewport(size, navigationBounds)
     const topNavigationStarted = Date.now()
-    if (!(await scrollQuestionIntoView(question, navigationBounds))) log('capture: question not found while scrolling up; capturing from current position')
+    requireQuestionLocated(await scrollQuestionIntoView(question, navigationBounds), question)
     const topNavigationMs = Date.now() - topNavigationStarted
     log(`capture: 快速定位当前问题顶部耗时=${topNavigationMs}ms`)
     const evidence = await prepareEmbeddedEvidence({
@@ -1362,6 +1383,7 @@ function createRunner(options) {
       fullRetryCount: 0,
       fallbackReasons,
       topNavigationMs,
+      questionLocated: true,
       evidenceEmbedded: evidence.found,
       evidenceExpanded: evidence.expanded,
       productDetected,
@@ -1693,7 +1715,8 @@ function createRunner(options) {
       if (!list || !sheet || list[3] - list[1] < 100) {
         throw new Error('推荐药品入口已点击，但未识别到药品列表抽屉')
       }
-      for (let attempt = 0; attempt < 3 && list[1] > list[3] * 0.2; attempt += 1) {
+      log(`capture: 推荐药品抽屉初始边界 sheet=${sheet.join(',')} list=${list.join(',')}`)
+      for (let attempt = 0; attempt < 3 && !referenceProductSheetExpanded(sheet, list); attempt += 1) {
         const [left, top, right, bottom] = list
         const height = bottom - top
         const previousTop = top
@@ -1718,7 +1741,9 @@ function createRunner(options) {
         }
         if (list[1] >= previousTop - 40) await waitForVisualQuiet({ timeout: 700, fallbackMs: 250 })
       }
-      if (list[1] > list[3] * 0.2) throw new Error(`推荐药品抽屉未完全展开（列表顶部=${list[1]}），为避免从中间药品开始已停止采集`)
+      if (!referenceProductSheetExpanded(sheet, list)) {
+        throw new Error(`推荐药品抽屉未完全展开（sheet=${sheet.join(',')} list=${list.join(',')}），为避免从中间药品开始已停止采集`)
+      }
       await waitForVisualQuiet({ timeout: 900, fallbackMs: 250 })
       log(`capture: 推荐药品抽屉已先展开，列表视口=${list[3] - list[1]}px`)
       const expandedInitial = await captureProductViewport(list)
@@ -1750,7 +1775,7 @@ function createRunner(options) {
     if (stitch) {
       const replyCaptureStarted = Date.now()
       const capture = await captureMethod(question)
-      const { frames, transitions, bounds, recaptureCount, fullRetryCount, fallbackReasons, topNavigationMs, evidenceEmbedded, evidenceExpanded, productDetected, products, productCaptureAttempts, productCaptureMs, captureMetadata = {} } = capture
+      const { frames, transitions, bounds, recaptureCount, fullRetryCount, fallbackReasons, topNavigationMs, questionLocated, evidenceEmbedded, evidenceExpanded, productDetected, products, productCaptureAttempts, productCaptureMs, captureMetadata = {} } = capture
       if (!referenceProductsCaptureComplete({ detected: productDetected, products })) {
         throw new Error('检测到推荐药品入口，但药品截图未完整完成')
       }
@@ -1775,6 +1800,7 @@ function createRunner(options) {
         reply_recapture_count: recaptureCount,
         reply_full_retry_count: fullRetryCount,
         reply_top_navigation_ms: topNavigationMs,
+        ...(questionLocated !== undefined ? { reply_question_located: questionLocated } : {}),
         reply_evidence_embedded: evidenceEmbedded,
         reply_evidence_expanded: evidenceExpanded,
         reply_capture_ms: replyCaptureMs,
@@ -1839,7 +1865,19 @@ function createRunner(options) {
     }
     log('stage: 正在执行抖音搜索')
     await tap((search[0] + search[2]) / 2, (search[1] + search[3]) / 2)
-    const card = await waitForDouyinAnswerCard(payload.timeout * 1_000)
+    let card
+    try {
+      card = await waitForDouyinAnswerCard(payload.timeout * 1_000)
+    } catch (error) {
+      await fs.mkdir(directory, { recursive: true })
+      const [xml, frame] = await Promise.all([source(), screenshot()])
+      await Promise.all([
+        fs.writeFile(path.join(directory, '搜索超时.xml'), xml, 'utf8'),
+        fs.writeFile(path.join(directory, '搜索超时.png'), frame),
+      ])
+      log(`diagnostic: 抖音搜索超时现场已保存到 ${directory}`)
+      throw error
+    }
     log('stage: 已找到小荷AI医生回答卡片，正在截取搜索结果智能总结')
     const summary = await captureDouyinSearchSummary(card.size)
     await fs.mkdir(directory, { recursive: true })
@@ -2213,6 +2251,8 @@ module.exports = {
   scrollEndConfirmed,
   referenceProductsTrigger,
   referenceProductsCaptureComplete,
+  referenceProductSheetExpanded,
+  requireQuestionLocated,
   calibratedProductFallbackOverlap,
   referenceProductViewportReadiness,
   prepareEmbeddedEvidence,
