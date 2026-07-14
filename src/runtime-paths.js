@@ -45,6 +45,10 @@ function pythonProjectDirectory(root = projectRoot()) {
   return path.join(root, 'python')
 }
 
+function bundledScrcpyServer(options = {}) {
+  return path.join(bundledAssetsRoot(options), 'vendor', 'scrcpy', 'scrcpy-server-v4.1')
+}
+
 module.exports = {
   projectRoot,
   adbExecutableName,
@@ -55,5 +59,6 @@ module.exports = {
   u2RuntimePlatformDirectory,
   u2ExecutableName,
   bundledU2Executable,
+  bundledScrcpyServer,
   pythonProjectDirectory,
 }

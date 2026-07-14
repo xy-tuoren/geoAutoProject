@@ -11,7 +11,8 @@
     "run:android": "node src/cli.js",
     "setup": "npm install && npm run prepare:runtime",
     "prepare:u2": "node scripts/build-u2-runtime.js",
-    "prepare:runtime": "node scripts/prepare-runtime.js && npm run prepare:u2",
+    "prepare:scrcpy": "node scripts/prepare-scrcpy.js",
+    "prepare:runtime": "node scripts/prepare-runtime.js && npm run prepare:u2 && npm run prepare:scrcpy",
     "dist": "npm run prepare:runtime && electron-builder"
   },
   "devDependencies": {
@@ -34,7 +35,8 @@
     "extraResources": [
       { "from": "vendor/platform-tools/darwin", "to": "vendor/platform-tools/darwin" },
       { "from": "vendor/platform-tools/win32", "to": "vendor/platform-tools/win32" },
-      { "from": "vendor/u2-runtime", "to": "vendor/u2-runtime" }
+      { "from": "vendor/u2-runtime", "to": "vendor/u2-runtime" },
+      { "from": "vendor/scrcpy", "to": "vendor/scrcpy" }
     ],
     "mac": { "target": ["dmg"], "category": "public.app-category.productivity" },
     "win": { "target": ["nsis"] }

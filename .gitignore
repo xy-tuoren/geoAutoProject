@@ -17,3 +17,4 @@ python/.venv/
 python/build/
 python/dist/
 vendor/u2-runtime/
+vendor/scrcpy/

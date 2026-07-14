@@ -9,7 +9,7 @@ const { questionVisible, replyTailOnScreen, findChatScrollBounds, validateCaptur
 const { stackFramesInGroups, verifyFrameOverlap, imageInfo, imageLooksLoaded, imagesSimilar, imageRegionsStable, alignCropToWhitespace, stitchFramesWithOverlaps, composeLongImages, cropFramesAtTextSeams } = require('../../src/automation/images')
 const { createBatchDirectory, questionArtifactDirectory } = require('../../src/automation/utils')
 const { loadQuestionFile } = require('../../src/questions')
-const { adbConnectionLost, captureStableSandwich, chatSwipePlan, conservativeFallbackOverlap, buildReplyImages, fillQuestionInput, hierarchyBelongsToPackage, historyOnboardingVisible, maxLongImageHeight, prepareEmbeddedEvidence, scrollEndConfirmed } = require('../../src/automation/runner')
+const { adbConnectionLost, captureStableObserved, captureStableSandwich, chatSwipePlan, conservativeFallbackOverlap, buildReplyImages, fillQuestionInput, hierarchyBelongsToPackage, historyOnboardingVisible, maxLongImageHeight, prepareEmbeddedEvidence, scrollEndConfirmed } = require('../../src/automation/runner')
 
 const CHAT_BOUNDS = [0, 200, 1080, 1800]
 
@@ -79,6 +79,24 @@ test('夹心校验发现滚动未停时复用最新帧继续检测', async () =>
   assert.equal(result.stable, true)
   assert.equal(result.attempts, 2)
   assert.equal(captures, 3)
+})
+
+test('scrcpy确认静止后只截取一张无损PNG，并校验层级读取期间无重排', async () => {
+  const events = []
+  const observer = {
+    waitForQuiet: async () => { events.push('quiet'); return { quiet: true } },
+    mark: () => ({ frameCount: 7 }),
+  }
+  const result = await captureStableObserved({
+    observer,
+    capture: async () => { events.push('capture'); return Buffer.from('png') },
+    hierarchy: async () => { events.push('hierarchy'); return '<hierarchy />' },
+    hierarchyLoading: () => false,
+  })
+
+  assert.equal(result.stable, true)
+  assert.equal(result.observer, true)
+  assert.deepEqual(events, ['quiet', 'hierarchy', 'capture', 'quiet'])
 })
 
 test('只将聊天区域内且可见的问题视为当前问题', () => {

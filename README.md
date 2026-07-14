@@ -1,6 +1,6 @@
 # 提问自动化
 
-这是一个通过桌面应用批量控制 Android 手机提问、截图和归档的工具。界面、任务调度和截图引擎使用 Electron/Node.js；UI 层级、点击和输入使用内置的 Python uiautomator2 sidecar，ADB 负责无损截图、长图滚动和设备连接。
+这是一个通过桌面应用批量控制 Android 手机提问、截图和归档的工具。界面、任务调度和截图引擎使用 Electron/Node.js；UI 层级、点击和输入使用内置的 Python uiautomator2 sidecar，ADB 负责无损截图、长图滚动和设备连接，scrcpy server 只提供低分辨率画面活动信号以减少重复截图。
 
 ## Electron 操作面板（推荐）
 
@@ -19,6 +19,7 @@ npm run setup      # 首次初始化：安装依赖及自动化运行时
 npm run check      # Node 语法检查
 npm test           # 自动化核心逻辑测试
 npm run prepare:u2 # 构建当前平台的Python uiautomator2 sidecar
+npm run prepare:scrcpy # 下载并校验官方scrcpy server
 npm run dist       # 准备内置运行时并打包桌面应用
 ```
 
@@ -56,22 +57,22 @@ JSON 使用数组或 `questions` / `问题` 数组；Excel 读取第一个工作
 src/
   main/          # Electron 主进程和 preload
   renderer/      # 桌面面板页面、样式和交互
-  automation/    # uiautomator2客户端、ADB截图、长图拼接和UI层级解析
+  automation/    # uiautomator2客户端、scrcpy观察器、ADB截图、长图拼接和UI层级解析
   questions.js   # 问题文件导入
   runtime-paths.js
   cli.js
 python/          # uv管理的Python uiautomator2 sidecar、测试和PyInstaller配置
-scripts/         # 打包前准备ADB和Python sidecar
+scripts/         # 打包前准备ADB、Python sidecar和scrcpy server
 tests/node/      # Node 内置 test runner 测试
 ```
 
 ## 使用前检查
 
 - 手机必须完成 USB 调试授权（打包版已内置 adb，无需本机安装）。
-- 仓库内置 macOS 与 Windows 两套 Android Platform Tools；打包命令 `npm run dist` 会使用目标平台的ADB，并内置PyInstaller生成的Python uiautomator2 sidecar。运营不需要安装Node、Python、uv或ADB。
+- 仓库内置 macOS 与 Windows 两套 Android Platform Tools；打包命令 `npm run dist` 会使用目标平台的ADB，并内置PyInstaller生成的Python uiautomator2 sidecar及校验过的官方scrcpy server。运营不需要安装Node、Python、uv、ADB或scrcpy客户端。
 - UI层没有ADB降级：uiautomator2层级读取失败时只允许重启sidecar并重试一次；点击或输入失败会直接终止任务，避免表面成功但实际走回旧路径。
 - 正式截图始终使用ADB原始PNG，不使用uiautomator2截图接口。
-- 回答滚动后的稳定确认使用“ADB截图→uiautomator2层级→ADB截图”双帧夹心校验；稳定页面不再额外抓取第三张PNG。
-- 每个接缝最多局部重采一次；仍无法像素验证时只在该接缝保留少量重复内容并加浅色分隔，不再从顶部整题重采。
+- scrcpy观察器不解码、不保存也不参与拼接，只根据官方视频包的活动情况判断页面是否停稳；观察器不可用或无法及时确认时会明确记录原因，并改用“ADB截图→uiautomator2层级→ADB截图”双帧夹心校验，不影响UI后端选择。
+- 每个接缝最多局部重采一次；仍无法通过像素连续性验证时保留下一屏完整视口并加浅色分隔。会有重复内容，但不会依据不可靠的XML坐标或滚动距离裁掉文字。
 - `captures/` 已被 Git 忽略，因为截图、UI XML 和元数据可能包含敏感健康信息。
 - 健康问题和截图可能包含个人信息，请勿上传到公共仓库。

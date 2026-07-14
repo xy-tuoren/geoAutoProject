@@ -3,8 +3,10 @@ const path = require('node:path')
 const { execFile } = require('node:child_process')
 const { sleep, createBatchDirectory, questionArtifactDirectory } = require('./utils')
 const { iterNodes, nodeAttr, hierarchyIsLoading, parseBounds, boundsIntersect, boundsCenterY, estimateVerticalScrollShift, replyTailOnScreen, questionVisible, findChatScrollBounds, validateCaptureViewport, replyCaptureBounds, visibleLabelBounds, visibleLabelBoundsList, boundsForNodeAttribute, boundsListForNodeAttribute, evidencePanelBounds, evidenceMinimumHeight, referenceProductsSection } = require('./hierarchy')
-const { imageInfo, cropImage, imagesSimilar, imageRegionsStable, imageLooksLoaded, alignCropToWhitespace, verifyFrameOverlap, composeLongImages } = require('./images')
+const { imageInfo, cropImage, imagesSimilar, imageRegionsStable, imageLooksLoaded, verifyFrameOverlap, composeLongImages } = require('./images')
 const { U2Client } = require('./u2-client')
+const { ScrcpyObserver, SCRCPY_VERSION } = require('./scrcpy-observer')
+const { bundledScrcpyServer } = require('../runtime-paths')
 
 const DEFAULT_PACKAGE = 'com.aurora.xiaohe.aidoctor'
 const DEFAULT_MAX_LONG_IMAGE_HEIGHT = 12_000
@@ -175,11 +177,55 @@ async function captureStableSandwich({
   return { frame: before, xml: lastXml || await hierarchy(), stable: false, attempts }
 }
 
+async function captureStableObserved({
+  observer,
+  capture,
+  hierarchy,
+  hierarchyLoading,
+  now = Date.now,
+}, timeout = 2_500) {
+  const deadline = now() + timeout
+  let lastFrame = null
+  let lastXml = ''
+  let attempts = 0
+  while (now() < deadline) {
+    const remaining = deadline - now()
+    const quiet = await observer.waitForQuiet({
+      timeout: Math.max(100, remaining),
+      windowMs: 450,
+      quietMs: 250,
+      maxFrames: 1,
+    })
+    if (!quiet.quiet) break
+    const mark = observer.mark()
+    lastXml = await hierarchy()
+    lastFrame = await capture()
+    attempts += 1
+    const confirmRemaining = Math.max(100, Math.min(800, deadline - now()))
+    const confirmed = await observer.waitForQuiet({
+      timeout: confirmRemaining,
+      windowMs: 250,
+      quietMs: 120,
+      maxFrames: 1,
+    })
+    const framesDuringCapture = observer.mark().frameCount - mark.frameCount
+    if (!hierarchyLoading(lastXml) && confirmed.quiet && framesDuringCapture <= 1) {
+      return { frame: lastFrame, xml: lastXml, stable: true, attempts, observer: true }
+    }
+  }
+  if (!lastXml) lastXml = await hierarchy()
+  if (!lastFrame) lastFrame = await capture()
+  return { frame: lastFrame, xml: lastXml, stable: false, attempts, observer: true }
+}
+
 function createRunner(options) {
   let cancelled = false
   let activeSerial = null
   let cachedInputBounds = null
   let cachedSendBounds = null
+  let observerFallbackReason = null
+  let observerFallbackLogged = false
+  const log = text => options.log(`${text}${String(text).endsWith('\n') ? '' : '\n'}`)
   const ui = options.uiClient || new U2Client({
     root: options.root,
     isPackaged: options.isPackaged,
@@ -187,8 +233,34 @@ function createRunner(options) {
     adbPath: options.adbPath,
     log: options.log,
   })
+  const observer = options.scrcpyObserver || new ScrcpyObserver({
+    adbPath: options.adbPath,
+    serverPath: bundledScrcpyServer(options),
+    log,
+  })
   const checkCancelled = () => { if (cancelled) throw new CancelledError() }
-  const log = text => options.log(`${text}${String(text).endsWith('\n') ? '' : '\n'}`)
+
+  function observerMetadata() {
+    const snapshot = typeof observer.snapshot === 'function'
+      ? observer.snapshot()
+      : { active: Boolean(observer.active), version: SCRCPY_VERSION, frames: 0 }
+    return {
+      scrcpy_observer_requested: true,
+      scrcpy_observer_active: Boolean(snapshot.active),
+      scrcpy_observer_version: snapshot.version || SCRCPY_VERSION,
+      scrcpy_observer_frames: snapshot.frames || 0,
+      ...(observerFallbackReason ? { scrcpy_observer_fallback_reason: observerFallbackReason } : {}),
+    }
+  }
+
+  async function disableObserver(error) {
+    observerFallbackReason ||= error?.message || String(error)
+    if (!observerFallbackLogged) {
+      log(`scrcpy画面观察器不可用，稳定性判断改用双ADB PNG校验（UI仍严格使用Python uiautomator2）：${observerFallbackReason}`)
+      observerFallbackLogged = true
+    }
+    await observer.stop().catch(() => {})
+  }
 
   async function screenshot() {
     checkCancelled()
@@ -293,8 +365,7 @@ function createRunner(options) {
     return (await source()).replace(/focused="(?:true|false)"/g, 'focused=""').replace(/selected="(?:true|false)"/g, 'selected=""')
   }
 
-  async function waitForStableReply(timeout) {
-    const minWait = 12_000
+  async function waitForStableReplyPixels(timeout, { minWait = 12_000 } = {}) {
     const stableMilliseconds = 5_000
     const pollInterval = 1_500
     const start = Date.now()
@@ -325,6 +396,49 @@ function createRunner(options) {
     }
     if (!lastXml) lastXml = await normalizedHierarchy()
     return { status: hierarchyIsLoading(lastXml) ? 'loading_timeout' : 'timeout', xml: lastXml }
+  }
+
+  async function waitForStableReply(timeout) {
+    if (!observer.active) return waitForStableReplyPixels(timeout)
+    const minWait = 12_000
+    const stableMilliseconds = 5_000
+    const started = Date.now()
+    let lastProgress = 0
+    while (Date.now() - started < timeout) {
+      checkCancelled()
+      const elapsed = Date.now() - started
+      if (Date.now() - lastProgress >= 5_000) {
+        log('waiting: reply still generating…')
+        lastProgress = Date.now()
+      }
+      if (elapsed < minWait) {
+        await sleep(Math.min(1_000, minWait - elapsed))
+        continue
+      }
+      try {
+        const remaining = timeout - elapsed
+        const quiet = await observer.waitForQuiet({
+          timeout: Math.max(100, Math.min(6_000, remaining)),
+          windowMs: 1_000,
+          quietMs: stableMilliseconds,
+          maxFrames: 1,
+        })
+        if (!quiet.quiet) continue
+        const mark = observer.mark()
+        const xml = await normalizedHierarchy()
+        const confirmed = await observer.waitForQuiet({ timeout: 1_200, windowMs: 250, quietMs: 120, maxFrames: 1 })
+        if (!hierarchyIsLoading(xml) && confirmed.quiet && observer.mark().frameCount - mark.frameCount <= 1) {
+          log('waiting: scrcpy已确认回答画面持续静止，读取最终UI层级完成')
+          return { status: 'stable', xml }
+        }
+      } catch (error) {
+        await disableObserver(error)
+        const remaining = Math.max(1_000, timeout - (Date.now() - started))
+        return waitForStableReplyPixels(remaining, { minWait: 0 })
+      }
+    }
+    const xml = await normalizedHierarchy()
+    return { status: hierarchyIsLoading(xml) ? 'loading_timeout' : 'timeout', xml }
   }
 
   async function swipeChat(bounds, direction, fraction = 0.6, {
@@ -359,6 +473,23 @@ function createRunner(options) {
   }
 
   async function waitForStableReplyRegion(bounds, timeout = 8_000) {
+    if (observer.active) {
+      const started = Date.now()
+      try {
+        const observed = await captureStableObserved({
+          observer,
+          capture: async () => cropImage(await screenshot(), bounds),
+          hierarchy: source,
+          hierarchyLoading: hierarchyIsLoading,
+        }, Math.min(timeout, 2_500))
+        if (observed.stable) return observed
+        observerFallbackReason ||= 'scrcpy在限定时间内未确认画面静止'
+        log('capture: scrcpy未在2.5秒内确认画面静止，本屏使用双ADB PNG夹心校验')
+      } catch (error) {
+        await disableObserver(error)
+      }
+      timeout = Math.max(1_000, timeout - (Date.now() - started))
+    }
     return captureStableSandwich({
       capture: async () => cropImage(await screenshot(), bounds),
       hierarchy: source,
@@ -465,11 +596,14 @@ function createRunner(options) {
             transition = { verified: true, overlap: await verifyFrameOverlap(before, after, expectedOverlap) }
           } catch (retryError) {
             const reason = retryError.message || error.message
-            const fallbackTarget = conservativeFallbackOverlap(frameHeight, reliableMeasuredShift, shift, retryError.candidateOverlaps)
-            const fallbackOverlap = fallbackTarget > 0 ? await alignCropToWhitespace(after, fallbackTarget) : 0
+            // Once pixel continuity cannot be proven, XML coordinates and the
+            // requested swipe distance are only estimates. Cropping by either
+            // can silently remove lines after a Compose reflow, so retain the
+            // complete next viewport and make the duplicate boundary explicit.
+            const fallbackOverlap = 0
             transition = { verified: false, fallbackOverlap, reason }
             fallbackReasons.push(reason)
-            log(`capture: 接缝无法精确校验，下一屏安全起点=${fallbackOverlap}px，并保留重复内容和浅色留白：${reason}`)
+            log(`capture: 接缝无法精确校验，保留下一屏完整视口、重复内容和浅色留白：${reason}`)
           }
         }
         if (!(await imagesSimilar(frames.at(-1), after, 3))) {
@@ -692,6 +826,7 @@ function createRunner(options) {
       }
     } else await fs.writeFile(screenshotPath, await screenshot())
     await fs.writeFile(xmlPath, xml || await normalizedHierarchy(), 'utf8')
+    resultMeta = { ...resultMeta, ...observerMetadata() }
     await fs.writeFile(metadataPath, JSON.stringify({ question, status, created_at: new Date().toISOString().replace(/\.\d{3}Z$/, ''), screenshot: screenshotPath, hierarchy: xmlPath, ...resultMeta }, null, 2), 'utf8')
     return { screenshot: screenshotPath, hierarchy: xmlPath, metadata: metadataPath }
   }
@@ -732,6 +867,11 @@ function createRunner(options) {
         await ui.start(payload.serial)
         await ui.appStart(DEFAULT_PACKAGE)
         log('UI节点、点击和输入严格使用Python uiautomator2；ADB仅用于无损截图和长图滚动')
+        try {
+          await observer.start(payload.serial)
+        } catch (error) {
+          await disableObserver(error)
+        }
         await sleep(800)
         await waitForInput(15_000)
         log(`device=${payload.serial} package=${DEFAULT_PACKAGE} batch=${batchDirectory}`)
@@ -752,11 +892,13 @@ function createRunner(options) {
         }, null, 2), 'utf8').catch(() => {})
         throw error
       } finally {
+        await observer.stop().catch(() => {})
         await ui.stop().catch(() => {})
       }
     },
     async stop() {
       cancelled = true
+      await observer.stop().catch(() => {})
       await ui.stop().catch(() => {})
     },
   }
@@ -774,6 +916,7 @@ module.exports = {
   prepareEmbeddedEvidence,
   fillQuestionInput,
   captureStableSandwich,
+  captureStableObserved,
   adbConnectionLost,
   historyOnboardingVisible,
   maxLongImageHeight,
