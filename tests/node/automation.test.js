@@ -81,6 +81,26 @@ test('夹心校验发现滚动未停时复用最新帧继续检测', async () =>
   assert.equal(captures, 3)
 })
 
+test('从scrcpy路径切换夹心校验时复用已有PNG', async () => {
+  let now = 0
+  const events = []
+  const initialFrame = Buffer.from('same')
+  const result = await captureStableSandwich({
+    capture: async () => { events.push('capture'); return Buffer.from('same') },
+    hierarchy: async () => { events.push('hierarchy'); return '<hierarchy />' },
+    framesStable: async (before, after) => before.equals(after),
+    hierarchyLoading: () => false,
+    delay: async milliseconds => { events.push(`delay:${milliseconds}`); now += milliseconds },
+    now: () => now,
+    interval: 80,
+    initialFrame,
+  }, 1_000)
+
+  assert.equal(result.stable, true)
+  assert.equal(result.attempts, 1)
+  assert.deepEqual(events, ['delay:80', 'hierarchy', 'capture'])
+})
+
 test('scrcpy确认静止后只截取一张无损PNG，并校验层级读取期间无重排', async () => {
   const events = []
   const observer = {
@@ -126,6 +146,94 @@ test('滑动后的稳定截图优先使用活动标记快速判静止', async ()
     ['capture'],
     ['quiet'],
   ])
+})
+
+test('scrcpy未等到静止时不额外读层级或截PNG', async () => {
+  const events = []
+  const result = await captureStableObserved({
+    observer: {
+      waitForSettleSince: async () => ({ settled: false, activity: true }),
+    },
+    settleSince: { at: 0, frameCount: 0, activityFrameCount: 0 },
+    capture: async () => { events.push('capture'); return Buffer.from('png') },
+    hierarchy: async () => { events.push('hierarchy'); return '<hierarchy />' },
+    hierarchyLoading: () => false,
+  })
+
+  assert.equal(result.stable, false)
+  assert.equal(result.reason, 'settle_timeout')
+  assert.equal(result.frame, null)
+  assert.equal(result.xml, '')
+  assert.deepEqual(events, [])
+})
+
+test('scrcpy二次确认失败时保留PNG给ADB夹心校验', async () => {
+  const events = []
+  let quietChecks = 0
+  const observer = {
+    waitForQuiet: async () => {
+      quietChecks += 1
+      return quietChecks === 1 ? { quiet: true } : { quiet: false }
+    },
+    mark: () => ({ frameCount: 7, activityFrameCount: 2 }),
+  }
+  const result = await captureStableObserved({
+    observer,
+    capture: async () => { events.push('capture'); return Buffer.from('png') },
+    hierarchy: async () => { events.push('hierarchy'); return '<hierarchy />' },
+    hierarchyLoading: () => false,
+  })
+
+  assert.equal(result.stable, false)
+  assert.equal(result.reason, 'confirmation_timeout')
+  assert.ok(result.frame.equals(Buffer.from('png')))
+  assert.equal(result.xml, '<hierarchy />')
+  assert.deepEqual(events, ['hierarchy', 'capture'])
+})
+
+test('scrcpy二次确认忽略截图期间的零散编码包', async () => {
+  let marks = 0
+  const observer = {
+    waitForQuiet: async () => ({ quiet: true }),
+    mark: () => {
+      marks += 1
+      return marks === 1
+        ? { activityFrameCount: 10, burstActivityFrameCount: 4 }
+        : { activityFrameCount: 13, burstActivityFrameCount: 4 }
+    },
+  }
+
+  const result = await captureStableObserved({
+    observer,
+    capture: async () => Buffer.from('png'),
+    hierarchy: async () => '<hierarchy />',
+    hierarchyLoading: () => false,
+  })
+
+  assert.equal(result.stable, true)
+})
+
+test('scrcpy二次确认仍拒绝截图期间的连续活动突发', async () => {
+  let marks = 0
+  const observer = {
+    waitForQuiet: async () => ({ quiet: true }),
+    mark: () => {
+      marks += 1
+      return marks === 1
+        ? { activityFrameCount: 10, burstActivityFrameCount: 4 }
+        : { activityFrameCount: 13, burstActivityFrameCount: 5 }
+    },
+  }
+
+  const result = await captureStableObserved({
+    observer,
+    capture: async () => Buffer.from('png'),
+    hierarchy: async () => '<hierarchy />',
+    hierarchyLoading: () => false,
+  })
+
+  assert.equal(result.stable, false)
+  assert.equal(result.reason, 'capture_activity')
 })
 
 test('只将聊天区域内且可见的问题视为当前问题', () => {

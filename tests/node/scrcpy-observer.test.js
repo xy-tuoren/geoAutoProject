@@ -1,6 +1,6 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
-const { ScrcpyObserver, ScrcpyPacketParser, frameCarriesActivity } = require('../../src/automation/scrcpy-observer')
+const { ActivityBurstDetector, ScrcpyObserver, ScrcpyPacketParser, frameCarriesActivity } = require('../../src/automation/scrcpy-observer')
 
 function sessionPacket(width, height) {
   const packet = Buffer.alloc(12)
@@ -87,6 +87,24 @@ test('小编码包作为静止画面噪声，关键帧始终作为活动', () =>
   assert.equal(frameCarriesActivity({ size: 1_023, keyFrame: false }), false)
   assert.equal(frameCarriesActivity({ size: 1_024, keyFrame: false }), true)
   assert.equal(frameCarriesActivity({ size: 32, keyFrame: true }), true)
+})
+
+test('零散大包和关键帧不形成画面活动突发', () => {
+  const detector = new ActivityBurstDetector({ windowMs: 220 })
+
+  assert.equal(detector.push({ size: 2_000, keyFrame: false }, 0), false)
+  assert.equal(detector.push({ size: 32, keyFrame: true }, 300), false)
+  assert.equal(detector.push({ size: 2_000, keyFrame: false }, 600), false)
+})
+
+test('连续大包仍被判定为真实画面活动', () => {
+  const detector = new ActivityBurstDetector({ windowMs: 220 })
+
+  assert.equal(detector.push({ size: 2_000, keyFrame: false }, 0), false)
+  assert.equal(detector.push({ size: 2_000, keyFrame: false }, 100), true)
+  assert.equal(detector.lastPromotionCount, 2)
+  assert.equal(detector.push({ size: 32, keyFrame: true }, 180), true)
+  assert.equal(detector.lastPromotionCount, 1)
 })
 
 test('二次确认即使已有静止历史也会观察指定时长', async () => {
@@ -284,4 +302,27 @@ test('持续活动超过硬上限时返回静止超时', async () => {
   assert.equal(result.settled, false)
   assert.equal(result.waitedMs, 500)
   assert.equal(observer.snapshot().settle_timeouts, 1)
+})
+
+test('静止硬上限从实际开始等待时计算', async () => {
+  let now = 1_000
+  const observer = new ScrcpyObserver({
+    now: () => now,
+    delay: async milliseconds => {
+      now += milliseconds
+      observer.activityFrameCount += 1
+      observer.frames.push({ at: now, size: 2_000, keyFrame: false, activity: true })
+    },
+  })
+  observer.socket = { destroyed: false }
+  observer.session = { codec: 'h264', width: 160, height: 360 }
+
+  const result = await observer.waitForSettleSince({ at: 0, frameCount: 0, activityFrameCount: 0 }, {
+    activityTimeout: 100,
+    fastTimeout: 200,
+    hardTimeout: 500,
+  })
+
+  assert.equal(result.settled, false)
+  assert.equal(result.waitedMs, 500)
 })

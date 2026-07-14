@@ -216,9 +216,11 @@ async function captureStableSandwich({
   delay = sleep,
   now = Date.now,
   interval = 80,
+  initialFrame = null,
+  initialXml = '',
 }, timeout = 8_000) {
-  let before = await capture()
-  let lastXml = ''
+  let before = initialFrame || await capture()
+  let lastXml = initialXml
   let attempts = 0
   const deadline = now() + timeout
   while (now() < deadline) {
@@ -244,44 +246,62 @@ async function captureStableObserved({
   hierarchyLoading,
   settleSince = null,
   now = Date.now,
+  settleWaitCap = 1_300,
 }, timeout = 2_500) {
   const deadline = now() + timeout
-  let lastFrame = null
-  let lastXml = ''
-  let attempts = 0
-  while (now() < deadline) {
-    const remaining = deadline - now()
-    const settled = settleSince && attempts === 0 && typeof observer.waitForSettleSince === 'function'
-      ? await observer.waitForSettleSince(settleSince, { hardTimeout: Math.max(100, remaining) })
-      : await observer.waitForQuiet({
-          timeout: Math.max(100, remaining),
-          windowMs: 450,
-          quietMs: 250,
-          maxFrames: 1,
-        })
-    if (!(settled.settled ?? settled.quiet)) break
-    const mark = observer.mark()
-    lastXml = await hierarchy()
-    lastFrame = await capture()
-    attempts += 1
-    const confirmRemaining = Math.max(100, Math.min(800, deadline - now()))
-    const confirmed = await observer.waitForQuiet({
-      timeout: confirmRemaining,
-      windowMs: 180,
-      quietMs: 80,
-      maxFrames: 1,
-      minWaitMs: Math.min(80, confirmRemaining),
-    })
-    const currentMark = observer.mark()
-    const activityFramesDuringCapture = (currentMark.activityFrameCount ?? currentMark.frameCount)
-      - (mark.activityFrameCount ?? mark.frameCount)
-    if (!hierarchyLoading(lastXml) && confirmed.quiet && activityFramesDuringCapture <= 1) {
-      return { frame: lastFrame, xml: lastXml, stable: true, attempts, observer: true }
-    }
+  const remaining = deadline - now()
+  if (remaining <= 0) {
+    return { frame: null, xml: '', stable: false, attempts: 0, observer: true, reason: 'observer_timeout' }
   }
-  if (!lastXml) lastXml = await hierarchy()
-  if (!lastFrame) lastFrame = await capture()
-  return { frame: lastFrame, xml: lastXml, stable: false, attempts, observer: true }
+  // scrcpy is the cheap first gate. Do not let continuous animation consume
+  // the whole 2.5 s budget and then stack a complete ADB fallback behind it.
+  const initialWaitTimeout = Math.max(1, Math.min(settleWaitCap, remaining))
+  const settled = settleSince && typeof observer.waitForSettleSince === 'function'
+    ? await observer.waitForSettleSince(settleSince, { hardTimeout: initialWaitTimeout })
+    : await observer.waitForQuiet({
+        timeout: initialWaitTimeout,
+        windowMs: 450,
+        quietMs: 250,
+        maxFrames: 1,
+      })
+  if (!(settled.settled ?? settled.quiet)) {
+    return { frame: null, xml: '', stable: false, attempts: 0, observer: true, reason: 'settle_timeout' }
+  }
+
+  const mark = observer.mark()
+  const xml = await hierarchy()
+  const frame = await capture()
+  const confirmRemaining = Math.min(800, deadline - now())
+  if (confirmRemaining <= 0) {
+    return { frame, xml, stable: false, attempts: 1, observer: true, reason: 'capture_deadline' }
+  }
+  const confirmed = await observer.waitForQuiet({
+    timeout: confirmRemaining,
+    windowMs: 180,
+    quietMs: 80,
+    maxFrames: 1,
+    minWaitMs: Math.min(80, confirmRemaining),
+  })
+  const currentMark = observer.mark()
+  const burstCountersAvailable = Number.isFinite(currentMark.burstActivityFrameCount)
+    && Number.isFinite(mark.burstActivityFrameCount)
+  const activityFramesDuringCapture = burstCountersAvailable
+    ? currentMark.burstActivityFrameCount - mark.burstActivityFrameCount
+    : (currentMark.activityFrameCount ?? currentMark.frameCount)
+      - (mark.activityFrameCount ?? mark.frameCount)
+  const loading = hierarchyLoading(xml)
+  // A single large H.264 packet or periodic keyframe is encoder noise on some
+  // devices. Only a short burst can invalidate the XML→PNG capture window.
+  const captureActivityAcceptable = burstCountersAvailable
+    ? activityFramesDuringCapture === 0
+    : activityFramesDuringCapture <= 1
+  if (!loading && confirmed.quiet && captureActivityAcceptable) {
+    return { frame, xml, stable: true, attempts: 1, observer: true }
+  }
+  const reason = loading
+    ? 'hierarchy_loading'
+    : (!confirmed.quiet ? 'confirmation_timeout' : 'capture_activity')
+  return { frame, xml, stable: false, attempts: 1, observer: true, reason }
 }
 
 function createRunner(options) {
@@ -294,6 +314,7 @@ function createRunner(options) {
   let observerRecoveryAttempts = 0
   let observerRecoverySuccesses = 0
   let observerRecoveryFailures = 0
+  let observerRegionFallbacks = 0
   let adbPngCaptures = 0
   const log = text => options.log(`${text}${String(text).endsWith('\n') ? '' : '\n'}`)
   const ui = options.uiClient || new U2Client({
@@ -315,6 +336,7 @@ function createRunner(options) {
       attempts: observerRecoveryAttempts,
       successes: observerRecoverySuccesses,
       failures: observerRecoveryFailures,
+      regionFallbacks: observerRegionFallbacks,
       adbPngCaptures,
     }
   }
@@ -329,6 +351,8 @@ function createRunner(options) {
       scrcpy_observer_version: snapshot.version || SCRCPY_VERSION,
       scrcpy_observer_frames: snapshot.frames || 0,
       scrcpy_observer_activity_frames: snapshot.activity_frames || 0,
+      scrcpy_observer_burst_activity_frames: snapshot.burst_activity_frames || 0,
+      scrcpy_observer_sparse_activity_frames: snapshot.sparse_activity_frames || 0,
       scrcpy_observer_noise_frames: snapshot.noise_frames || 0,
       scrcpy_observer_frames_last_second: snapshot.frames_last_second || 0,
       scrcpy_observer_activity_frames_last_second: snapshot.activity_frames_last_second || 0,
@@ -349,11 +373,12 @@ function createRunner(options) {
       scrcpy_observer_recovery_attempts: observerRecoveryAttempts,
       scrcpy_observer_recovery_successes: observerRecoverySuccesses,
       scrcpy_observer_recovery_failures: observerRecoveryFailures,
+      scrcpy_observer_region_fallbacks: observerRegionFallbacks,
       adb_png_captures: adbPngCaptures,
       ...(observerFallbackReason ? { scrcpy_observer_fallback_reason: observerFallbackReason } : {}),
     }
     if (baseline) {
-      for (const key of ['frames', 'activity_frames', 'noise_frames', 'quiet_checks', 'quiet_successes', 'quiet_timeouts', 'activity_checks', 'activity_successes', 'activity_timeouts', 'settle_checks', 'settle_successes', 'settle_timeouts', 'settle_fast_successes', 'settle_conservative_successes', 'settle_no_activity', 'settle_wait_ms']) {
+      for (const key of ['frames', 'activity_frames', 'burst_activity_frames', 'sparse_activity_frames', 'noise_frames', 'quiet_checks', 'quiet_successes', 'quiet_timeouts', 'activity_checks', 'activity_successes', 'activity_timeouts', 'settle_checks', 'settle_successes', 'settle_timeouts', 'settle_fast_successes', 'settle_conservative_successes', 'settle_no_activity', 'settle_wait_ms']) {
         metadata[`scrcpy_observer_question_${key}`] = Math.max(0, Number(snapshot[key] || 0) - Number(baseline[key] || 0))
       }
     }
@@ -361,6 +386,7 @@ function createRunner(options) {
       metadata.scrcpy_observer_question_recovery_attempts = observerRecoveryAttempts - recoveryBaseline.attempts
       metadata.scrcpy_observer_question_recovery_successes = observerRecoverySuccesses - recoveryBaseline.successes
       metadata.scrcpy_observer_question_recovery_failures = observerRecoveryFailures - recoveryBaseline.failures
+      metadata.scrcpy_observer_question_region_fallbacks = observerRegionFallbacks - recoveryBaseline.regionFallbacks
       metadata.adb_png_captures_question = adbPngCaptures - recoveryBaseline.adbPngCaptures
     }
     return metadata
@@ -643,6 +669,7 @@ function createRunner(options) {
   }
 
   async function waitForRegionPixelsStable(bounds, timeout = 8_000) {
+    let observedFrame = null
     if (observer.active) {
       const started = Date.now()
       try {
@@ -653,6 +680,8 @@ function createRunner(options) {
           hierarchyLoading: () => false,
         }, Math.min(timeout, 2_500))
         if (observed.stable) return observed.frame
+        observedFrame = observed.frame
+        observerRegionFallbacks += 1
       } catch (error) {
         if (await recoverObserver(error)) {
           const remaining = Math.max(500, timeout - (Date.now() - started))
@@ -661,7 +690,7 @@ function createRunner(options) {
       }
       timeout = Math.max(500, timeout - (Date.now() - started))
     }
-    let frame = await cropImage(await screenshot(), bounds)
+    let frame = observedFrame || await cropImage(await screenshot(), bounds)
     const deadline = Date.now() + timeout
     while (Date.now() < deadline) {
       await sleep(300)
@@ -673,10 +702,11 @@ function createRunner(options) {
   }
 
   async function waitForStableReplyRegion(bounds, timeout = 8_000, { settleSince = null } = {}) {
+    let observed = null
     if (observer.active) {
       const started = Date.now()
       try {
-        const observed = await captureStableObserved({
+        observed = await captureStableObserved({
           observer,
           capture: async () => cropImage(await screenshot(), bounds),
           hierarchy: source,
@@ -684,8 +714,10 @@ function createRunner(options) {
           settleSince,
         }, Math.min(timeout, 2_500))
         if (observed.stable) return observed
-        observerFallbackReason ||= 'scrcpy在限定时间内未确认画面静止'
-        log('capture: scrcpy未在2.5秒内确认画面静止，本屏使用双ADB PNG夹心校验')
+        observerRegionFallbacks += 1
+        const elapsed = Date.now() - started
+        const reuse = observed.frame ? '，复用已取得的PNG' : ''
+        log(`capture: scrcpy快速静止判断未通过（${observed.reason || 'unknown'}，${elapsed}ms）${reuse}，转ADB夹心复核`)
       } catch (error) {
         if (await recoverObserver(error)) {
           const remaining = Math.max(1_000, timeout - (Date.now() - started))
@@ -700,6 +732,8 @@ function createRunner(options) {
       framesStable: imageRegionsStable,
       hierarchyLoading: hierarchyIsLoading,
       interval: 80,
+      initialFrame: observed?.frame || null,
+      initialXml: observed?.xml || '',
     }, timeout)
   }
 
@@ -889,12 +923,15 @@ function createRunner(options) {
         }
       }
       if (!capture?.stable) {
+        if (observer.active) observerRegionFallbacks += 1
         capture = await captureStableSandwich({
           capture: async () => cropImage(await screenshot(), listBounds),
           hierarchy: source,
           framesStable: imageRegionsStable,
           hierarchyLoading: () => false,
           interval: 80,
+          initialFrame: capture?.frame || null,
+          initialXml: capture?.xml || '',
         }, remaining)
       }
       const readiness = await referenceProductViewportReadiness(capture.frame, capture.xml, listBounds)

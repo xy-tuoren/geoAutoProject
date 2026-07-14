@@ -61,7 +61,7 @@ function createWindow() {
     minWidth: 960,
     minHeight: 700,
     backgroundColor: '#eef2f8',
-    title: '提问自动化',
+    title: 'geo数据采集',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -169,7 +169,7 @@ ipcMain.handle('log:export', async (_event, text) => {
   const stampName = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
   const result = await dialog.showSaveDialog({
     title: '导出执行日志',
-    defaultPath: path.join(app.getPath('documents'), `提问自动化日志_${stampName}.txt`),
+    defaultPath: path.join(app.getPath('documents'), `geo数据采集日志_${stampName}.txt`),
     filters: [{ name: '文本文件', extensions: ['txt'] }],
   })
   if (result.canceled || !result.filePath) {

@@ -7,12 +7,43 @@ const { sleep } = require('./utils')
 const SCRCPY_VERSION = '4.1'
 const MAX_PACKET_SIZE = 32 * 1024 * 1024
 const MIN_ACTIVITY_PACKET_SIZE = 1024
+const ACTIVITY_BURST_WINDOW_MS = 220
 
 function frameCarriesActivity(packet) {
   // At max_size=360, encoder heartbeat/repeat packets on a pixel-stable page
   // are typically only tens or hundreds of bytes. A real viewport change is
   // materially larger; keyframes remain activity regardless of packet size.
   return Boolean(packet.keyFrame || packet.size >= MIN_ACTIVITY_PACKET_SIZE)
+}
+
+class ActivityBurstDetector {
+  constructor({ windowMs = ACTIVITY_BURST_WINDOW_MS } = {}) {
+    this.windowMs = windowMs
+    this.lastCandidateAt = null
+    this.inBurst = false
+    this.lastPromotionCount = 0
+  }
+
+  push(packet, at) {
+    this.lastPromotionCount = 0
+    if (!frameCarriesActivity(packet)) return false
+    const burst = Number.isFinite(this.lastCandidateAt)
+      && Number.isFinite(at)
+      && at - this.lastCandidateAt >= 0
+      && at - this.lastCandidateAt <= this.windowMs
+    if (burst) {
+      this.lastPromotionCount = this.inBurst ? 1 : 2
+      this.inBurst = true
+    } else this.inBurst = false
+    this.lastCandidateAt = at
+    return burst
+  }
+
+  reset() {
+    this.lastCandidateAt = null
+    this.inBurst = false
+    this.lastPromotionCount = 0
+  }
 }
 
 function quietWindowState(frames, { now, startedAt, windowMs, quietMs, maxFrames }) {
@@ -124,6 +155,8 @@ class ScrcpyObserver {
     this.frames = []
     this.frameCount = 0
     this.activityFrameCount = 0
+    this.burstActivityFrameCount = 0
+    this.activityBurstDetector = new ActivityBurstDetector()
     this.failure = null
     this.stopping = false
     this.startedAt = null
@@ -156,6 +189,7 @@ class ScrcpyObserver {
     this.serial = serial
     this.failure = null
     this.frames = []
+    this.activityBurstDetector.reset()
     this.startedAt = null
     this.scid = (crypto.randomBytes(4).readUInt32BE(0) & 0x7fffffff).toString(16).padStart(8, '0')
     const remote = `/data/local/tmp/geoauto-scrcpy-server-v${SCRCPY_VERSION}.jar`
@@ -260,9 +294,11 @@ class ScrcpyObserver {
   #recordFrame(packet) {
     const at = this.now()
     const activity = frameCarriesActivity(packet)
+    const burstActivity = this.activityBurstDetector.push(packet, at)
     this.frameCount += 1
     if (activity) this.activityFrameCount += 1
-    this.frames.push({ at, size: packet.size, keyFrame: packet.keyFrame, activity })
+    if (burstActivity) this.burstActivityFrameCount += this.activityBurstDetector.lastPromotionCount
+    this.frames.push({ at, size: packet.size, keyFrame: packet.keyFrame, activity, burstActivity })
     const cutoff = at - 10_000
     while (this.frames.length && this.frames[0].at < cutoff) this.frames.shift()
   }
@@ -275,7 +311,12 @@ class ScrcpyObserver {
   }
 
   mark() {
-    return { at: this.now(), frameCount: this.frameCount, activityFrameCount: this.activityFrameCount }
+    return {
+      at: this.now(),
+      frameCount: this.frameCount,
+      activityFrameCount: this.activityFrameCount,
+      burstActivityFrameCount: this.burstActivityFrameCount,
+    }
   }
 
   async waitForQuiet({ timeout = 3_000, windowMs = 600, quietMs = 300, maxFrames = 2, minWaitMs = 0 } = {}) {
@@ -338,7 +379,9 @@ class ScrcpyObserver {
     if (!this.active) throw this.failure || new Error('scrcpy观察器未启动。')
     const started = this.now()
     const sinceAt = Number.isFinite(since?.at) ? since.at : started
-    const deadline = Math.max(started, sinceAt + hardTimeout)
+    // The mark is taken before the ADB swipe command. Command latency must not
+    // consume the observer's own wait budget, especially on slower devices.
+    const deadline = started + hardTimeout
     this.settleChecks += 1
     const finish = result => {
       const waitedMs = this.now() - started
@@ -381,6 +424,8 @@ class ScrcpyObserver {
       session: this.session,
       frames: this.frameCount,
       activity_frames: this.activityFrameCount,
+      burst_activity_frames: this.burstActivityFrameCount,
+      sparse_activity_frames: Math.max(0, this.activityFrameCount - this.burstActivityFrameCount),
       noise_frames: this.frameCount - this.activityFrameCount,
       frames_last_second: recent.length,
       activity_frames_last_second: recentActivity.length,
@@ -416,8 +461,9 @@ class ScrcpyObserver {
     }
     this.port = null
     this.frames = []
+    this.activityBurstDetector.reset()
     this.startedAt = null
   }
 }
 
-module.exports = { SCRCPY_VERSION, ScrcpyPacketParser, ScrcpyObserver, frameCarriesActivity }
+module.exports = { ACTIVITY_BURST_WINDOW_MS, ActivityBurstDetector, SCRCPY_VERSION, ScrcpyPacketParser, ScrcpyObserver, frameCarriesActivity }

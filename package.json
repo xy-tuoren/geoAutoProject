@@ -26,7 +26,7 @@
   },
   "build": {
     "appId": "com.xiaohe.questionautomation",
-    "productName": "提问自动化",
+    "productName": "geo数据采集",
     "asar": false,
     "files": [
       "src/**/*",
