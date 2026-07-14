@@ -9,7 +9,7 @@ const { questionVisible, currentQuestionText, replyTailOnScreen, findChatScrollB
 const { stackFramesInGroups, verifyFrameOverlap, verifyProductGridOverlap, imageInfo, imageLooksLoaded, imagesSimilar, imageRegionsStable, alignCropToWhitespace, stitchFramesWithOverlaps, composeLongImages, cropFramesAtTextSeams } = require('../../src/automation/images')
 const { createBatchDirectory, questionArtifactDirectory } = require('../../src/automation/utils')
 const { loadQuestionFile } = require('../../src/questions')
-const { adbConnectionLost, captureStableObserved, captureStableSandwich, calibratedProductFallbackOverlap, chatSwipePlan, conservativeFallbackOverlap, buildReplyImages, fillQuestionInput, hierarchyBelongsToPackage, historyOnboardingVisible, maxLongImageHeight, prepareEmbeddedEvidence, referenceProductsCaptureComplete, referenceProductsTrigger, referenceProductViewportReadiness, scrollEndConfirmed } = require('../../src/automation/runner')
+const { adbConnectionLost, captureStableObserved, captureStableSandwich, calibratedProductFallbackOverlap, chatSwipePlan, conservativeFallbackOverlap, buildReplyImages, fillQuestionInput, hierarchyBelongsToPackage, historyOnboardingVisible, maxLongImageHeight, observerResultRequiresFreshCapture, prepareEmbeddedEvidence, referenceProductsCaptureComplete, referenceProductsTrigger, referenceProductViewportReadiness, scrollEndConfirmed, shouldRetryFullReplyCapture } = require('../../src/automation/runner')
 
 const CHAT_BOUNDS = [0, 200, 1080, 1800]
 
@@ -235,6 +235,21 @@ test('scrcpy二次确认仍拒绝截图期间的连续活动突发', async () =>
 
   assert.equal(result.stable, false)
   assert.equal(result.reason, 'capture_activity')
+})
+
+test('scrcpy明确发现截图窗口活动时必须重新采集而不是ADB兜底', () => {
+  assert.equal(observerResultRequiresFreshCapture({ reason: 'capture_activity' }), true)
+  assert.equal(observerResultRequiresFreshCapture({ reason: 'confirmation_timeout' }), true)
+  assert.equal(observerResultRequiresFreshCapture({ reason: 'capture_deadline' }), true)
+  assert.equal(observerResultRequiresFreshCapture({ reason: 'settle_timeout' }), false)
+  assert.equal(observerResultRequiresFreshCapture({ reason: 'observer_timeout' }), false)
+})
+
+test('普通回答不可靠接缝会整题重采一次但不越过药品终止序列', () => {
+  assert.equal(shouldRetryFullReplyCapture({ fallbackReasons: ['局部内容发生变化'] }), true)
+  assert.equal(shouldRetryFullReplyCapture({ fallbackReasons: [] }), false)
+  assert.equal(shouldRetryFullReplyCapture({ fallbackReasons: ['局部内容发生变化'], allowFullRetry: false }), false)
+  assert.equal(shouldRetryFullReplyCapture({ fallbackReasons: ['局部内容发生变化'], products: { pages: 3 } }), false)
 })
 
 test('只将聊天区域内且可见的问题视为当前问题', () => {

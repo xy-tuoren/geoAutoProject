@@ -318,6 +318,14 @@ async function captureStableObserved({
   return { frame, xml, stable: false, attempts: 1, observer: true, reason }
 }
 
+function observerResultRequiresFreshCapture(result) {
+  return ['capture_activity', 'confirmation_timeout', 'capture_deadline'].includes(result?.reason)
+}
+
+function shouldRetryFullReplyCapture({ fallbackReasons = [], allowFullRetry = true, products = null } = {}) {
+  return Boolean(allowFullRetry && !products && fallbackReasons.length)
+}
+
 function createRunner(options) {
   let cancelled = false
   let activeSerial = null
@@ -649,7 +657,7 @@ function createRunner(options) {
         const activityFramesDuringHierarchy = (currentMark.activityFrameCount ?? currentMark.frameCount)
           - (mark.activityFrameCount ?? mark.frameCount)
         if (!hierarchyIsLoading(xml) && confirmed.quiet && activityFramesDuringHierarchy === 0) {
-          log('waiting: scrcpy已确认回答画面连续3秒无活动帧，读取最终UI层级完成')
+          log(`waiting: scrcpy已确认回答画面连续${Math.round(REPLY_STABLE_QUIET_MS / 1000)}秒无活动帧，读取最终UI层级完成`)
           return { status: 'stable', xml }
         }
       } catch (error) {
@@ -660,6 +668,25 @@ function createRunner(options) {
     }
     const xml = await normalizedHierarchy()
     return { status: hierarchyIsLoading(xml) ? 'loading_timeout' : 'timeout', xml }
+  }
+
+  async function waitForFinalVisualQuiet({ quietMs = REPLY_STABLE_QUIET_MS, timeout = quietMs + 2_000 } = {}) {
+    if (!observer.active) {
+      await sleep(quietMs)
+      return false
+    }
+    try {
+      const quiet = await observer.waitForNoActivity({
+        timeout,
+        quietMs,
+        minWaitMs: Math.min(500, quietMs),
+      })
+      return quiet.quiet
+    } catch (error) {
+      await recoverObserver(error)
+      await sleep(Math.min(quietMs, 2_000))
+      return false
+    }
   }
 
   async function swipeChat(bounds, direction, fraction = 0.6, {
@@ -718,28 +745,43 @@ function createRunner(options) {
 
   async function waitForStableReplyRegion(bounds, timeout = 8_000, { settleSince = null } = {}) {
     let observed = null
+    const deadline = Date.now() + timeout
     if (observer.active) {
-      const started = Date.now()
-      try {
-        observed = await captureStableObserved({
-          observer,
-          capture: async () => cropImage(await screenshot(), bounds),
-          hierarchy: source,
-          hierarchyLoading: hierarchyIsLoading,
-          settleSince,
-        }, Math.min(timeout, 3_500))
-        if (observed.stable) return observed
-        observerRegionFallbacks += 1
-        const elapsed = Date.now() - started
-        const reuse = observed.frame ? '，复用已取得的PNG' : ''
-        log(`capture: scrcpy快速静止判断未通过（${observed.reason || 'unknown'}，${elapsed}ms）${reuse}，转ADB夹心复核`)
-      } catch (error) {
-        if (await recoverObserver(error)) {
-          const remaining = Math.max(1_000, timeout - (Date.now() - started))
-          return waitForStableReplyRegion(bounds, remaining)
+      while (observer.active && Date.now() < deadline) {
+        const started = Date.now()
+        try {
+          observed = await captureStableObserved({
+            observer,
+            capture: async () => cropImage(await screenshot(), bounds),
+            hierarchy: source,
+            hierarchyLoading: hierarchyIsLoading,
+            settleSince,
+          }, Math.min(Math.max(1, deadline - Date.now()), 3_500))
+          if (observed.stable) return observed
+          const elapsed = Date.now() - started
+          if (observerResultRequiresFreshCapture(observed)) {
+            const remaining = deadline - Date.now()
+            if (remaining >= 900) {
+              log(`capture: scrcpy检测到截图窗口仍有活动（${observed.reason || 'unknown'}，${elapsed}ms），重新等待并重截`)
+              settleSince = observer.mark()
+              continue
+            }
+            throw new Error(`scrcpy连续检测到截图窗口活动，无法确认稳定视口（${observed.reason || 'unknown'}）`)
+          }
+          observerRegionFallbacks += 1
+          const reuse = observed.frame ? '，复用已取得的PNG' : ''
+          log(`capture: scrcpy快速静止判断未通过（${observed.reason || 'unknown'}，${elapsed}ms）${reuse}，转ADB夹心复核`)
+          break
+        } catch (error) {
+          const recovered = await recoverObserver(error)
+          if (recovered) {
+            const remaining = Math.max(1_000, deadline - Date.now())
+            return waitForStableReplyRegion(bounds, remaining)
+          }
+          break
         }
       }
-      timeout = Math.max(1_000, timeout - (Date.now() - started))
+      timeout = Math.max(1_000, deadline - Date.now())
     }
     return captureStableSandwich({
       capture: async () => cropImage(await screenshot(), bounds),
@@ -760,7 +802,7 @@ function createRunner(options) {
     return questionVisible(await source(), question, bounds)
   }
 
-  async function captureFullReplyFrames(question, maxPages = 30, { scrollFraction = 0.45 } = {}) {
+  async function captureFullReplyFrames(question, maxPages = 30, { scrollFraction = 0.45, allowFullRetry = true } = {}) {
     const size = await windowSize()
     const initialXml = await source()
     const navigationBounds = findChatScrollBounds(initialXml, size)
@@ -913,7 +955,16 @@ function createRunner(options) {
       productCaptureAttempts,
       productCaptureMs,
     }
-    if (fallbackReasons.length) log('capture: 不可靠接缝已局部重采并安全分隔，不再整题回滚重采')
+    if (shouldRetryFullReplyCapture({ fallbackReasons, allowFullRetry, products })) {
+      log(`capture: 首轮存在不可靠接缝，等待${Math.round(REPLY_STABLE_QUIET_MS / 1000)}秒最终静止后从问题顶部整题重采一次`)
+      await waitForFinalVisualQuiet()
+      const retry = await captureFullReplyFrames(question, maxPages, { scrollFraction: 0.3, allowFullRetry: false })
+      retry.recaptureCount += recaptureCount
+      retry.fullRetryCount = 1
+      retry.topNavigationMs += topNavigationMs
+      return retry
+    }
+    if (fallbackReasons.length) log('capture: 不可靠接缝已局部重采并安全分隔，因已进入终止序列或重试后仍失败而保留安全降级')
     return result
   }
 
@@ -1410,6 +1461,8 @@ module.exports = {
   fillQuestionInput,
   captureStableSandwich,
   captureStableObserved,
+  observerResultRequiresFreshCapture,
+  shouldRetryFullReplyCapture,
   adbConnectionLost,
   historyOnboardingVisible,
   maxLongImageHeight,
