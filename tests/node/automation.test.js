@@ -9,7 +9,7 @@ const { questionVisible, currentQuestionText, replyTailOnScreen, findChatScrollB
 const { stackFramesInGroups, verifyFrameOverlap, verifyProductGridOverlap, imageInfo, imageLooksLoaded, imagesSimilar, imageRegionsStable, alignCropToWhitespace, stitchFramesWithOverlaps, composeLongImages, cropFramesAtTextSeams } = require('../../src/automation/images')
 const { createBatchDirectory, questionArtifactDirectory } = require('../../src/automation/utils')
 const { loadQuestionFile } = require('../../src/questions')
-const { adbConnectionLost, automationEntries, captureStableObserved, captureStableSandwich, calibratedProductFallbackOverlap, chatSwipePlan, conservativeFallbackOverlap, buildReplyImages, fillQuestionInput, hierarchyBelongsToPackage, historyOnboardingVisible, maxLongImageHeight, normalizeAutomationEntries, observerResultRequiresFreshCapture, prepareEmbeddedEvidence, referenceProductsCaptureComplete, referenceProductsTrigger, referenceProductViewportReadiness, scrollEndConfirmed, shouldRetryFullReplyCapture, waitForPackageHierarchy } = require('../../src/automation/runner')
+const { adbConnectionLost, automationEntries, captureStableObserved, captureStableSandwich, calibratedProductFallbackOverlap, chatSwipePlan, conservativeFallbackOverlap, buildReplyImages, DOUYIN_SEARCH_SUMMARY_FILENAME, douyinMiniAppCaptureBounds, douyinSearchInput, douyinViewFullBounds, fillQuestionInput, hierarchyBelongsToPackage, historyOnboardingVisible, maxLongImageHeight, normalizeAutomationEntries, observerResultRequiresFreshCapture, prepareEmbeddedEvidence, referenceProductsCaptureComplete, referenceProductsTrigger, referenceProductViewportReadiness, scrollEndConfirmed, shouldRetryFullReplyCapture, waitForPackageHierarchy } = require('../../src/automation/runner')
 
 const CHAT_BOUNDS = [0, 200, 1080, 1800]
 
@@ -26,6 +26,27 @@ test('桌面入口默认小荷App，并按选择顺序去重执行', () => {
   assert.deepEqual(entries.map(entry => entry.id), ['douyin-xiaohe-miniapp', 'xiaohe-app'])
   assert.deepEqual(automationEntries().map(entry => entry.id), ['xiaohe-app', 'douyin-xiaohe-miniapp', 'toutiao-xiaohe-miniapp'])
   assert.throws(() => normalizeAutomationEntries(['unknown-entry']), /未知入口/)
+})
+
+test('抖音入口按真实搜索控件和回答卡片结构定位', () => {
+  assert.equal(DOUYIN_SEARCH_SUMMARY_FILENAME, '回答_智能总结.png')
+  const xml = `<hierarchy>
+    <node package="com.ss.android.ugc.aweme" class="android.widget.EditText" resource-id="com.ss.android.ugc.aweme:id/et_search_kw" text="腹泻脱水用什么药" visible-to-user="true" bounds="[144,96][868,204]" />
+    <node package="com.ss.android.ugc.aweme" class="android.view.ViewGroup" text="" content-desc="" visible-to-user="true" bounds="[414,1348][666,1456]" />
+    <node package="com.ss.android.ugc.aweme" class="android.view.ViewGroup" text="" content-desc="" visible-to-user="true" bounds="[60,1648][224,1756]" />
+  </hierarchy>`
+  assert.deepEqual(douyinSearchInput(xml), { bounds: [144, 96, 868, 204], text: '腹泻脱水用什么药' })
+  assert.deepEqual(douyinViewFullBounds(xml, { width: 1080, height: 2408 }), [414, 1348, 666, 1456])
+})
+
+test('抖音小荷AI全文页排除固定顶部、工具栏和输入区', () => {
+  const xml = `<hierarchy>
+    <node package="com.ss.android.ugc.aweme" class="android.widget.ImageView" content-desc="关闭" visible-to-user="true" bounds="[944,111][1056,207]" />
+    <node package="com.ss.android.ugc.aweme" class="android.widget.ScrollView" visible-to-user="true" bounds="[0,1785][1080,1940]" />
+    <node package="com.ss.android.ugc.aweme" class="android.widget.HorizontalScrollView" scrollable="true" visible-to-user="true" bounds="[0,1785][1080,1940]" />
+  </hierarchy>`
+  assert.deepEqual(douyinMiniAppCaptureBounds(xml, { width: 1080, height: 2408 }), [0, 236, 1080, 1785])
+  assert.equal(douyinMiniAppCaptureBounds(`${xml}<node package="com.ss.android.ugc.aweme" class="android.widget.EditText" resource-id="com.ss.android.ugc.aweme:id/et_search_kw" visible-to-user="true" bounds="[1,1][2,2]" />`, { width: 1080, height: 2408 }), null)
 })
 
 test('入口启动后等待目标App层级出现，避免启动过渡误判前台错误', async () => {

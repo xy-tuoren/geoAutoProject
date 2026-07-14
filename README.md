@@ -29,6 +29,16 @@ npm run dist       # 准备内置运行时并打包桌面应用
 npm run run:android -- --serial <设备序列号> --output-dir ./captures/current-answer --capture-current-answer
 ```
 
+使用 TXT 问题文件直接验收抖音入口：
+
+```bash
+npm run run:android -- \
+  --serial <设备序列号> \
+  --output-dir ./captures/douyin-test \
+  --entry douyin-xiaohe-miniapp \
+  --questions-file ./questions.batch.txt
+```
+
 Windows 安装包由 GitHub Actions 在 `windows-latest` 上构建。手动运行 `Build Windows` 工作流只生成可下载的 Artifact；推送 `v*` 版本标签会在测试和打包成功后自动创建或更新 GitHub Release，并上传 `.exe` 与 `.blockmap`：
 
 ```bash
@@ -69,6 +79,8 @@ captures/
 JSON 使用数组或 `questions` / `问题` 数组；Excel 读取第一个工作表，按界面配置的列名读取，默认列名为 `问题`。
 
 多入口批次会在批次目录下按入口生成子目录，避免不同入口的同一问题产物互相覆盖。每题 JSON 会记录 `entry_id`、`entry_label` 和 `entry_package`，便于回溯产物来自哪个入口。
+
+抖音入口使用独立流程：打开抖音搜索页，在搜索框输入问题并点击搜索，等待“小荷AI医生”结果卡片。卡片稳定后先保存一张完整搜索结果页为 `回答_智能总结.png`，再点击“查看全文”，向上滚动并确认真实顶部，最后从顶部向下滚动到真实末端并保存全文长图 `回答_001.png`。正文截图使用 ADB 原始 PNG，相邻视口执行像素接缝校验；顶部和末端都需要连续两次滚动无变化才允许结束。JSON 额外记录 `douyin_search_summary_captured`、`douyin_search_summary_screenshot`、`douyin_view_full_opened`、`douyin_full_page_confirmed_top` 和 `douyin_full_page_confirmed_end`。
 
 ## 项目结构
 
