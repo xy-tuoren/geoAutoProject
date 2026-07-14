@@ -207,9 +207,12 @@ async function captureStableObserved({
       windowMs: 250,
       quietMs: 120,
       maxFrames: 1,
+      minWaitMs: Math.min(120, confirmRemaining),
     })
-    const framesDuringCapture = observer.mark().frameCount - mark.frameCount
-    if (!hierarchyLoading(lastXml) && confirmed.quiet && framesDuringCapture <= 1) {
+    const currentMark = observer.mark()
+    const activityFramesDuringCapture = (currentMark.activityFrameCount ?? currentMark.frameCount)
+      - (mark.activityFrameCount ?? mark.frameCount)
+    if (!hierarchyLoading(lastXml) && confirmed.quiet && activityFramesDuringCapture <= 1) {
       return { frame: lastFrame, xml: lastXml, stable: true, attempts, observer: true }
     }
   }
@@ -249,6 +252,14 @@ function createRunner(options) {
       scrcpy_observer_active: Boolean(snapshot.active),
       scrcpy_observer_version: snapshot.version || SCRCPY_VERSION,
       scrcpy_observer_frames: snapshot.frames || 0,
+      scrcpy_observer_activity_frames: snapshot.activity_frames || 0,
+      scrcpy_observer_noise_frames: snapshot.noise_frames || 0,
+      scrcpy_observer_frames_last_second: snapshot.frames_last_second || 0,
+      scrcpy_observer_activity_frames_last_second: snapshot.activity_frames_last_second || 0,
+      scrcpy_observer_bytes_last_second: snapshot.bytes_last_second || 0,
+      scrcpy_observer_quiet_checks: snapshot.quiet_checks || 0,
+      scrcpy_observer_quiet_successes: snapshot.quiet_successes || 0,
+      scrcpy_observer_quiet_timeouts: snapshot.quiet_timeouts || 0,
       ...(observerFallbackReason ? { scrcpy_observer_fallback_reason: observerFallbackReason } : {}),
     }
   }
@@ -426,8 +437,11 @@ function createRunner(options) {
         if (!quiet.quiet) continue
         const mark = observer.mark()
         const xml = await normalizedHierarchy()
-        const confirmed = await observer.waitForQuiet({ timeout: 1_200, windowMs: 250, quietMs: 120, maxFrames: 1 })
-        if (!hierarchyIsLoading(xml) && confirmed.quiet && observer.mark().frameCount - mark.frameCount <= 1) {
+        const confirmed = await observer.waitForQuiet({ timeout: 1_200, windowMs: 250, quietMs: 120, maxFrames: 1, minWaitMs: 120 })
+        const currentMark = observer.mark()
+        const activityFramesDuringHierarchy = (currentMark.activityFrameCount ?? currentMark.frameCount)
+          - (mark.activityFrameCount ?? mark.frameCount)
+        if (!hierarchyIsLoading(xml) && confirmed.quiet && activityFramesDuringHierarchy <= 1) {
           log('waiting: scrcpy已确认回答画面持续静止，读取最终UI层级完成')
           return { status: 'stable', xml }
         }
@@ -866,7 +880,6 @@ function createRunner(options) {
         await waitForAdbDevice(options.adbPath, payload.serial)
         await ui.start(payload.serial)
         await ui.appStart(DEFAULT_PACKAGE)
-        log('UI节点、点击和输入严格使用Python uiautomator2；ADB仅用于无损截图和长图滚动')
         try {
           await observer.start(payload.serial)
         } catch (error) {
@@ -880,6 +893,7 @@ function createRunner(options) {
           log(`[${zeroIndex + 1}/${payload.questions.length}] asking: ${question}`)
           log(JSON.stringify(await askOnce(payload, batchDirectory, question, zeroIndex + 1)))
         }
+        log(`执行完成：共 ${payload.questions.length} 条问题，输出目录 ${batchDirectory}`)
       } catch (error) {
         await fs.writeFile(path.join(batchDirectory, 'automation-failure.json'), JSON.stringify({
           created_at: new Date().toISOString(),

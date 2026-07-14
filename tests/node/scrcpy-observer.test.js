@@ -1,6 +1,6 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
-const { ScrcpyPacketParser } = require('../../src/automation/scrcpy-observer')
+const { ScrcpyObserver, ScrcpyPacketParser, frameCarriesActivity } = require('../../src/automation/scrcpy-observer')
 
 function sessionPacket(width, height) {
   const packet = Buffer.alloc(12)
@@ -60,4 +60,54 @@ test('scrcpy包解析器拒绝异常大包', () => {
 test('scrcpy包解析器拒绝缺失的会话信息', () => {
   const parser = new ScrcpyPacketParser()
   assert.throws(() => parser.push(Buffer.concat([streamPacket(), Buffer.alloc(12)])), /缺少会话信息/)
+})
+
+test('静止检测复用调用前已经积累的安静时长', async () => {
+  let now = 7_000
+  const observer = new ScrcpyObserver({
+    now: () => now,
+    delay: async milliseconds => { now += milliseconds },
+  })
+  observer.socket = { destroyed: false }
+  observer.session = { codec: 'h264', width: 160, height: 360 }
+  observer.startedAt = 0
+  observer.frames = [
+    { at: 100, size: 2_000, keyFrame: true, activity: true },
+    { at: 200, size: 2_000, keyFrame: false, activity: true },
+  ]
+
+  const result = await observer.waitForQuiet({ timeout: 6_000, windowMs: 1_000, quietMs: 5_000, maxFrames: 1 })
+
+  assert.equal(result.quiet, true)
+  assert.equal(result.waitedMs, 0)
+  assert.ok(result.quietForMs >= 5_000)
+})
+
+test('小编码包作为静止画面噪声，关键帧始终作为活动', () => {
+  assert.equal(frameCarriesActivity({ size: 1_023, keyFrame: false }), false)
+  assert.equal(frameCarriesActivity({ size: 1_024, keyFrame: false }), true)
+  assert.equal(frameCarriesActivity({ size: 32, keyFrame: true }), true)
+})
+
+test('二次确认即使已有静止历史也会观察指定时长', async () => {
+  let now = 7_000
+  const observer = new ScrcpyObserver({
+    now: () => now,
+    delay: async milliseconds => { now += milliseconds },
+  })
+  observer.socket = { destroyed: false }
+  observer.session = { codec: 'h264', width: 160, height: 360 }
+  observer.startedAt = 0
+
+  const result = await observer.waitForQuiet({
+    timeout: 500,
+    windowMs: 250,
+    quietMs: 120,
+    maxFrames: 1,
+    minWaitMs: 120,
+  })
+
+  assert.equal(result.quiet, true)
+  assert.ok(result.waitedMs >= 120)
+  assert.ok(result.waitedMs < 200)
 })

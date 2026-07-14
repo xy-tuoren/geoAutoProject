@@ -139,7 +139,7 @@ ipcMain.handle('automation:start', async (event, payload) => {
   activeTask = runner
   void runner.run(payload)
     .then(() => {
-      log('任务完成')
+      log('执行完成')
       event.sender.send('automation:finished', { code: 0 })
     })
     .catch(error => {

@@ -6,6 +6,33 @@ const { sleep } = require('./utils')
 
 const SCRCPY_VERSION = '4.1'
 const MAX_PACKET_SIZE = 32 * 1024 * 1024
+const MIN_ACTIVITY_PACKET_SIZE = 1024
+
+function frameCarriesActivity(packet) {
+  // At max_size=360, encoder heartbeat/repeat packets on a pixel-stable page
+  // are typically only tens or hundreds of bytes. A real viewport change is
+  // materially larger; keyframes remain activity regardless of packet size.
+  return Boolean(packet.keyFrame || packet.size >= MIN_ACTIVITY_PACKET_SIZE)
+}
+
+function quietWindowState(frames, { now, startedAt, windowMs, quietMs, maxFrames }) {
+  const timestamps = frames
+    .map(frame => frame.at)
+    .filter(at => Number.isFinite(at) && at <= now)
+  const framesInWindow = timestamps.filter(at => at >= now - windowMs).length
+  let quietSince = Number.isFinite(startedAt) ? Math.min(startedAt, now) : now
+
+  // Find the end of the most recent period where the rolling window had
+  // more frames than the caller tolerates. This lets a later call reuse
+  // quiet time which already elapsed instead of restarting its timer.
+  for (let index = maxFrames; index < timestamps.length; index += 1) {
+    const oldest = timestamps[index - maxFrames]
+    if (timestamps[index] - oldest <= windowMs) quietSince = Math.max(quietSince, oldest + windowMs)
+  }
+
+  const quietForMs = framesInWindow <= maxFrames ? Math.max(0, now - quietSince) : 0
+  return { quiet: framesInWindow <= maxFrames && quietForMs >= quietMs, framesInWindow, quietForMs }
+}
 
 function execFileText(command, args) {
   return new Promise((resolve, reject) => {
@@ -96,8 +123,13 @@ class ScrcpyObserver {
     this.session = null
     this.frames = []
     this.frameCount = 0
+    this.activityFrameCount = 0
     this.failure = null
     this.stopping = false
+    this.startedAt = null
+    this.quietChecks = 0
+    this.quietSuccesses = 0
+    this.quietTimeouts = 0
   }
 
   get active() {
@@ -115,6 +147,11 @@ class ScrcpyObserver {
     this.failure = null
     this.frames = []
     this.frameCount = 0
+    this.activityFrameCount = 0
+    this.startedAt = null
+    this.quietChecks = 0
+    this.quietSuccesses = 0
+    this.quietTimeouts = 0
     this.scid = (crypto.randomBytes(4).readUInt32BE(0) & 0x7fffffff).toString(16).padStart(8, '0')
     const remote = `/data/local/tmp/geoauto-scrcpy-server-v${SCRCPY_VERSION}.jar`
     await execFileText(this.adbPath, ['-s', serial, 'push', this.serverPath, remote])
@@ -186,6 +223,7 @@ class ScrcpyObserver {
       const parser = new ScrcpyPacketParser({
         onSession: session => {
           this.session = session
+          this.startedAt ??= this.now()
           finish(resolve, session)
         },
         onFrame: packet => this.#recordFrame(packet),
@@ -216,8 +254,10 @@ class ScrcpyObserver {
 
   #recordFrame(packet) {
     const at = this.now()
+    const activity = frameCarriesActivity(packet)
     this.frameCount += 1
-    this.frames.push({ at, size: packet.size, keyFrame: packet.keyFrame })
+    if (activity) this.activityFrameCount += 1
+    this.frames.push({ at, size: packet.size, keyFrame: packet.keyFrame, activity })
     const cutoff = at - 10_000
     while (this.frames.length && this.frames[0].at < cutoff) this.frames.shift()
   }
@@ -230,37 +270,54 @@ class ScrcpyObserver {
   }
 
   mark() {
-    return { at: this.now(), frameCount: this.frameCount }
+    return { at: this.now(), frameCount: this.frameCount, activityFrameCount: this.activityFrameCount }
   }
 
-  async waitForQuiet({ timeout = 3_000, windowMs = 600, quietMs = 300, maxFrames = 2 } = {}) {
+  async waitForQuiet({ timeout = 3_000, windowMs = 600, quietMs = 300, maxFrames = 2, minWaitMs = 0 } = {}) {
     if (!this.active) throw this.failure || new Error('scrcpy观察器未启动。')
-    const deadline = this.now() + timeout
-    let quietSince = null
-    while (this.now() < deadline) {
+    this.quietChecks += 1
+    const started = this.now()
+    const deadline = started + timeout
+    while (true) {
       if (!this.active) throw this.failure || new Error('scrcpy观察器已断开。')
       const now = this.now()
-      const count = this.frames.filter(frame => frame.at >= now - windowMs).length
-      if (count <= maxFrames) {
-        quietSince ??= now
-        if (now - quietSince >= quietMs) return { quiet: true, framesInWindow: count, waitedMs: now - (deadline - timeout) }
-      } else quietSince = null
-      await this.delay(50)
+      const activityFrames = this.frames.filter(frame => frame.activity ?? frameCarriesActivity(frame))
+      const state = quietWindowState(activityFrames, {
+        now,
+        startedAt: this.startedAt,
+        windowMs,
+        quietMs,
+        maxFrames,
+      })
+      if (state.quiet && now - started >= minWaitMs) {
+        this.quietSuccesses += 1
+        return { ...state, waitedMs: now - started }
+      }
+      if (now >= deadline) {
+        this.quietTimeouts += 1
+        return { ...state, quiet: false, waitedMs: now - started }
+      }
+      await this.delay(Math.min(50, deadline - now))
     }
-    const now = this.now()
-    return { quiet: false, framesInWindow: this.frames.filter(frame => frame.at >= now - windowMs).length, waitedMs: timeout }
   }
 
   snapshot() {
     const now = this.now()
     const recent = this.frames.filter(frame => frame.at >= now - 1_000)
+    const recentActivity = recent.filter(frame => frame.activity ?? frameCarriesActivity(frame))
     return {
       active: this.active,
       version: SCRCPY_VERSION,
       session: this.session,
       frames: this.frameCount,
+      activity_frames: this.activityFrameCount,
+      noise_frames: this.frameCount - this.activityFrameCount,
       frames_last_second: recent.length,
+      activity_frames_last_second: recentActivity.length,
       bytes_last_second: recent.reduce((sum, frame) => sum + frame.size, 0),
+      quiet_checks: this.quietChecks,
+      quiet_successes: this.quietSuccesses,
+      quiet_timeouts: this.quietTimeouts,
       failure: this.failure?.message || null,
     }
   }
@@ -280,7 +337,9 @@ class ScrcpyObserver {
     this.port = null
     this.frames = []
     this.frameCount = 0
+    this.activityFrameCount = 0
+    this.startedAt = null
   }
 }
 
-module.exports = { SCRCPY_VERSION, ScrcpyPacketParser, ScrcpyObserver }
+module.exports = { SCRCPY_VERSION, ScrcpyPacketParser, ScrcpyObserver, frameCarriesActivity }
