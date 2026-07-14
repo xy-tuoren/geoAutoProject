@@ -6,13 +6,12 @@ on:
     tags:
       - "v*"
 
-permissions:
-  contents: read
-
 jobs:
   build-windows:
     runs-on: windows-latest
     timeout-minutes: 45
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout
@@ -60,3 +59,38 @@ jobs:
             dist/*.exe
             dist/*.blockmap
           if-no-files-found: error
+          retention-days: 14
+
+  release-windows:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build-windows
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download Windows installer
+        uses: actions/download-artifact@v4
+        with:
+          name: question-automation-windows-x64
+          path: release-assets
+
+      - name: Create or update GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mapfile -d '' files < <(find release-assets -type f \( -name '*.exe' -o -name '*.blockmap' \) -print0)
+          if (( ${#files[@]} == 0 )); then
+            echo "No Windows release assets were downloaded." >&2
+            exit 1
+          fi
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "${files[@]}" --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$GITHUB_REF_NAME" "${files[@]}" \
+              --verify-tag \
+              --generate-notes \
+              --title "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY"
+          fi

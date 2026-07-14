@@ -23,6 +23,15 @@ npm run prepare:scrcpy # 下载并校验官方scrcpy server
 npm run dist       # 准备内置运行时并打包桌面应用
 ```
 
+Windows 安装包由 GitHub Actions 在 `windows-latest` 上构建。手动运行 `Build Windows` 工作流只生成可下载的 Artifact；推送 `v*` 版本标签会在测试和打包成功后自动创建或更新 GitHub Release，并上传 `.exe` 与 `.blockmap`：
+
+```bash
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+普通分支推送不会发布 Release。正式打标签前应先将需要发布的分支合并到稳定分支，并确认版本号尚未被其他提交使用。
+
 截图默认保存在 `文档/QuestionCaptures/`（macOS / Windows 均为用户文档目录下）。
 
 每次开始执行会新建一个时间批次目录；每个问题再拥有独立子目录，避免截图、资料图和元数据混在一起：
