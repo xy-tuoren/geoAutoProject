@@ -88,9 +88,14 @@ jobs:
           if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" "${files[@]}" --clobber --repo "$GITHUB_REPOSITORY"
           else
+            release_flags=()
+            if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+              release_flags+=(--prerelease)
+            fi
             gh release create "$GITHUB_REF_NAME" "${files[@]}" \
               --verify-tag \
               --generate-notes \
               --title "$GITHUB_REF_NAME" \
+              "${release_flags[@]}" \
               --repo "$GITHUB_REPOSITORY"
           fi
