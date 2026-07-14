@@ -146,6 +146,35 @@ async function fillQuestionInput({ ui, tap, source, delay = sleep }, edit, quest
   return source()
 }
 
+async function captureStableSandwich({
+  capture,
+  hierarchy,
+  framesStable,
+  hierarchyLoading,
+  delay = sleep,
+  now = Date.now,
+  interval = 80,
+}, timeout = 8_000) {
+  let before = await capture()
+  let lastXml = ''
+  let attempts = 0
+  const deadline = now() + timeout
+  while (now() < deadline) {
+    await delay(interval)
+    // The first frame is taken before hierarchy collection and the second
+    // immediately after it. This preserves the screenshot→XML→screenshot
+    // reflow guard while avoiding a third ADB screenshot on stable pages.
+    lastXml = await hierarchy()
+    const after = await capture()
+    attempts += 1
+    if (!hierarchyLoading(lastXml) && await framesStable(before, after)) {
+      return { frame: after, xml: lastXml, stable: true, attempts }
+    }
+    before = after
+  }
+  return { frame: before, xml: lastXml || await hierarchy(), stable: false, attempts }
+}
+
 function createRunner(options) {
   let cancelled = false
   let activeSerial = null
@@ -301,7 +330,7 @@ function createRunner(options) {
   async function swipeChat(bounds, direction, fraction = 0.6, {
     maxFraction = 0.7,
     speed = 1400,
-    settle = 150,
+    settle = 60,
     fallbackDuration = 900,
   } = {}) {
     const [left, top, right, bottom] = bounds
@@ -330,24 +359,13 @@ function createRunner(options) {
   }
 
   async function waitForStableReplyRegion(bounds, timeout = 8_000) {
-    let before = await cropImage(await screenshot(), bounds)
-    let lastXml = ''
-    const deadline = Date.now() + timeout
-    while (Date.now() < deadline) {
-      await sleep(260)
-      const after = await cropImage(await screenshot(), bounds)
-      if (await imageRegionsStable(before, after)) {
-        // screenshot → hierarchy → screenshot prevents a locally stable frame
-        // from being accepted if Compose reflows during hierarchy collection.
-        lastXml = await source()
-        const confirmed = await cropImage(await screenshot(), bounds)
-        if (!hierarchyIsLoading(lastXml) && await imageRegionsStable(after, confirmed)) return { frame: confirmed, xml: lastXml, stable: true }
-        before = confirmed
-        continue
-      }
-      before = after
-    }
-    return { frame: before, xml: lastXml || await source(), stable: false }
+    return captureStableSandwich({
+      capture: async () => cropImage(await screenshot(), bounds),
+      hierarchy: source,
+      framesStable: imageRegionsStable,
+      hierarchyLoading: hierarchyIsLoading,
+      interval: 80,
+    }, timeout)
   }
 
   async function scrollQuestionIntoView(question, bounds, maxSwipes = 25) {
@@ -358,7 +376,7 @@ function createRunner(options) {
     return questionVisible(await source(), question, bounds)
   }
 
-  async function captureFullReplyFrames(question, maxPages = 30, { scrollFraction = 0.45, allowFullRetry = true } = {}) {
+  async function captureFullReplyFrames(question, maxPages = 30, { scrollFraction = 0.45 } = {}) {
     const size = await windowSize()
     const initialXml = await source()
     const navigationBounds = findChatScrollBounds(initialXml, size)
@@ -434,7 +452,6 @@ function createRunner(options) {
           transition = { verified: true, overlap: await verifyFrameOverlap(before, after, expectedOverlap) }
         } catch (error) {
           recaptureCount += 1
-          await sleep(450)
           afterCapture = await waitForStableReplyRegion(bounds, 3_000)
           after = afterCapture.frame
           afterXml = afterCapture.xml || await source()
@@ -479,14 +496,7 @@ function createRunner(options) {
       evidenceExpanded: evidence.expanded,
       productsSeen,
     }
-    if (fallbackReasons.length && allowFullRetry) {
-      log('capture: 首轮存在不可靠接缝，从问题顶部以 30% 步长整题重采一次')
-      const retry = await captureFullReplyFrames(question, maxPages, { scrollFraction: 0.3, allowFullRetry: false })
-      retry.recaptureCount += recaptureCount
-      retry.fullRetryCount = 1
-      retry.topNavigationMs += topNavigationMs
-      return retry
-    }
+    if (fallbackReasons.length) log('capture: 不可靠接缝已局部重采并安全分隔，不再整题回滚重采')
     return result
   }
 
@@ -763,6 +773,7 @@ module.exports = {
   scrollEndConfirmed,
   prepareEmbeddedEvidence,
   fillQuestionInput,
+  captureStableSandwich,
   adbConnectionLost,
   historyOnboardingVisible,
   maxLongImageHeight,

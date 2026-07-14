@@ -9,7 +9,7 @@ const { questionVisible, replyTailOnScreen, findChatScrollBounds, validateCaptur
 const { stackFramesInGroups, verifyFrameOverlap, imageInfo, imageLooksLoaded, imagesSimilar, imageRegionsStable, alignCropToWhitespace, stitchFramesWithOverlaps, composeLongImages, cropFramesAtTextSeams } = require('../../src/automation/images')
 const { createBatchDirectory, questionArtifactDirectory } = require('../../src/automation/utils')
 const { loadQuestionFile } = require('../../src/questions')
-const { adbConnectionLost, chatSwipePlan, conservativeFallbackOverlap, buildReplyImages, fillQuestionInput, hierarchyBelongsToPackage, historyOnboardingVisible, maxLongImageHeight, prepareEmbeddedEvidence, scrollEndConfirmed } = require('../../src/automation/runner')
+const { adbConnectionLost, captureStableSandwich, chatSwipePlan, conservativeFallbackOverlap, buildReplyImages, fillQuestionInput, hierarchyBelongsToPackage, historyOnboardingVisible, maxLongImageHeight, prepareEmbeddedEvidence, scrollEndConfirmed } = require('../../src/automation/runner')
 
 const CHAT_BOUNDS = [0, 200, 1080, 1800]
 
@@ -41,6 +41,44 @@ test('输入完成后不盲按返回键退出App', async () => {
     ['delay', 350],
     ['source'],
   ])
+})
+
+test('稳定帧夹心校验首轮只需要两次截图', async () => {
+  let now = 0
+  const events = []
+  const frames = [Buffer.from('same'), Buffer.from('same')]
+  const result = await captureStableSandwich({
+    capture: async () => { events.push('capture'); return frames.shift() },
+    hierarchy: async () => { events.push('hierarchy'); return '<hierarchy />' },
+    framesStable: async (before, after) => before.equals(after),
+    hierarchyLoading: () => false,
+    delay: async milliseconds => { events.push(`delay:${milliseconds}`); now += milliseconds },
+    now: () => now,
+    interval: 80,
+  }, 1_000)
+
+  assert.equal(result.stable, true)
+  assert.equal(result.attempts, 1)
+  assert.deepEqual(events, ['capture', 'delay:80', 'hierarchy', 'capture'])
+})
+
+test('夹心校验发现滚动未停时复用最新帧继续检测', async () => {
+  let now = 0
+  const frames = [Buffer.from('first'), Buffer.from('moving'), Buffer.from('moving')]
+  let captures = 0
+  const result = await captureStableSandwich({
+    capture: async () => { captures += 1; return frames.shift() },
+    hierarchy: async () => '<hierarchy />',
+    framesStable: async (before, after) => before.equals(after),
+    hierarchyLoading: () => false,
+    delay: async milliseconds => { now += milliseconds },
+    now: () => now,
+    interval: 80,
+  }, 1_000)
+
+  assert.equal(result.stable, true)
+  assert.equal(result.attempts, 2)
+  assert.equal(captures, 3)
 })
 
 test('只将聊天区域内且可见的问题视为当前问题', () => {

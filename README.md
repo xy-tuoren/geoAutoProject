@@ -71,5 +71,7 @@ tests/node/      # Node 内置 test runner 测试
 - 仓库内置 macOS 与 Windows 两套 Android Platform Tools；打包命令 `npm run dist` 会使用目标平台的ADB，并内置PyInstaller生成的Python uiautomator2 sidecar。运营不需要安装Node、Python、uv或ADB。
 - UI层没有ADB降级：uiautomator2层级读取失败时只允许重启sidecar并重试一次；点击或输入失败会直接终止任务，避免表面成功但实际走回旧路径。
 - 正式截图始终使用ADB原始PNG，不使用uiautomator2截图接口。
+- 回答滚动后的稳定确认使用“ADB截图→uiautomator2层级→ADB截图”双帧夹心校验；稳定页面不再额外抓取第三张PNG。
+- 每个接缝最多局部重采一次；仍无法像素验证时只在该接缝保留少量重复内容并加浅色分隔，不再从顶部整题重采。
 - `captures/` 已被 Git 忽略，因为截图、UI XML 和元数据可能包含敏感健康信息。
 - 健康问题和截图可能包含个人信息，请勿上传到公共仓库。
