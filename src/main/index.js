@@ -2,7 +2,7 @@ const { app, BrowserWindow, dialog, ipcMain, clipboard } = require('electron')
 const { execFile } = require('node:child_process')
 const fs = require('node:fs/promises')
 const path = require('node:path')
-const { createRunner, CancelledError } = require('../automation/runner')
+const { createRunner, CancelledError, automationEntries, normalizeAutomationEntries } = require('../automation/runner')
 const { loadQuestionFile } = require('../questions')
 const { projectRoot, resolveAdbPath } = require('../runtime-paths')
 
@@ -108,6 +108,7 @@ ipcMain.handle('dialog:select-questions', async () => {
 })
 
 ipcMain.handle('automation:devices', async () => listDevices())
+ipcMain.handle('automation:entries', () => automationEntries())
 
 ipcMain.handle('questions:import', async (_event, payload) => {
   log('导入问题文件:', payload.file, `列=${payload.column || '问题'}`)
@@ -125,7 +126,9 @@ ipcMain.handle('automation:start', async (event, payload) => {
   if (activeTask) throw new Error('已有任务正在执行。')
   if (!Array.isArray(payload.questions) || payload.questions.length === 0) throw new Error('请至少填写或导入一条问题。')
   if (!payload.serial || !payload.outputDir) throw new Error('请选择 Android 设备和截图目录。')
-  log('启动任务:', `serial=${payload.serial}`, `questions=${payload.questions.length}`, `output=${payload.outputDir}`)
+  const entries = normalizeAutomationEntries(payload.entries)
+  payload.entries = entries.map(entry => entry.id)
+  log('启动任务:', `serial=${payload.serial}`, `entries=${payload.entries.join(',')}`, `questions=${payload.questions.length}`, `output=${payload.outputDir}`)
   const runner = createRunner({
     root: appRoot(),
     isPackaged: app.isPackaged,

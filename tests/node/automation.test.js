@@ -9,7 +9,7 @@ const { questionVisible, currentQuestionText, replyTailOnScreen, findChatScrollB
 const { stackFramesInGroups, verifyFrameOverlap, verifyProductGridOverlap, imageInfo, imageLooksLoaded, imagesSimilar, imageRegionsStable, alignCropToWhitespace, stitchFramesWithOverlaps, composeLongImages, cropFramesAtTextSeams } = require('../../src/automation/images')
 const { createBatchDirectory, questionArtifactDirectory } = require('../../src/automation/utils')
 const { loadQuestionFile } = require('../../src/questions')
-const { adbConnectionLost, captureStableObserved, captureStableSandwich, calibratedProductFallbackOverlap, chatSwipePlan, conservativeFallbackOverlap, buildReplyImages, fillQuestionInput, hierarchyBelongsToPackage, historyOnboardingVisible, maxLongImageHeight, observerResultRequiresFreshCapture, prepareEmbeddedEvidence, referenceProductsCaptureComplete, referenceProductsTrigger, referenceProductViewportReadiness, scrollEndConfirmed, shouldRetryFullReplyCapture } = require('../../src/automation/runner')
+const { adbConnectionLost, automationEntries, captureStableObserved, captureStableSandwich, calibratedProductFallbackOverlap, chatSwipePlan, conservativeFallbackOverlap, buildReplyImages, fillQuestionInput, hierarchyBelongsToPackage, historyOnboardingVisible, maxLongImageHeight, normalizeAutomationEntries, observerResultRequiresFreshCapture, prepareEmbeddedEvidence, referenceProductsCaptureComplete, referenceProductsTrigger, referenceProductViewportReadiness, scrollEndConfirmed, shouldRetryFullReplyCapture, waitForPackageHierarchy } = require('../../src/automation/runner')
 
 const CHAT_BOUNDS = [0, 200, 1080, 1800]
 
@@ -18,6 +18,31 @@ test('只允许目标App层级进入UI操作流程', () => {
   const search = '<hierarchy><node package="com.huawei.search" class="android.widget.EditText" /></hierarchy>'
   assert.equal(hierarchyBelongsToPackage(target), true)
   assert.equal(hierarchyBelongsToPackage(search), false)
+})
+
+test('桌面入口默认小荷App，并按选择顺序去重执行', () => {
+  assert.equal(normalizeAutomationEntries([])[0].id, 'xiaohe-app')
+  const entries = normalizeAutomationEntries(['douyin-xiaohe-miniapp', 'xiaohe-app', 'douyin-xiaohe-miniapp'])
+  assert.deepEqual(entries.map(entry => entry.id), ['douyin-xiaohe-miniapp', 'xiaohe-app'])
+  assert.deepEqual(automationEntries().map(entry => entry.id), ['xiaohe-app', 'douyin-xiaohe-miniapp', 'toutiao-xiaohe-miniapp'])
+  assert.throws(() => normalizeAutomationEntries(['unknown-entry']), /未知入口/)
+})
+
+test('入口启动后等待目标App层级出现，避免启动过渡误判前台错误', async () => {
+  let now = 0
+  const packages = ['com.huawei.android.launcher', 'com.huawei.android.launcher', 'com.aurora.xiaohe.aidoctor']
+  const xml = await waitForPackageHierarchy({
+    dumpHierarchy: async () => `<hierarchy><node package="${packages.shift()}" /></hierarchy>`,
+    packageName: 'com.aurora.xiaohe.aidoctor',
+    packageLabel: '小荷App',
+    delay: async milliseconds => { now += milliseconds },
+    now: () => now,
+    timeout: 1_000,
+    interval: 100,
+  })
+
+  assert.match(xml, /com\.aurora\.xiaohe\.aidoctor/)
+  assert.equal(now, 200)
 })
 
 test('输入完成后不盲按返回键退出App', async () => {

@@ -5,6 +5,7 @@ contextBridge.exposeInMainWorld('automation', {
   selectDirectory: () => ipcRenderer.invoke('dialog:select-directory'),
   selectQuestions: () => ipcRenderer.invoke('dialog:select-questions'),
   listDevices: () => ipcRenderer.invoke('automation:devices'),
+  listEntries: () => ipcRenderer.invoke('automation:entries'),
   importQuestions: payload => ipcRenderer.invoke('questions:import', payload),
   getPathForFile: file => webUtils.getPathForFile(file),
   start: payload => ipcRenderer.invoke('automation:start', payload),

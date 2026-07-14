@@ -22,6 +22,8 @@ class U2RequestTimeoutError extends U2ClientError {
   }
 }
 
+const SEND_KEYS_TIMEOUT_MS = 45_000;
+
 function developmentCommand(root) {
   return {
     command: process.env.UV_EXECUTABLE || "uv",
@@ -241,8 +243,8 @@ class U2Client {
     return this.request("click", { x: Math.round(x), y: Math.round(y) });
   }
 
-  sendKeys(text, { clear = false } = {}) {
-    return this.request("send_keys", { text: String(text), clear });
+  sendKeys(text, { clear = false, timeout = SEND_KEYS_TIMEOUT_MS } = {}) {
+    return this.request("send_keys", { text: String(text), clear }, { timeout });
   }
 
   press(key) {
@@ -286,6 +288,7 @@ module.exports = {
   U2Client,
   U2ClientError,
   U2RequestTimeoutError,
+  SEND_KEYS_TIMEOUT_MS,
   developmentCommand,
   packagedCommand,
   utf8ProcessEnvironment

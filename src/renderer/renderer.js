@@ -5,15 +5,21 @@ const status = $('#status')
 const log = $('#log')
 const start = $('#start')
 const stop = $('#stop')
+const entryList = $('#entry-list')
 
 function uniqueQuestions() {
   return [...new Set(questions.value.split('\n').map(line => line.trim()).filter(Boolean))]
 }
 
+function selectedEntries() {
+  return [...entryList.querySelectorAll('input[name="entry"]:checked')].map(input => input.value)
+}
+
 function updatePlan() {
   const deviceCount = device.value ? 1 : 0
+  const entryCount = selectedEntries().length
   const questionCount = uniqueQuestions().length
-  $('#plan').textContent = `${deviceCount} 台设备 × ${questionCount} 条问题 = ${deviceCount * questionCount} 次计划`
+  $('#plan').textContent = `${deviceCount} 台设备 × ${entryCount} 个入口 × ${questionCount} 条问题 = ${deviceCount * entryCount * questionCount} 次计划`
   $('#question-count').textContent = `${questionCount} 条问题`
 }
 
@@ -33,6 +39,30 @@ async function refreshDevices() {
   } catch (error) {
     device.replaceChildren(new Option('读取设备失败', ''))
     status.textContent = error.message || '读取 ADB 设备失败'
+  }
+  updatePlan()
+}
+
+async function refreshEntries() {
+  try {
+    const entries = await window.automation.listEntries()
+    entryList.replaceChildren()
+    entries.forEach((entry, index) => {
+      const label = document.createElement('label')
+      label.className = 'option entry-option'
+      const input = document.createElement('input')
+      input.type = 'checkbox'
+      input.name = 'entry'
+      input.value = entry.id
+      input.checked = index === 0
+      input.addEventListener('change', updatePlan)
+      const text = document.createElement('span')
+      text.textContent = entry.label
+      label.append(input, text)
+      entryList.append(label)
+    })
+  } catch (error) {
+    status.textContent = error.message || '读取入口失败'
   }
   updatePlan()
 }
@@ -129,9 +159,12 @@ start.addEventListener('click', async () => {
   if (!Number.isFinite(timeout) || timeout <= 0) { status.textContent = '请输入大于 0 的超时时间'; return }
   const maxLongImageHeight = Number($('#max-long-image-height').value)
   if (!Number.isInteger(maxLongImageHeight) || maxLongImageHeight < 3000 || maxLongImageHeight > 30000) { status.textContent = '长图上限请输入 3000–30000 之间的整数'; return }
+  const entries = selectedEntries()
+  if (!entries.length) { status.textContent = '请至少选择一个入口'; return }
   try {
     await window.automation.start({
       questions: uniqueQuestions(),
+      entries,
       serial: device.value,
       outputDir: $('#output-dir').value.trim(),
       timeout,
@@ -146,4 +179,5 @@ window.automation.onLog(appendLog)
 window.automation.onFinished(({ code }) => { start.disabled = false; stop.disabled = true; status.textContent = code === 0 ? '执行完成' : `任务结束，退出码 ${code}` })
 
 window.automation.defaultOutputDirectory().then(directory => { $('#output-dir').value = directory })
+refreshEntries()
 refreshDevices()

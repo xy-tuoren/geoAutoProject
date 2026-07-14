@@ -1,7 +1,7 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
 const path = require('node:path')
-const { U2Client, developmentCommand, packagedCommand, utf8ProcessEnvironment } = require('../../src/automation/u2-client')
+const { U2Client, SEND_KEYS_TIMEOUT_MS, developmentCommand, packagedCommand, utf8ProcessEnvironment } = require('../../src/automation/u2-client')
 
 const root = path.resolve(__dirname, '../..')
 const fixture = path.join(root, 'tests', 'fixtures', 'u2-sidecar-fixture.js')
@@ -38,6 +38,24 @@ test('sidecar进程协议在Windows环境下强制使用UTF-8', () => {
     PYTHONIOENCODING: 'utf-8',
     KEEP: 'yes',
   })
+})
+
+test('首次输入允许FastInputIME安装和切换完成', async () => {
+  const client = new U2Client({ root, adbPath: '/bundled/adb', log: () => {} })
+  const calls = []
+  client.request = async (method, params, options) => {
+    calls.push({ method, params, options })
+    return true
+  }
+
+  await client.sendKeys('测试', { clear: true })
+
+  assert.deepEqual(calls, [{
+    method: 'send_keys',
+    params: { text: '测试', clear: true },
+    options: { timeout: SEND_KEYS_TIMEOUT_MS },
+  }])
+  assert.equal(SEND_KEYS_TIMEOUT_MS, 45_000)
 })
 
 test('uiautomator2客户端使用长驻进程获取层级', async () => {

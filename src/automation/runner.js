@@ -1,8 +1,8 @@
 const fs = require('node:fs/promises')
 const path = require('node:path')
 const { execFile } = require('node:child_process')
-const { sleep, createBatchDirectory, questionArtifactDirectory } = require('./utils')
-const { iterNodes, nodeAttr, hierarchyIsLoading, parseBounds, boundsIntersect, boundsCenterY, estimateVerticalScrollShift, questionVisible, currentQuestionText, findChatScrollBounds, validateCaptureViewport, replyCaptureBounds, visibleLabelBounds, visibleLabelBoundsList, boundsForNodeAttribute, evidencePanelBounds, evidenceMinimumHeight, referenceProductsSection, referenceProductImageBounds } = require('./hierarchy')
+const { sleep, safeSlug, createBatchDirectory, questionArtifactDirectory } = require('./utils')
+const { iterNodes, nodeAttr, nodeIsVisible, hierarchyIsLoading, parseBounds, boundsIntersect, boundsCenterY, estimateVerticalScrollShift, questionVisible, currentQuestionText, findChatScrollBounds, validateCaptureViewport, replyCaptureBounds, visibleLabelBounds, visibleLabelBoundsList, boundsForNodeAttribute, evidencePanelBounds, evidenceMinimumHeight, referenceProductsSection, referenceProductImageBounds } = require('./hierarchy')
 const { imageInfo, cropImage, imagesSimilar, imageRegionsStable, imageLooksLoaded, verifyFrameOverlap, verifyProductGridOverlap, composeLongImages } = require('./images')
 const { U2Client } = require('./u2-client')
 const { ScrcpyObserver, SCRCPY_VERSION } = require('./scrcpy-observer')
@@ -11,9 +11,88 @@ const { bundledScrcpyServer } = require('../runtime-paths')
 const DEFAULT_PACKAGE = 'com.aurora.xiaohe.aidoctor'
 const DEFAULT_MAX_LONG_IMAGE_HEIGHT = 12_000
 const REPLY_STABLE_QUIET_MS = 3_000
+const DEFAULT_ENTRY_ID = 'xiaohe-app'
+const ENTRY_DEFINITIONS = Object.freeze({
+  'xiaohe-app': Object.freeze({
+    id: 'xiaohe-app',
+    label: '小荷AI医生APP',
+    packageName: DEFAULT_PACKAGE,
+    resourcePackage: DEFAULT_PACKAGE,
+    packageLabel: '小荷App',
+    inputHints: ['输入问题'],
+    submitLabels: ['发送'],
+    supportsNewSession: true,
+  }),
+  'douyin-xiaohe-miniapp': Object.freeze({
+    id: 'douyin-xiaohe-miniapp',
+    label: '抖音搜索框（小荷AI小程序）',
+    packageName: 'com.ss.android.ugc.aweme',
+    packageLabel: '抖音小荷AI小程序',
+    inputHints: ['搜索', '输入问题'],
+    submitLabels: ['搜索', '发送'],
+    submitKey: 'enter',
+    supportsNewSession: false,
+  }),
+  'toutiao-xiaohe-miniapp': Object.freeze({
+    id: 'toutiao-xiaohe-miniapp',
+    label: '头条搜索框（小荷AI小程序）',
+    packageName: 'com.ss.android.article.news',
+    packageLabel: '头条小荷AI小程序',
+    inputHints: ['搜索', '输入问题'],
+    submitLabels: ['搜索', '发送'],
+    submitKey: 'enter',
+    supportsNewSession: false,
+  }),
+})
+const ENTRY_LIST = Object.freeze(Object.values(ENTRY_DEFINITIONS))
 
 function hierarchyBelongsToPackage(xml, packageName = DEFAULT_PACKAGE) {
   return iterNodes(String(xml)).some(node => nodeAttr(node, 'package') === packageName)
+}
+
+function automationEntries() {
+  return ENTRY_LIST.map(entry => ({ ...entry }))
+}
+
+function normalizeEntryId(value) {
+  const id = String(value || '').trim()
+  if (!id) return DEFAULT_ENTRY_ID
+  if (!ENTRY_DEFINITIONS[id]) {
+    throw new Error(`未知入口：${id}。请从桌面端入口列表中选择。`)
+  }
+  return id
+}
+
+function normalizeAutomationEntries(entries) {
+  const raw = Array.isArray(entries) && entries.length ? entries : [DEFAULT_ENTRY_ID]
+  const seen = new Set()
+  const result = []
+  for (const value of raw) {
+    const id = normalizeEntryId(value)
+    if (seen.has(id)) continue
+    seen.add(id)
+    result.push(ENTRY_DEFINITIONS[id])
+  }
+  return result
+}
+
+async function waitForPackageHierarchy({
+  dumpHierarchy,
+  packageName = DEFAULT_PACKAGE,
+  packageLabel = '目标App',
+  delay = sleep,
+  now = Date.now,
+  timeout = 8_000,
+  interval = 250,
+}) {
+  const deadline = now() + timeout
+  let xml = ''
+  while (now() < deadline) {
+    xml = await dumpHierarchy()
+    if (hierarchyBelongsToPackage(xml, packageName)) return xml
+    await delay(Math.min(interval, Math.max(0, deadline - now())))
+  }
+  throw new Error(`当前前台页面不是${packageLabel}（层级中缺少 ${packageName}），已停止UI操作。`)
 }
 
 function maxLongImageHeight(value) {
@@ -329,6 +408,7 @@ function shouldRetryFullReplyCapture({ fallbackReasons = [], allowFullRetry = tr
 function createRunner(options) {
   let cancelled = false
   let activeSerial = null
+  let activeEntry = ENTRY_DEFINITIONS[DEFAULT_ENTRY_ID]
   let cachedInputBounds = null
   let cachedSendBounds = null
   let observerFallbackReason = null
@@ -352,6 +432,46 @@ function createRunner(options) {
     log,
   })
   const checkCancelled = () => { if (cancelled) throw new CancelledError() }
+
+  function resetEntryState(entry) {
+    activeEntry = entry
+    cachedInputBounds = null
+    cachedSendBounds = null
+  }
+
+  function activePackageName() {
+    return activeEntry.packageName || DEFAULT_PACKAGE
+  }
+
+  function activePackageLabel() {
+    return activeEntry.packageLabel || activeEntry.label || activePackageName()
+  }
+
+  function boundsForResourceId(xml, name) {
+    const packages = [activeEntry.resourcePackage, activePackageName(), DEFAULT_PACKAGE].filter(Boolean)
+    for (const packageName of [...new Set(packages)]) {
+      const exact = boundsForNodeAttribute(xml, 'resource-id', `${packageName}:id/${name}`)
+      if (exact) return exact
+    }
+    const suffix = `:id/${name}`
+    for (const attrs of iterNodes(xml)) {
+      if (!nodeIsVisible(attrs) || !nodeAttr(attrs, 'resource-id').endsWith(suffix)) continue
+      const rawBounds = nodeAttr(attrs, 'bounds')
+      if (rawBounds) return parseBounds(rawBounds)
+    }
+    return null
+  }
+
+  function findSubmitBounds(xml) {
+    const labels = activeEntry.submitLabels || ['发送']
+    for (const label of labels) {
+      const byDescription = boundsForNodeAttribute(xml, 'content-desc', label)
+      if (byDescription) return byDescription
+      const byText = visibleLabelBounds(xml, label)
+      if (byText) return byText
+    }
+    return null
+  }
 
   function recoverySnapshot() {
     return {
@@ -489,10 +609,10 @@ function createRunner(options) {
     // in front. Retry only this read-only operation; clicks are never replayed.
     for (let attempt = 0; attempt < 3; attempt += 1) {
       xml = await ui.dumpHierarchy()
-      if (hierarchyBelongsToPackage(xml)) return xml
+      if (hierarchyBelongsToPackage(xml, activePackageName())) return xml
       if (attempt < 2) await sleep(120)
     }
-    throw new Error(`当前前台页面不是小荷App（层级中缺少 ${DEFAULT_PACKAGE}），已停止UI操作。`)
+    throw new Error(`当前前台页面不是${activePackageLabel()}（层级中缺少 ${activePackageName()}），已停止UI操作。`)
   }
 
   async function tap(x, y) {
@@ -527,15 +647,21 @@ function createRunner(options) {
       const editBounds = boundsForNodeAttribute(xml, 'class', 'android.widget.EditText')
       if (editBounds) {
         cachedInputBounds = editBounds
-        cachedSendBounds = boundsForNodeAttribute(xml, 'content-desc', '发送')
+        cachedSendBounds = findSubmitBounds(xml)
         const attrs = iterNodes(xml).find(item => nodeAttr(item, 'class') === 'android.widget.EditText')
         return { bounds: editBounds, text: attrs ? nodeAttr(attrs, 'text') : '' }
       }
-      const hint = visibleLabelBounds(xml, '输入问题')
-      if (hint) { await tap((hint[0] + hint[2]) / 2, (hint[1] + hint[3]) / 2); await sleep(500) }
+      for (const hintText of activeEntry.inputHints || ['输入问题']) {
+        const hint = visibleLabelBounds(xml, hintText)
+        if (hint) {
+          await tap((hint[0] + hint[2]) / 2, (hint[1] + hint[3]) / 2)
+          await sleep(500)
+          break
+        }
+      }
       await sleep(500)
     }
-    throw new Error('未能在小荷聊天页面找到输入框。')
+    throw new Error(`未能在${activeEntry.label}找到输入框。`)
   }
 
   async function inputQuestion(question) {
@@ -545,7 +671,7 @@ function createRunner(options) {
     // after failure, so an uncertain input state terminates the task.
     const restoredXml = await fillQuestionInput({ ui, tap, source }, edit, question)
     cachedInputBounds = boundsForNodeAttribute(restoredXml, 'class', 'android.widget.EditText') || cachedInputBounds
-    cachedSendBounds = boundsForNodeAttribute(restoredXml, 'content-desc', '发送') || cachedSendBounds
+    cachedSendBounds = findSubmitBounds(restoredXml) || cachedSendBounds
   }
 
   async function tapSend() {
@@ -555,6 +681,10 @@ function createRunner(options) {
       const x = Math.round((cachedSendBounds[0] + cachedSendBounds[2]) / 2)
       const y = Math.round((cachedSendBounds[1] + cachedSendBounds[3]) / 2)
       await tap(x, y)
+      return
+    }
+    if (activeEntry.submitKey) {
+      await ui.press(activeEntry.submitKey)
       return
     }
     if (!cachedInputBounds) await waitForInput()
@@ -1117,18 +1247,18 @@ function createRunner(options) {
   async function closeReferenceProductsDrawer() {
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const xml = await source()
-      const sheet = boundsForNodeAttribute(xml, 'resource-id', `${DEFAULT_PACKAGE}:id/bullet_container`)
+      const sheet = boundsForResourceId(xml, 'bullet_container')
       if (!sheet) return true
       const list = boundsForNodeAttribute(xml, 'class', 'androidx.recyclerview.widget.RecyclerView')
       const [left, top, right, bottom] = sheet
       const closeY = list ? Math.floor((top + list[1]) / 2) : top + Math.max(24, Math.floor((bottom - top) / 10))
       await tap(right - Math.max(24, Math.floor((right - left) / 16)), closeY)
       await waitForVisualQuiet({ timeout: 900, fallbackMs: 600 })
-      if (!boundsForNodeAttribute(await source(), 'resource-id', `${DEFAULT_PACKAGE}:id/bullet_container`)) return true
+      if (!boundsForResourceId(await source(), 'bullet_container')) return true
       await ui.press('back')
       await waitForVisualQuiet({ timeout: 900, fallbackMs: 600 })
     }
-    return !boundsForNodeAttribute(await source(), 'resource-id', `${DEFAULT_PACKAGE}:id/bullet_container`)
+    return !boundsForResourceId(await source(), 'bullet_container')
   }
 
   async function captureReferenceProductsAtTrigger(trigger, { restoreDrawer = true } = {}) {
@@ -1143,7 +1273,7 @@ function createRunner(options) {
       while (Date.now() < deadline && (!list || !sheet)) {
         const xml = await source()
         list = boundsForNodeAttribute(xml, 'class', 'androidx.recyclerview.widget.RecyclerView')
-        sheet = boundsForNodeAttribute(xml, 'resource-id', `${DEFAULT_PACKAGE}:id/bullet_container`)
+        sheet = boundsForResourceId(xml, 'bullet_container')
         if (!list || !sheet) await sleep(100)
       }
       if (!list || !sheet || list[3] - list[1] < 100) {
@@ -1165,7 +1295,7 @@ function createRunner(options) {
           await sleep(100)
           const expandedXml = await source()
           const expandedList = boundsForNodeAttribute(expandedXml, 'class', 'androidx.recyclerview.widget.RecyclerView')
-          const expandedSheet = boundsForNodeAttribute(expandedXml, 'resource-id', `${DEFAULT_PACKAGE}:id/bullet_container`)
+          const expandedSheet = boundsForResourceId(expandedXml, 'bullet_container')
           if (expandedList && expandedSheet && expandedList[1] < previousTop - 40) {
             list = expandedList
             sheet = expandedSheet
@@ -1274,9 +1404,12 @@ function createRunner(options) {
   async function askOnce(payload, batchDirectory, question, index) {
     const observerBaseline = typeof observer.snapshot === 'function' ? observer.snapshot() : {}
     const recoveryBaseline = recoverySnapshot()
-    if (payload.newSession) {
+    let newSessionPerformed = false
+    if (payload.newSession && activeEntry.supportsNewSession) {
       log('stage: 正在切换到新会话')
-      await tapNewSession()
+      newSessionPerformed = await tapNewSession()
+    } else if (payload.newSession && !activeEntry.supportsNewSession) {
+      log(`stage: ${activeEntry.label}不支持自动新建会话，已跳过该步骤`)
     }
     log('stage: 正在输入问题')
     await inputQuestion(question)
@@ -1286,6 +1419,11 @@ function createRunner(options) {
       batch_id: path.basename(batchDirectory),
       question_index: index,
       question_directory: directory,
+      entry_id: activeEntry.id,
+      entry_label: activeEntry.label,
+      entry_package: activePackageName(),
+      new_session_requested: Boolean(payload.newSession),
+      new_session_performed: newSessionPerformed,
       ui_backend: 'python_uiautomator2_strict',
       ui_fallback_enabled: false,
     }
@@ -1316,9 +1454,25 @@ function createRunner(options) {
     })
   }
 
+  async function prepareEntry(entry) {
+    resetEntryState(entry)
+    await ui.appStart(entry.packageName)
+    await waitForPackageHierarchy({
+      dumpHierarchy: async () => {
+        checkCancelled()
+        return ui.dumpHierarchy()
+      },
+      packageName: activePackageName(),
+      packageLabel: activePackageLabel(),
+    })
+    await waitForVisualQuiet({ timeout: 1_200, fallbackMs: 800 })
+    await waitForInput(15_000)
+  }
+
   return {
     async captureCurrentAnswer(payload) {
       activeSerial = payload.serial
+      resetEntryState(ENTRY_DEFINITIONS[DEFAULT_ENTRY_ID])
       payloadMaxLongImageHeight = maxLongImageHeight(payload.maxLongImageHeight)
       const outputRoot = path.resolve(payload.outputDir)
       const batchDirectory = await createBatchDirectory(outputRoot)
@@ -1334,7 +1488,7 @@ function createRunner(options) {
         const observerBaseline = typeof observer.snapshot === 'function' ? observer.snapshot() : {}
         const recoveryBaseline = recoverySnapshot()
         let xml = await source()
-        const alreadyOpen = Boolean(boundsForNodeAttribute(xml, 'resource-id', `${DEFAULT_PACKAGE}:id/bullet_container`))
+        const alreadyOpen = Boolean(boundsForResourceId(xml, 'bullet_container'))
         if (alreadyOpen) throw new Error('当前药品抽屉已经打开，无法证明仍位于第一项；为避免漏药，本次未继续操作，也未输入或发送新问题。')
         const size = await windowSize()
         const chatBounds = findChatScrollBounds(xml, size)
@@ -1365,10 +1519,13 @@ function createRunner(options) {
           status: 'existing_reply',
           xml,
           meta: {
-          serial: payload.serial,
+            serial: payload.serial,
             batch_id: path.basename(batchDirectory),
             question_index: 1,
             question_directory: directory,
+            entry_id: activeEntry.id,
+            entry_label: activeEntry.label,
+            entry_package: activePackageName(),
             existing_reply_capture: true,
             input_performed: false,
             send_performed: false,
@@ -1400,30 +1557,41 @@ function createRunner(options) {
     async run(payload) {
       activeSerial = payload.serial
       payloadMaxLongImageHeight = maxLongImageHeight(payload.maxLongImageHeight)
+      const entries = normalizeAutomationEntries(payload.entries)
       const outputRoot = path.resolve(payload.outputDir)
       const batchDirectory = await createBatchDirectory(outputRoot)
       try {
         await waitForAdbDevice(options.adbPath, payload.serial)
         await ui.start(payload.serial)
-        await ui.appStart(DEFAULT_PACKAGE)
         try {
           await observer.start(payload.serial)
         } catch (error) {
           await disableObserver(error)
         }
-        await waitForVisualQuiet({ timeout: 1_200, fallbackMs: 800 })
-        await waitForInput(15_000)
-        log(`device=${payload.serial} package=${DEFAULT_PACKAGE} batch=${batchDirectory}`)
-        for (const [zeroIndex, question] of payload.questions.entries()) {
+        log(`device=${payload.serial} entries=${entries.map(entry => entry.id).join(',')} batch=${batchDirectory}`)
+        let completed = 0
+        for (const [entryIndex, entry] of entries.entries()) {
           checkCancelled()
-          log(`[${zeroIndex + 1}/${payload.questions.length}] asking: ${question}`)
-          log(JSON.stringify(await askOnce(payload, batchDirectory, question, zeroIndex + 1)))
+          log(`entry: [${entryIndex + 1}/${entries.length}] ${entry.label} package=${entry.packageName}`)
+          await prepareEntry(entry)
+          const entryDirectory = entries.length > 1
+            ? path.join(batchDirectory, `${String(entryIndex + 1).padStart(2, '0')}_${safeSlug(entry.label, 48)}`)
+            : batchDirectory
+          for (const [zeroIndex, question] of payload.questions.entries()) {
+            checkCancelled()
+            log(`[${entryIndex + 1}/${entries.length} ${zeroIndex + 1}/${payload.questions.length}] asking via ${entry.label}: ${question}`)
+            log(JSON.stringify(await askOnce(payload, entryDirectory, question, zeroIndex + 1)))
+            completed += 1
+          }
         }
-        log(`执行完成：共 ${payload.questions.length} 条问题，输出目录 ${batchDirectory}`)
+        log(`执行完成：共 ${entries.length} 个入口 × ${payload.questions.length} 条问题 = ${completed} 次执行，输出目录 ${batchDirectory}`)
       } catch (error) {
         await fs.writeFile(path.join(batchDirectory, 'automation-failure.json'), JSON.stringify({
           created_at: new Date().toISOString(),
           serial: payload.serial,
+          entry_id: activeEntry.id,
+          entry_label: activeEntry.label,
+          entry_package: activePackageName(),
           ui_backend: 'python_uiautomator2_strict',
           ui_fallback_enabled: false,
           error_name: error?.name || 'Error',
@@ -1448,6 +1616,11 @@ module.exports = {
   createRunner,
   CancelledError,
   DEFAULT_PACKAGE,
+  DEFAULT_ENTRY_ID,
+  ENTRY_DEFINITIONS,
+  automationEntries,
+  normalizeAutomationEntries,
+  waitForPackageHierarchy,
   buildReplyImages,
   conservativeFallbackOverlap,
   chatSwipePlan,
