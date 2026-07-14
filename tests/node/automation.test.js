@@ -9,7 +9,7 @@ const { questionVisible, currentQuestionText, replyTailOnScreen, findChatScrollB
 const { stackFramesInGroups, verifyFrameOverlap, verifyProductGridOverlap, imageInfo, imageLooksLoaded, imagesSimilar, imageRegionsStable, alignCropToWhitespace, stitchFramesWithOverlaps, composeLongImages, cropFramesAtTextSeams } = require('../../src/automation/images')
 const { createBatchDirectory, questionArtifactDirectory } = require('../../src/automation/utils')
 const { loadQuestionFile } = require('../../src/questions')
-const { adbConnectionLost, automationEntries, captureStableObserved, captureStableSandwich, calibratedProductFallbackOverlap, chatSwipePlan, conservativeFallbackOverlap, buildReplyImages, CancelledError, DOUYIN_SEARCH_SUMMARY_FILENAME, douyinMiniAppCaptureBounds, douyinSearchInput, douyinViewFullBounds, fillQuestionInput, hierarchyBelongsToPackage, historyOnboardingVisible, maxLongImageHeight, normalizeAutomationEntries, observerResultRequiresFreshCapture, prepareEmbeddedEvidence, referenceProductsCaptureComplete, referenceProductsTrigger, referenceProductViewportReadiness, runQuestionsWithRecovery, scrollEndConfirmed, shouldRetryFullReplyCapture, waitForPackageHierarchy } = require('../../src/automation/runner')
+const { adbConnectionLost, automationEntries, captureStableObserved, captureStableSandwich, calibratedProductFallbackOverlap, chatSwipePlan, conservativeFallbackOverlap, buildReplyImages, CancelledError, DOUYIN_SEARCH_SUMMARY_FILENAME, TOUTIAO_SEARCH_SUMMARY_FILENAME, douyinMiniAppCaptureBounds, douyinSearchInput, douyinViewFullBounds, fillQuestionInput, hierarchyBelongsToPackage, historyOnboardingVisible, maxLongImageHeight, normalizeAutomationEntries, observerResultRequiresFreshCapture, prepareEmbeddedEvidence, referenceProductsCaptureComplete, referenceProductsTrigger, referenceProductViewportReadiness, runQuestionsWithRecovery, scrollEndConfirmed, shouldRetryFullReplyCapture, toutiaoSearchInput, toutiaoViewMoreBounds, waitForPackageHierarchy } = require('../../src/automation/runner')
 
 const CHAT_BOUNDS = [0, 200, 1080, 1800]
 
@@ -85,6 +85,19 @@ test('抖音小荷AI全文页排除固定顶部、工具栏和输入区', () => 
   </hierarchy>`
   assert.deepEqual(douyinMiniAppCaptureBounds(xml, { width: 1080, height: 2408 }), [0, 236, 1080, 1785])
   assert.equal(douyinMiniAppCaptureBounds(`${xml}<node package="com.ss.android.ugc.aweme" class="android.widget.EditText" resource-id="com.ss.android.ugc.aweme:id/et_search_kw" visible-to-user="true" bounds="[1,1][2,2]" />`, { width: 1080, height: 2408 }), null)
+})
+
+test('头条入口按真实搜索框和“查看更多”卡片结构定位', () => {
+  assert.equal(TOUTIAO_SEARCH_SUMMARY_FILENAME, '回答_智能总结.png')
+  const xml = `<hierarchy>
+    <node package="com.ss.android.article.news" class="" resource-id="com.ss.android.article.news:id/cx" text="搜索框，腹泻脱水用什么药" clickable="true" visible-to-user="true" bounds="[245,102][792,222]" />
+    <node package="com.ss.android.article.news" class="android.view.View" text="小荷AI医生·智能总结" visible-to-user="true" bounds="[168,441][714,528]" />
+    <node package="com.ss.android.article.news" class="android.widget.Button" text="查看更多" clickable="true" visible-to-user="true" bounds="[72,1323][1008,1464]" />
+  </hierarchy>`
+
+  assert.deepEqual(toutiaoSearchInput(xml), { bounds: [245, 102, 792, 222], text: '腹泻脱水用什么药' })
+  assert.deepEqual(toutiaoViewMoreBounds(xml), [72, 1323, 1008, 1464])
+  assert.equal(toutiaoViewMoreBounds(xml.replace('小荷AI医生·智能总结', '普通搜索结果')), null)
 })
 
 test('入口启动后等待目标App层级出现，避免启动过渡误判前台错误', async () => {

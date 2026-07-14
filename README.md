@@ -87,6 +87,8 @@ JSON 使用数组或 `questions` / `问题` 数组；Excel 读取第一个工作
 
 抖音入口使用独立流程：打开抖音搜索页，在搜索框输入问题并点击搜索，等待“小荷AI医生”结果卡片。卡片稳定后先保存一张完整搜索结果页为 `回答_智能总结.png`，再点击“查看全文”，向上滚动并确认真实顶部，最后从顶部向下滚动到真实末端并保存全文长图 `回答_001.png`。正文截图使用 ADB 原始 PNG，相邻视口执行像素接缝校验；顶部和末端都需要连续两次滚动无变化才允许结束。JSON 额外记录 `douyin_search_summary_captured`、`douyin_search_summary_screenshot`、`douyin_view_full_opened`、`douyin_full_page_confirmed_top` 和 `douyin_full_page_confirmed_end`。
 
+今日头条入口使用对应的独立搜索流程：通过头条搜索框输入并确认问题，等待“小荷AI医生·智能总结”和可点击的“查看更多”同时出现。先将完整搜索结果页保存为 `回答_智能总结.png`，再点击“查看更多”进入小荷 AI 全文页。全文首次打开后需等待连续 3 秒无画面活动，再从真实顶部向下采集并保存 `回答_001.png`；固定顶栏、底部工具栏和消息输入框不会进入长图。JSON 额外记录 `toutiao_search_summary_captured`、`toutiao_search_summary_screenshot`、`toutiao_view_more_opened`、`toutiao_full_page_confirmed_top` 和 `toutiao_full_page_confirmed_end`。
+
 ## 项目结构
 
 ```text

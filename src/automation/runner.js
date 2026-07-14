@@ -12,7 +12,9 @@ const DEFAULT_PACKAGE = 'com.aurora.xiaohe.aidoctor'
 const DEFAULT_MAX_LONG_IMAGE_HEIGHT = 12_000
 const REPLY_STABLE_QUIET_MS = 3_000
 const DEFAULT_ENTRY_ID = 'xiaohe-app'
-const DOUYIN_SEARCH_SUMMARY_FILENAME = '回答_智能总结.png'
+const SEARCH_SUMMARY_FILENAME = '回答_智能总结.png'
+const DOUYIN_SEARCH_SUMMARY_FILENAME = SEARCH_SUMMARY_FILENAME
+const TOUTIAO_SEARCH_SUMMARY_FILENAME = SEARCH_SUMMARY_FILENAME
 const ENTRY_DEFINITIONS = Object.freeze({
   'xiaohe-app': Object.freeze({
     id: 'xiaohe-app',
@@ -37,9 +39,7 @@ const ENTRY_DEFINITIONS = Object.freeze({
     label: '头条搜索框（小荷AI小程序）',
     packageName: 'com.ss.android.article.news',
     packageLabel: '头条小荷AI小程序',
-    inputHints: ['搜索', '输入问题'],
-    submitLabels: ['搜索', '发送'],
-    submitKey: 'enter',
+    workflow: 'toutiao-search',
     supportsNewSession: false,
   }),
 })
@@ -89,6 +89,30 @@ function douyinSearchInput(xml) {
   if (!bounds) return null
   const attrs = iterNodes(xml).find(item => nodeAttr(item, 'resource-id').endsWith(':id/et_search_kw'))
   return { bounds, text: attrs ? nodeAttr(attrs, 'text') : '' }
+}
+
+function toutiaoSearchInput(xml) {
+  const attrs = iterNodes(xml).find(item => nodeIsVisible(item)
+    && nodeAttr(item, 'package') === ENTRY_DEFINITIONS['toutiao-xiaohe-miniapp'].packageName
+    && nodeAttr(item, 'resource-id').endsWith(':id/cx'))
+  if (!attrs) return null
+  const rawBounds = nodeAttr(attrs, 'bounds')
+  if (!rawBounds) return null
+  const text = nodeAttr(attrs, 'text').replace(/^搜索框[，,]\s*/, '')
+  return { bounds: parseBounds(rawBounds), text }
+}
+
+function toutiaoViewMoreBounds(xml) {
+  const nodes = iterNodes(xml)
+  const hasXiaoheSummary = nodes.some(attrs => nodeIsVisible(attrs)
+    && /小荷AI医生[·・]?智能总结/.test(nodeAttr(attrs, 'text')))
+  if (!hasXiaoheSummary) return null
+  const more = nodes.find(attrs => nodeIsVisible(attrs)
+    && nodeAttr(attrs, 'package') === ENTRY_DEFINITIONS['toutiao-xiaohe-miniapp'].packageName
+    && nodeAttr(attrs, 'text') === '查看更多'
+    && nodeAttr(attrs, 'clickable') === 'true')
+  const rawBounds = more && nodeAttr(more, 'bounds')
+  return rawBounds ? parseBounds(rawBounds) : null
 }
 
 function douyinViewFullBounds(xml, screenSize) {
@@ -848,6 +872,44 @@ function createRunner(options) {
     return search
   }
 
+  async function waitForToutiaoSearchInput(timeout = 12_000) {
+    const deadline = Date.now() + timeout
+    while (Date.now() < deadline) {
+      const xml = await source()
+      const close = boundsForNodeAttribute(xml, 'content-desc', '关闭')
+      if (close) {
+        log('stage: 正在关闭上一题的头条小荷AI全文页')
+        await tap((close[0] + close[2]) / 2, (close[1] + close[3]) / 2)
+        await waitForVisualQuiet({ timeout: 1_500, fallbackMs: 800 })
+        continue
+      }
+      const edit = toutiaoSearchInput(xml)
+      if (edit) {
+        await tap((edit.bounds[0] + edit.bounds[2]) / 2, (edit.bounds[1] + edit.bounds[3]) / 2)
+        await waitForVisualQuiet({ timeout: 1_200, fallbackMs: 500 })
+        return toutiaoSearchInput(await source()) || edit
+      }
+      const search = boundsForNodeAttribute(xml, 'content-desc', '搜索') || visibleLabelBounds(xml, '搜索')
+      if (search) {
+        await tap((search[0] + search[2]) / 2, (search[1] + search[3]) / 2)
+        await waitForVisualQuiet({ timeout: 1_500, fallbackMs: 800 })
+        continue
+      }
+      await sleep(400)
+    }
+    throw new Error('未能在今日头条打开搜索输入框。请确认头条首页可正常使用且没有登录或升级提示遮挡。')
+  }
+
+  async function inputToutiaoQuestion(question) {
+    const edit = await waitForToutiaoSearchInput()
+    const xml = await fillQuestionInput({ ui, tap, source }, edit, question)
+    const restored = toutiaoSearchInput(xml)
+    if (!restored || restored.text !== question) throw new Error('头条搜索框输入后未能确认问题文本，已停止搜索。')
+    const search = boundsForResourceId(xml, 'e0') || visibleLabelBounds(xml, '搜索')
+    if (!search) throw new Error('头条搜索框已输入问题，但未能定位“搜索”按钮；为避免误操作，本题未继续。')
+    return search
+  }
+
   async function waitForDouyinAnswerCard(timeout) {
     const deadline = Date.now() + timeout
     const size = await windowSize()
@@ -890,6 +952,50 @@ function createRunner(options) {
       if (bounds) return { xml, bounds }
     }
     throw new Error('已点击抖音小荷AI医生“查看全文”，但未能确认全文页打开。')
+  }
+
+  async function waitForToutiaoAnswerCard(timeout) {
+    const deadline = Date.now() + timeout
+    const size = await windowSize()
+    let lastProgress = 0
+    while (Date.now() < deadline) {
+      const xml = await source()
+      const viewMore = toutiaoViewMoreBounds(xml)
+      if (viewMore) return { xml, viewMore, size }
+      if (Date.now() - lastProgress >= 5_000) {
+        log('waiting: 正在等待头条小荷AI医生搜索结果…')
+        lastProgress = Date.now()
+      }
+      await sleep(500)
+    }
+    throw new Error('头条搜索结果中未出现小荷AI医生“查看更多”卡片。')
+  }
+
+  async function captureToutiaoSearchSummary(size) {
+    await waitForVisualQuiet({ timeout: 1_200, fallbackMs: 300 })
+    const capture = await captureStableSandwich({
+      capture: screenshot,
+      hierarchy: source,
+      framesStable: imageRegionsStable,
+      hierarchyLoading: () => false,
+      interval: 120,
+    }, 8_000)
+    if (!capture.stable) throw new Error('头条搜索结果智能总结持续变化，无法取得稳定截图。')
+    const viewMore = toutiaoViewMoreBounds(capture.xml)
+    if (!viewMore) throw new Error('截取头条智能总结后未能再次确认“查看更多”卡片，已停止点击。')
+    return { ...capture, viewMore, size }
+  }
+
+  async function openToutiaoFullAnswer(viewMore, size, timeout = 12_000) {
+    await tap((viewMore[0] + viewMore[2]) / 2, (viewMore[1] + viewMore[3]) / 2)
+    const deadline = Date.now() + timeout
+    while (Date.now() < deadline) {
+      await waitForVisualQuiet({ timeout: 1_000, fallbackMs: 400 })
+      const xml = await source()
+      const bounds = douyinMiniAppCaptureBounds(xml, size)
+      if (bounds) return { xml, bounds }
+    }
+    throw new Error('已点击头条小荷AI医生“查看更多”，但未能确认全文页打开。')
   }
 
   async function normalizedHierarchy() {
@@ -1276,7 +1382,7 @@ function createRunner(options) {
     return result
   }
 
-  async function waitForDouyinStableRegion(bounds, timeout = 8_000) {
+  async function waitForMiniAppStableRegion(bounds, platformLabel, timeout = 8_000) {
     await waitForVisualQuiet({ timeout: Math.min(1_200, timeout), fallbackMs: 180 })
     const capture = await captureStableSandwich({
       capture: async () => cropImage(await screenshot(), bounds),
@@ -1285,20 +1391,29 @@ function createRunner(options) {
       hierarchyLoading: () => false,
       interval: 120,
     }, timeout)
-    if (!capture.stable) throw new Error('抖音小荷AI全文正文区域持续变化，无法取得可验证的稳定截图。')
+    if (!capture.stable) throw new Error(`${platformLabel}小荷AI全文正文区域持续变化，无法取得可验证的稳定截图。`)
     return capture
   }
 
-  async function captureDouyinFullAnswerFrames(initialXml, initialBounds) {
+  async function captureMiniAppFullAnswerFrames(initialXml, initialBounds, {
+    platformLabel,
+    metadataPrefix,
+    openedMetadataKey,
+    initialQuietMs = 0,
+  }) {
     const frames = []
     const transitions = []
     const fallbackReasons = []
     let recaptureCount = 0
     let unchangedCount = 0
     let scrollAttempts = 0
-    let capture = await waitForDouyinStableRegion(initialBounds, 8_000)
+    if (initialQuietMs > 0) {
+      log(`waiting: 正在等待${platformLabel}小荷AI全文连续${Math.round(initialQuietMs / 1000)}秒无画面活动`)
+      await waitForFinalVisualQuiet({ quietMs: initialQuietMs, timeout: 25_000 })
+    }
+    let capture = await waitForMiniAppStableRegion(initialBounds, platformLabel, 12_000)
     let bounds = douyinMiniAppCaptureBounds(capture.xml || initialXml, await windowSize()) || initialBounds
-    if (bounds.join(',') !== initialBounds.join(',')) capture = await waitForDouyinStableRegion(bounds, 8_000)
+    if (bounds.join(',') !== initialBounds.join(',')) capture = await waitForMiniAppStableRegion(bounds, platformLabel, 8_000)
 
     let topUnchangedCount = 0
     let topNavigationAttempts = 0
@@ -1306,18 +1421,18 @@ function createRunner(options) {
       topNavigationAttempts += 1
       const before = capture.frame
       await swipeChat(bounds, 'up', 0.62, { maxFraction: 0.68, speed: 2_600 })
-      capture = await waitForDouyinStableRegion(bounds, 6_000)
+      capture = await waitForMiniAppStableRegion(bounds, platformLabel, 6_000)
       topUnchangedCount = await imagesSimilar(before, capture.frame, 3) ? topUnchangedCount + 1 : 0
     }
-    log(`capture: 抖音小荷AI全文已确认位于顶部（回滚尝试=${topNavigationAttempts}）`)
+    log(`capture: ${platformLabel}小荷AI全文已确认位于顶部（回滚尝试=${topNavigationAttempts}）`)
     frames.push(capture.frame)
-    log('capture: 抖音小荷AI全文 page 1')
+    log(`capture: ${platformLabel}小荷AI全文 page 1`)
 
     while (unchangedCount < 2) {
       scrollAttempts += 1
       const before = frames.at(-1)
       const scroll = await swipeChat(bounds, 'down', 0.5, { maxFraction: 0.58, speed: 1_600, eventDrivenSettle: true })
-      let afterCapture = await waitForDouyinStableRegion(bounds, 8_000)
+      let afterCapture = await waitForMiniAppStableRegion(bounds, platformLabel, 8_000)
       let after = afterCapture.frame
       if (await imagesSimilar(before, after, 3)) {
         unchangedCount += 1
@@ -1329,7 +1444,7 @@ function createRunner(options) {
       const expectedOverlap = Math.max(12, frameHeight - scroll.distance)
       let transition = null
       try {
-        if (!afterCapture.stable) throw new Error('滚动后的抖音全文画面未稳定')
+        if (!afterCapture.stable) throw new Error(`滚动后的${platformLabel}全文画面未稳定`)
         try {
           transition = { verified: true, overlap: await verifyFrameOverlap(before, after, expectedOverlap) }
         } catch {
@@ -1337,25 +1452,25 @@ function createRunner(options) {
         }
       } catch (error) {
         recaptureCount += 1
-        afterCapture = await waitForDouyinStableRegion(bounds, 3_000)
+        afterCapture = await waitForMiniAppStableRegion(bounds, platformLabel, 3_000)
         after = afterCapture.frame
         try {
-          if (!afterCapture.stable) throw new Error('重采后的抖音全文画面仍未稳定')
+          if (!afterCapture.stable) throw new Error(`重采后的${platformLabel}全文画面仍未稳定`)
           transition = { verified: true, overlap: await verifyFrameOverlap(before, after, null) }
         } catch (retryError) {
           const reason = retryError.message || error.message
           transition = { verified: false, fallbackOverlap: 0, reason }
           fallbackReasons.push(reason)
-          log(`capture: 抖音全文接缝无法精确校验，保留下一屏完整视口和浅色留白：${reason}`)
+          log(`capture: ${platformLabel}全文接缝无法精确校验，保留下一屏完整视口和浅色留白：${reason}`)
         }
       }
       if (!(await imagesSimilar(frames.at(-1), after, 3))) {
         frames.push(after)
         transitions.push(transition)
-        log(`capture: 抖音小荷AI全文 page ${frames.length}`)
+        log(`capture: ${platformLabel}小荷AI全文 page ${frames.length}`)
       }
     }
-    log('capture: 抖音小荷AI全文连续两次滚动无变化，已确认到底')
+    log(`capture: ${platformLabel}小荷AI全文连续两次滚动无变化，已确认到底`)
     return {
       frames,
       transitions,
@@ -1371,13 +1486,30 @@ function createRunner(options) {
       productCaptureAttempts: 0,
       productCaptureMs: 0,
       captureMetadata: {
-        douyin_view_full_opened: true,
-        douyin_full_page_confirmed_top: true,
-        douyin_full_page_top_navigation_attempts: topNavigationAttempts,
-        douyin_full_page_confirmed_end: true,
-        douyin_full_page_scroll_attempts: scrollAttempts,
+        [openedMetadataKey]: true,
+        [`${metadataPrefix}_full_page_confirmed_top`]: true,
+        [`${metadataPrefix}_full_page_top_navigation_attempts`]: topNavigationAttempts,
+        [`${metadataPrefix}_full_page_confirmed_end`]: true,
+        [`${metadataPrefix}_full_page_scroll_attempts`]: scrollAttempts,
       },
     }
+  }
+
+  function captureDouyinFullAnswerFrames(initialXml, initialBounds) {
+    return captureMiniAppFullAnswerFrames(initialXml, initialBounds, {
+      platformLabel: '抖音',
+      metadataPrefix: 'douyin',
+      openedMetadataKey: 'douyin_view_full_opened',
+    })
+  }
+
+  function captureToutiaoFullAnswerFrames(initialXml, initialBounds) {
+    return captureMiniAppFullAnswerFrames(initialXml, initialBounds, {
+      platformLabel: '头条',
+      metadataPrefix: 'toutiao',
+      openedMetadataKey: 'toutiao_view_more_opened',
+      initialQuietMs: REPLY_STABLE_QUIET_MS,
+    })
   }
 
   async function captureProductViewport(listBounds, timeout = 4_000, { settleSince = null } = {}) {
@@ -1736,8 +1868,61 @@ function createRunner(options) {
     return { summaryScreenshot: summaryPath, ...result }
   }
 
+  async function askOnceToutiao(payload, batchDirectory, question, index) {
+    const observerBaseline = typeof observer.snapshot === 'function' ? observer.snapshot() : {}
+    const recoveryBaseline = recoverySnapshot()
+    log('stage: 正在打开头条搜索框并输入问题')
+    const search = await inputToutiaoQuestion(question)
+    const directory = questionArtifactDirectory(batchDirectory, index, question)
+    const meta = {
+      serial: payload.serial,
+      batch_id: path.basename(batchDirectory),
+      question_index: index,
+      question_directory: directory,
+      entry_id: activeEntry.id,
+      entry_label: activeEntry.label,
+      entry_package: activePackageName(),
+      entry_workflow: activeEntry.workflow,
+      new_session_requested: Boolean(payload.newSession),
+      new_session_performed: false,
+      toutiao_search_performed: true,
+      ui_backend: 'python_uiautomator2_strict',
+      ui_fallback_enabled: false,
+    }
+    log('stage: 正在执行头条搜索')
+    await tap((search[0] + search[2]) / 2, (search[1] + search[3]) / 2)
+    const card = await waitForToutiaoAnswerCard(payload.timeout * 1_000)
+    log('stage: 已找到头条小荷AI医生回答卡片，正在截取搜索结果智能总结')
+    const summary = await captureToutiaoSearchSummary(card.size)
+    await fs.mkdir(directory, { recursive: true })
+    const summaryPath = path.join(directory, TOUTIAO_SEARCH_SUMMARY_FILENAME)
+    await fs.writeFile(summaryPath, summary.frame)
+    Object.assign(meta, {
+      toutiao_search_summary_captured: true,
+      toutiao_search_summary_screenshot: summaryPath,
+      toutiao_question_logical_image_count: 2,
+    })
+    log(`capture: 头条搜索结果智能总结已保存 ${summaryPath}`)
+    log('stage: 已找到头条小荷AI医生回答卡片，正在点击查看更多')
+    const full = await openToutiaoFullAnswer(summary.viewMore, card.size)
+    log('stage: 头条小荷AI医生全文页已打开，开始从上到下完整截图')
+    const result = await saveArtifacts({
+      outDir: directory,
+      stem: '回答',
+      question,
+      status: 'stable',
+      xml: full.xml,
+      meta,
+      captureMethod: () => captureToutiaoFullAnswerFrames(full.xml, full.bounds),
+      observerBaseline,
+      recoveryBaseline,
+    })
+    return { summaryScreenshot: summaryPath, ...result }
+  }
+
   async function askOnce(payload, batchDirectory, question, index) {
     if (activeEntry.workflow === 'douyin-search') return askOnceDouyin(payload, batchDirectory, question, index)
+    if (activeEntry.workflow === 'toutiao-search') return askOnceToutiao(payload, batchDirectory, question, index)
     const observerBaseline = typeof observer.snapshot === 'function' ? observer.snapshot() : {}
     const recoveryBaseline = recoverySnapshot()
     let newSessionPerformed = false
@@ -1803,6 +1988,7 @@ function createRunner(options) {
     })
     await waitForVisualQuiet({ timeout: 1_200, fallbackMs: 800 })
     if (entry.workflow === 'douyin-search') await waitForDouyinSearchInput(15_000)
+    else if (entry.workflow === 'toutiao-search') await waitForToutiaoSearchInput(15_000)
     else await waitForInput(15_000)
   }
 
@@ -2010,12 +2196,15 @@ module.exports = {
   DEFAULT_PACKAGE,
   DEFAULT_ENTRY_ID,
   DOUYIN_SEARCH_SUMMARY_FILENAME,
+  TOUTIAO_SEARCH_SUMMARY_FILENAME,
   ENTRY_DEFINITIONS,
   automationEntries,
   normalizeAutomationEntries,
   douyinSearchInput,
   douyinViewFullBounds,
   douyinMiniAppCaptureBounds,
+  toutiaoSearchInput,
+  toutiaoViewMoreBounds,
   waitForPackageHierarchy,
   buildReplyImages,
   conservativeFallbackOverlap,
