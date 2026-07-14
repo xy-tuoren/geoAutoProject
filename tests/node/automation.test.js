@@ -9,9 +9,39 @@ const { questionVisible, replyTailOnScreen, findChatScrollBounds, validateCaptur
 const { stackFramesInGroups, verifyFrameOverlap, imageInfo, imageLooksLoaded, imagesSimilar, imageRegionsStable, alignCropToWhitespace, stitchFramesWithOverlaps, composeLongImages, cropFramesAtTextSeams } = require('../../src/automation/images')
 const { createBatchDirectory, questionArtifactDirectory } = require('../../src/automation/utils')
 const { loadQuestionFile } = require('../../src/questions')
-const { adbConnectionLost, chatSwipePlan, conservativeFallbackOverlap, buildReplyImages, historyOnboardingVisible, maxLongImageHeight, prepareEmbeddedEvidence, scrollEndConfirmed } = require('../../src/automation/runner')
+const { adbConnectionLost, chatSwipePlan, conservativeFallbackOverlap, buildReplyImages, fillQuestionInput, hierarchyBelongsToPackage, historyOnboardingVisible, maxLongImageHeight, prepareEmbeddedEvidence, scrollEndConfirmed } = require('../../src/automation/runner')
 
 const CHAT_BOUNDS = [0, 200, 1080, 1800]
+
+test('只允许目标App层级进入UI操作流程', () => {
+  const target = '<hierarchy><node package="com.aurora.xiaohe.aidoctor" class="android.widget.EditText" /></hierarchy>'
+  const search = '<hierarchy><node package="com.huawei.search" class="android.widget.EditText" /></hierarchy>'
+  assert.equal(hierarchyBelongsToPackage(target), true)
+  assert.equal(hierarchyBelongsToPackage(search), false)
+})
+
+test('输入完成后不盲按返回键退出App', async () => {
+  const events = []
+  const xml = '<hierarchy><node package="com.aurora.xiaohe.aidoctor" /></hierarchy>'
+  const result = await fillQuestionInput({
+    ui: {
+      sendKeys: async (text, options) => events.push(['sendKeys', text, options]),
+      press: async key => events.push(['press', key]),
+    },
+    tap: async (x, y) => events.push(['tap', x, y]),
+    source: async () => { events.push(['source']); return xml },
+    delay: async milliseconds => events.push(['delay', milliseconds]),
+  }, { bounds: [100, 200, 500, 300], text: '' }, '真机测试')
+
+  assert.equal(result, xml)
+  assert.deepEqual(events, [
+    ['tap', 300, 250],
+    ['delay', 300],
+    ['sendKeys', '真机测试', { clear: false }],
+    ['delay', 350],
+    ['source'],
+  ])
+})
 
 test('只将聊天区域内且可见的问题视为当前问题', () => {
   const hidden = '<hierarchy><node text="这是一个很长的问题" visible-to-user="false" bounds="[20,300][1060,460]" /></hierarchy>'
@@ -257,6 +287,16 @@ test('长截图超过高度上限时只在视口边界拆分', async () => {
   for (const image of images) assert.ok((await imageInfo(image)).height <= 3000)
   assert.equal(maxLongImageHeight(undefined), 12000)
   assert.throws(() => maxLongImageHeight(2999), /3000/)
+})
+
+test('已验证长图拆成多个文件时不会重新保留整屏重叠内容', async () => {
+  const frame = await sharp({ create: { width: 20, height: 1000, channels: 3, background: 'white' } }).png().toBuffer()
+  const transitions = Array.from({ length: 3 }, () => ({ verified: true, overlap: 600 }))
+  const images = await composeLongImages([frame, frame, frame, frame], { transitions, maxHeight: 1500 })
+
+  assert.equal(images.length, 2)
+  assert.deepEqual(await imageInfo(images[0]), { width: 20, height: 1400 })
+  assert.deepEqual(await imageInfo(images[1]), { width: 20, height: 800 })
 })
 
 test('药品图片检测拒绝纯色占位区并接受有实际图像细节的区域', async () => {

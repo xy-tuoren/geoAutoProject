@@ -72,8 +72,19 @@ class U2Bridge:
             package = str(params.get("package") or "").strip()
             if not package:
                 raise BridgeError("app_start requires a package")
-            device.app_start(package, wait=True, use_monkey=True)
-            return True
+            # Huawei's launcher/search can intercept the monkey-based launch.
+            # uiautomator2 reports no error in that case, so use the resolved
+            # Activity path and verify that the requested package is actually
+            # in the foreground before allowing the workflow to continue.
+            device.app_start(package, wait=True, use_monkey=False)
+            pid = device.app_wait(package, timeout=8.0, front=True)
+            current = device.app_current()
+            if not pid or current.get("package") != package:
+                actual = current.get("package") or "unknown"
+                raise BridgeError(
+                    f"应用启动后前台应用不正确：expected={package}, actual={actual}"
+                )
+            return current
         raise BridgeError(f"unknown bridge method: {method}")
 
     @staticmethod

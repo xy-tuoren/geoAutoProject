@@ -3,7 +3,9 @@ from __future__ import annotations
 import io
 import json
 
-from geoauto_u2.bridge import U2Bridge, serve
+import pytest
+
+from geoauto_u2.bridge import BridgeError, U2Bridge, serve
 
 
 class FakeJsonRpc:
@@ -20,6 +22,7 @@ class FakeDevice:
         self.jsonrpc = FakeJsonRpc()
         self.device_info = {"model": "test"}
         self.info = {"currentPackageName": "example.app"}
+        self.current_package = "example.app"
         self.events = []
 
     def dump_hierarchy(self, **kwargs):
@@ -47,6 +50,13 @@ class FakeDevice:
     def app_start(self, package, wait=False, use_monkey=False):
         self.events.append(("app_start", package, wait, use_monkey))
 
+    def app_wait(self, package, timeout=20.0, front=False):
+        self.events.append(("app_wait", package, timeout, front))
+        return 123 if self.current_package == package else 0
+
+    def app_current(self):
+        return {"package": self.current_package, "activity": ".MainActivity", "pid": 123}
+
 
 def test_bridge_configures_dynamic_ui_timeouts_and_dispatches_commands():
     device = FakeDevice()
@@ -70,7 +80,18 @@ def test_bridge_configures_dynamic_ui_timeouts_and_dispatches_commands():
     assert ("set_input_ime", True) in device.events
     assert ("send_keys", "腹泻怎么办", True) in device.events
     assert ("press", "back") in device.events
-    assert ("app_start", "example.app", True, True) in device.events
+    assert ("app_start", "example.app", True, False) in device.events
+    assert ("app_wait", "example.app", 8.0, True) in device.events
+
+
+def test_app_start_rejects_silent_launch_failure():
+    device = FakeDevice()
+    device.current_package = "com.huawei.android.launcher"
+    bridge = U2Bridge(lambda serial: device)
+    bridge.dispatch("connect", {"serial": "SERIAL"})
+
+    with pytest.raises(BridgeError, match="前台应用"):
+        bridge.dispatch("app_start", {"package": "example.app"})
 
 
 def test_protocol_returns_structured_errors_instead_of_hanging():

@@ -9,6 +9,10 @@ const { U2Client } = require('./u2-client')
 const DEFAULT_PACKAGE = 'com.aurora.xiaohe.aidoctor'
 const DEFAULT_MAX_LONG_IMAGE_HEIGHT = 12_000
 
+function hierarchyBelongsToPackage(xml, packageName = DEFAULT_PACKAGE) {
+  return iterNodes(String(xml)).some(node => nodeAttr(node, 'package') === packageName)
+}
+
 function maxLongImageHeight(value) {
   const parsed = Number(value ?? DEFAULT_MAX_LONG_IMAGE_HEIGHT)
   if (!Number.isInteger(parsed) || parsed < 3_000 || parsed > 30_000) throw new Error('长截图最大高度必须是 3000–30000 之间的整数。')
@@ -131,6 +135,17 @@ async function prepareEmbeddedEvidence({ source, tap, delay, waitForStable, log 
   return { found: true, expanded, capture }
 }
 
+async function fillQuestionInput({ ui, tap, source, delay = sleep }, edit, question) {
+  await tap((edit.bounds[0] + edit.bounds[2]) / 2, (edit.bounds[1] + edit.bounds[3]) / 2)
+  await delay(300)
+  await ui.sendKeys(question, { clear: Boolean(edit.text) })
+  // FastInputIME has no visible keyboard on this device. Pressing Back after
+  // sendKeys exits the app instead of hiding an IME, so let sendKeys restore
+  // the user's original IME and confirm the target hierarchy directly.
+  await delay(350)
+  return source()
+}
+
 function createRunner(options) {
   let cancelled = false
   let activeSerial = null
@@ -153,7 +168,11 @@ function createRunner(options) {
 
   async function source() {
     checkCancelled()
-    return ui.dumpHierarchy()
+    const xml = await ui.dumpHierarchy()
+    if (!hierarchyBelongsToPackage(xml)) {
+      throw new Error(`当前前台页面不是小荷App（层级中缺少 ${DEFAULT_PACKAGE}），已停止UI操作。`)
+    }
+    return xml
   }
 
   async function tap(x, y) {
@@ -201,15 +220,10 @@ function createRunner(options) {
 
   async function inputQuestion(question) {
     const edit = await waitForInput()
-    await tap((edit.bounds[0] + edit.bounds[2]) / 2, (edit.bounds[1] + edit.bounds[3]) / 2)
-    await sleep(300)
     // Use uiautomator2's device-level IME/clipboard input rather than a
     // WebDriver element value command. Mutating UI requests are not replayed
     // after failure, so an uncertain input state terminates the task.
-    await ui.sendKeys(question, { clear: Boolean(edit.text) })
-    await ui.press('back')
-    await sleep(350)
-    const restoredXml = await source()
+    const restoredXml = await fillQuestionInput({ ui, tap, source }, edit, question)
     cachedInputBounds = boundsForNodeAttribute(restoredXml, 'class', 'android.widget.EditText') || cachedInputBounds
     cachedSendBounds = boundsForNodeAttribute(restoredXml, 'content-desc', '发送') || cachedSendBounds
   }
@@ -745,8 +759,10 @@ module.exports = {
   buildReplyImages,
   conservativeFallbackOverlap,
   chatSwipePlan,
+  hierarchyBelongsToPackage,
   scrollEndConfirmed,
   prepareEmbeddedEvidence,
+  fillQuestionInput,
   adbConnectionLost,
   historyOnboardingVisible,
   maxLongImageHeight,

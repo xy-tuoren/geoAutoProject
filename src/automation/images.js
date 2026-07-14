@@ -402,6 +402,7 @@ async function composeLongImages(frames, { overlaps = [], continuityVerified = f
   const sizes = await Promise.all(frames.map(imageInfo))
   const groups = []
   let start = 0
+  let firstCrop = 0
   let height = sizes[0].height
   for (let index = 1; index < frames.length; index += 1) {
     const transition = transitions?.[index - 1]
@@ -411,15 +412,22 @@ async function composeLongImages(frames, { overlaps = [], continuityVerified = f
     const addition = Math.max(1, sizes[index].height - Math.max(0, cropTop))
       + ((transition && !transition.verified) || (!transitions && !continuityVerified) ? separatorHeight : 0)
     if (height + addition > maxHeight) {
-      groups.push([start, index])
+      groups.push({ start, end: index, firstCrop })
       start = index
-      height = sizes[index].height
+      firstCrop = transitions || continuityVerified
+        ? Math.max(0, Math.min(cropTop, sizes[index].height - 1))
+        : 0
+      height = sizes[index].height - firstCrop
     } else height += addition
   }
-  groups.push([start, frames.length])
+  groups.push({ start, end: frames.length, firstCrop })
   const output = []
-  for (const [groupStart, groupEnd] of groups) {
+  for (const group of groups) {
+    const { start: groupStart, end: groupEnd } = group
     const chunk = frames.slice(groupStart, groupEnd)
+    if (group.firstCrop > 0) {
+      chunk[0] = await cropImage(chunk[0], [0, group.firstCrop, sizes[groupStart].width, sizes[groupStart].height])
+    }
     if (transitions) {
       output.push(await stitchFramesWithTransitions(chunk, transitions.slice(groupStart, groupEnd - 1), separatorHeight))
     } else if (continuityVerified) {
