@@ -141,9 +141,9 @@ ipcMain.handle('automation:start', async (event, payload) => {
   })
   activeTask = runner
   void runner.run(payload)
-    .then(() => {
+    .then(summary => {
       log('执行完成')
-      event.sender.send('automation:finished', { code: 0 })
+      event.sender.send('automation:finished', { code: 0, summary })
     })
     .catch(error => {
       logError('任务失败:', error.message)

@@ -223,6 +223,45 @@ async function adbCommandWithReconnect(adbPath, serial, args) {
 
 class CancelledError extends Error { constructor() { super('任务已停止。'); this.name = 'CancelledError' } }
 
+function fatalBatchError(error) {
+  if (error instanceof CancelledError || error?.name === 'CancelledError') return true
+  const message = String(error?.message || error)
+  return adbConnectionLost(error)
+    || /ADB 设备 .*未连接或未授权/.test(message)
+    || /(?:无法启动|尚未启动)Python uiautomator2|Python uiautomator2(?:进程已退出|已停止)/.test(message)
+}
+
+async function runQuestionsWithRecovery({
+  questions,
+  prepare,
+  execute,
+  recordFailure,
+  isFatal = fatalBatchError,
+  checkCancelled = () => {},
+}) {
+  let prepared = false
+  let completed = 0
+  let failed = 0
+  for (const [zeroIndex, question] of questions.entries()) {
+    checkCancelled()
+    const index = zeroIndex + 1
+    try {
+      if (!prepared) {
+        await prepare()
+        prepared = true
+      }
+      await execute(question, index)
+      completed += 1
+    } catch (error) {
+      if (isFatal(error)) throw error
+      prepared = false
+      failed += 1
+      await recordFailure(error, question, index)
+    }
+  }
+  return { completed, failed }
+}
+
 function fallbackOverlapEstimates(frameHeight, measuredShift, candidateOverlaps = []) {
   const hasMeasuredShift = Number.isFinite(measuredShift) && measuredShift >= 0 && measuredShift < frameHeight
   const candidates = candidateOverlaps
@@ -1868,21 +1907,76 @@ function createRunner(options) {
         }
         log(`device=${payload.serial} entries=${entries.map(entry => entry.id).join(',')} batch=${batchDirectory}`)
         let completed = 0
+        let failed = 0
+        const failures = []
         for (const [entryIndex, entry] of entries.entries()) {
           checkCancelled()
           log(`entry: [${entryIndex + 1}/${entries.length}] ${entry.label} package=${entry.packageName}`)
-          await prepareEntry(entry)
           const entryDirectory = entries.length > 1
             ? path.join(batchDirectory, `${String(entryIndex + 1).padStart(2, '0')}_${safeSlug(entry.label, 48)}`)
             : batchDirectory
-          for (const [zeroIndex, question] of payload.questions.entries()) {
-            checkCancelled()
-            log(`[${entryIndex + 1}/${entries.length} ${zeroIndex + 1}/${payload.questions.length}] asking via ${entry.label}: ${question}`)
-            log(JSON.stringify(await askOnce(payload, entryDirectory, question, zeroIndex + 1)))
-            completed += 1
-          }
+          const entryResult = await runQuestionsWithRecovery({
+            questions: payload.questions,
+            prepare: () => prepareEntry(entry),
+            execute: async (question, index) => {
+              log(`[${entryIndex + 1}/${entries.length} ${index}/${payload.questions.length}] asking via ${entry.label}: ${question}`)
+              log(JSON.stringify(await askOnce(payload, entryDirectory, question, index)))
+            },
+            recordFailure: async (error, question, index) => {
+              const directory = questionArtifactDirectory(entryDirectory, index, question)
+              const failurePath = path.join(directory, '失败.json')
+              const failure = {
+                created_at: new Date().toISOString(),
+                status: 'failed',
+                serial: payload.serial,
+                batch_id: path.basename(batchDirectory),
+                question,
+                question_index: index,
+                question_directory: directory,
+                entry_id: entry.id,
+                entry_label: entry.label,
+                entry_package: entry.packageName,
+                batch_continued: true,
+                error_name: error?.name || 'Error',
+                error_message: error?.message || String(error),
+                stack: error?.stack || null,
+              }
+              await fs.mkdir(directory, { recursive: true })
+              await fs.writeFile(failurePath, JSON.stringify(failure, null, 2), 'utf8')
+              failures.push({
+                entry_id: entry.id,
+                entry_label: entry.label,
+                question,
+                question_index: index,
+                failure: failurePath,
+                error_name: failure.error_name,
+                error_message: failure.error_message,
+              })
+              log(`failed: [${entryIndex + 1}/${entries.length} ${index}/${payload.questions.length}] ${entry.label} / ${question}: ${failure.error_message}`)
+              log(`recovery: 本题已记录到 ${failurePath}；下一题将重新启动并校验当前入口`)
+            },
+            checkCancelled,
+          })
+          completed += entryResult.completed
+          failed += entryResult.failed
         }
-        log(`执行完成：共 ${entries.length} 个入口 × ${payload.questions.length} 条问题 = ${completed} 次执行，输出目录 ${batchDirectory}`)
+        const total = entries.length * payload.questions.length
+        const summaryPath = path.join(batchDirectory, 'batch-summary.json')
+        const summary = {
+          created_at: new Date().toISOString(),
+          serial: payload.serial,
+          entries: entries.map(entry => ({ id: entry.id, label: entry.label, package: entry.packageName })),
+          question_count: payload.questions.length,
+          total,
+          completed,
+          failed,
+          status: failed ? 'completed_with_failures' : 'completed',
+          failures,
+          summary: summaryPath,
+        }
+        await fs.writeFile(summaryPath, JSON.stringify(summary, null, 2), 'utf8')
+        log(`执行完成：计划=${total}，成功=${completed}，失败=${failed}，批次汇总=${summaryPath}`)
+        return summary
       } catch (error) {
         await fs.writeFile(path.join(batchDirectory, 'automation-failure.json'), JSON.stringify({
           created_at: new Date().toISOString(),
@@ -1938,6 +2032,8 @@ module.exports = {
   captureStableObserved,
   observerResultRequiresFreshCapture,
   shouldRetryFullReplyCapture,
+  fatalBatchError,
+  runQuestionsWithRecovery,
   adbConnectionLost,
   historyOnboardingVisible,
   maxLongImageHeight,

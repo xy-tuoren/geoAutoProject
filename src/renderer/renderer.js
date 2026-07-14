@@ -176,7 +176,13 @@ start.addEventListener('click', async () => {
 })
 stop.addEventListener('click', () => window.automation.stop())
 window.automation.onLog(appendLog)
-window.automation.onFinished(({ code }) => { start.disabled = false; stop.disabled = true; status.textContent = code === 0 ? '执行完成' : `任务结束，退出码 ${code}` })
+window.automation.onFinished(({ code, summary }) => {
+  start.disabled = false
+  stop.disabled = true
+  if (code !== 0) status.textContent = `任务结束，退出码 ${code}`
+  else if (summary?.failed) status.textContent = `执行完成：成功 ${summary.completed}，失败 ${summary.failed}`
+  else status.textContent = `执行完成：成功 ${summary?.completed ?? 0}`
+})
 
 window.automation.defaultOutputDirectory().then(directory => { $('#output-dir').value = directory })
 refreshEntries()

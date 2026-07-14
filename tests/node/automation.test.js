@@ -9,7 +9,7 @@ const { questionVisible, currentQuestionText, replyTailOnScreen, findChatScrollB
 const { stackFramesInGroups, verifyFrameOverlap, verifyProductGridOverlap, imageInfo, imageLooksLoaded, imagesSimilar, imageRegionsStable, alignCropToWhitespace, stitchFramesWithOverlaps, composeLongImages, cropFramesAtTextSeams } = require('../../src/automation/images')
 const { createBatchDirectory, questionArtifactDirectory } = require('../../src/automation/utils')
 const { loadQuestionFile } = require('../../src/questions')
-const { adbConnectionLost, automationEntries, captureStableObserved, captureStableSandwich, calibratedProductFallbackOverlap, chatSwipePlan, conservativeFallbackOverlap, buildReplyImages, DOUYIN_SEARCH_SUMMARY_FILENAME, douyinMiniAppCaptureBounds, douyinSearchInput, douyinViewFullBounds, fillQuestionInput, hierarchyBelongsToPackage, historyOnboardingVisible, maxLongImageHeight, normalizeAutomationEntries, observerResultRequiresFreshCapture, prepareEmbeddedEvidence, referenceProductsCaptureComplete, referenceProductsTrigger, referenceProductViewportReadiness, scrollEndConfirmed, shouldRetryFullReplyCapture, waitForPackageHierarchy } = require('../../src/automation/runner')
+const { adbConnectionLost, automationEntries, captureStableObserved, captureStableSandwich, calibratedProductFallbackOverlap, chatSwipePlan, conservativeFallbackOverlap, buildReplyImages, CancelledError, DOUYIN_SEARCH_SUMMARY_FILENAME, douyinMiniAppCaptureBounds, douyinSearchInput, douyinViewFullBounds, fillQuestionInput, hierarchyBelongsToPackage, historyOnboardingVisible, maxLongImageHeight, normalizeAutomationEntries, observerResultRequiresFreshCapture, prepareEmbeddedEvidence, referenceProductsCaptureComplete, referenceProductsTrigger, referenceProductViewportReadiness, runQuestionsWithRecovery, scrollEndConfirmed, shouldRetryFullReplyCapture, waitForPackageHierarchy } = require('../../src/automation/runner')
 
 const CHAT_BOUNDS = [0, 200, 1080, 1800]
 
@@ -26,6 +26,44 @@ test('桌面入口默认小荷App，并按选择顺序去重执行', () => {
   assert.deepEqual(entries.map(entry => entry.id), ['douyin-xiaohe-miniapp', 'xiaohe-app'])
   assert.deepEqual(automationEntries().map(entry => entry.id), ['xiaohe-app', 'douyin-xiaohe-miniapp', 'toutiao-xiaohe-miniapp'])
   assert.throws(() => normalizeAutomationEntries(['unknown-entry']), /未知入口/)
+})
+
+test('单题失败后重新准备入口并继续执行后续问题', async () => {
+  const events = []
+  const result = await runQuestionsWithRecovery({
+    questions: ['第一题', '第二题'],
+    prepare: async () => events.push('prepare'),
+    execute: async (question, index) => {
+      events.push(`execute:${index}:${question}`)
+      if (index === 1) throw new Error('搜索结果中没有小荷卡片')
+      return { screenshot: '回答_001.png' }
+    },
+    recordFailure: async (error, question, index) => events.push(`failure:${index}:${question}:${error.message}`),
+    isFatal: () => false,
+  })
+
+  assert.deepEqual(result, { completed: 1, failed: 1 })
+  assert.deepEqual(events, [
+    'prepare',
+    'execute:1:第一题',
+    'failure:1:第一题:搜索结果中没有小荷卡片',
+    'prepare',
+    'execute:2:第二题',
+  ])
+})
+
+test('用户停止属于致命错误，不会继续后续问题', async () => {
+  const executed = []
+  await assert.rejects(() => runQuestionsWithRecovery({
+    questions: ['第一题', '第二题'],
+    prepare: async () => {},
+    execute: async question => {
+      executed.push(question)
+      throw new CancelledError()
+    },
+    recordFailure: async () => assert.fail('停止任务不应写成单题失败'),
+  }), /任务已停止/)
+  assert.deepEqual(executed, ['第一题'])
 })
 
 test('抖音入口按真实搜索控件和回答卡片结构定位', () => {
