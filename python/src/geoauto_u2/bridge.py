@@ -15,6 +15,14 @@ class BridgeError(RuntimeError):
     """Raised when a bridge request is invalid or the device is unavailable."""
 
 
+def configure_utf8_standard_streams(*streams: TextIO | None) -> None:
+    """Keep the JSON-lines protocol UTF-8 on Windows redirected pipes."""
+    for stream in streams:
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(encoding="utf-8", errors="strict")
+
+
 class U2Bridge:
     def __init__(self, connector: Callable[[str], Any] = u2.connect) -> None:
         self._connector = connector
@@ -128,6 +136,7 @@ def serve(
 
 
 def main() -> None:
+    configure_utf8_standard_streams(sys.stdin, sys.stdout, sys.stderr)
     logging.basicConfig(stream=sys.stderr, level=logging.WARNING)
     serve()
 

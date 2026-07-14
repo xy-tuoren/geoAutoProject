@@ -37,6 +37,14 @@ function packagedCommand(options) {
   }
 }
 
+function utf8ProcessEnvironment(environment = process.env) {
+  return {
+    ...environment,
+    PYTHONUTF8: '1',
+    PYTHONIOENCODING: 'utf-8',
+  }
+}
+
 class U2Client {
   constructor(options) {
     this.options = options
@@ -70,7 +78,7 @@ class U2Client {
     this.stopping = false
     const child = spawn(launch.command, launch.args || [], {
       cwd: launch.cwd,
-      env: { ...process.env, ADBUTILS_ADB_PATH: this.options.adbPath },
+      env: utf8ProcessEnvironment({ ...process.env, ADBUTILS_ADB_PATH: this.options.adbPath }),
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
     })
@@ -212,4 +220,5 @@ module.exports = {
   U2RequestTimeoutError,
   developmentCommand,
   packagedCommand,
+  utf8ProcessEnvironment,
 }

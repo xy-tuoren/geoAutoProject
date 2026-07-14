@@ -1,7 +1,7 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
 const path = require('node:path')
-const { U2Client, developmentCommand, packagedCommand } = require('../../src/automation/u2-client')
+const { U2Client, developmentCommand, packagedCommand, utf8ProcessEnvironment } = require('../../src/automation/u2-client')
 
 const root = path.resolve(__dirname, '../..')
 const fixture = path.join(root, 'tests', 'fixtures', 'u2-sidecar-fixture.js')
@@ -29,6 +29,15 @@ test('打包模式按平台和架构读取内置sidecar', () => {
   const command = packagedCommand({ root: '/project', resourcesPath: '/resources' })
   assert.match(command.command, /vendor[\\/]u2-runtime/)
   assert.match(command.command, new RegExp(`${process.platform}-${process.arch}`))
+})
+
+test('sidecar进程协议在Windows环境下强制使用UTF-8', () => {
+  const environment = utf8ProcessEnvironment({ PYTHONUTF8: '0', PYTHONIOENCODING: 'cp936', KEEP: 'yes' })
+  assert.deepEqual(environment, {
+    PYTHONUTF8: '1',
+    PYTHONIOENCODING: 'utf-8',
+    KEEP: 'yes',
+  })
 })
 
 test('uiautomator2客户端使用长驻进程获取层级', async () => {

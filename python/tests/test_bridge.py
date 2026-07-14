@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from geoauto_u2.bridge import BridgeError, U2Bridge, serve
+from geoauto_u2.bridge import BridgeError, U2Bridge, configure_utf8_standard_streams, serve
 
 
 class FakeJsonRpc:
@@ -105,3 +105,21 @@ def test_protocol_returns_structured_errors_instead_of_hanging():
     assert response["id"] == 1
     assert response["ok"] is False
     assert response["error"]["type"] == "BridgeError"
+
+
+def test_protocol_forces_utf8_when_windows_pipe_defaults_to_cp936():
+    device = FakeDevice()
+    requests = (
+        '{"id":1,"method":"connect","params":{"serial":"SERIAL"}}\n'
+        '{"id":2,"method":"send_keys","params":{"text":"测试","clear":false}}\n'
+    ).encode("utf-8")
+    input_stream = io.TextIOWrapper(io.BytesIO(requests), encoding="cp936")
+    output_bytes = io.BytesIO()
+    output_stream = io.TextIOWrapper(output_bytes, encoding="cp936")
+
+    configure_utf8_standard_streams(input_stream, output_stream)
+    serve(input_stream, output_stream, U2Bridge(lambda serial: device))
+    output_stream.flush()
+
+    assert ("send_keys", "测试", False) in device.events
+    assert '"ok": true' in output_bytes.getvalue().decode("utf-8")
