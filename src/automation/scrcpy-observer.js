@@ -130,6 +130,9 @@ class ScrcpyObserver {
     this.quietChecks = 0
     this.quietSuccesses = 0
     this.quietTimeouts = 0
+    this.activityChecks = 0
+    this.activitySuccesses = 0
+    this.activityTimeouts = 0
   }
 
   get active() {
@@ -146,12 +149,7 @@ class ScrcpyObserver {
     this.serial = serial
     this.failure = null
     this.frames = []
-    this.frameCount = 0
-    this.activityFrameCount = 0
     this.startedAt = null
-    this.quietChecks = 0
-    this.quietSuccesses = 0
-    this.quietTimeouts = 0
     this.scid = (crypto.randomBytes(4).readUInt32BE(0) & 0x7fffffff).toString(16).padStart(8, '0')
     const remote = `/data/local/tmp/geoauto-scrcpy-server-v${SCRCPY_VERSION}.jar`
     await execFileText(this.adbPath, ['-s', serial, 'push', this.serverPath, remote])
@@ -301,6 +299,28 @@ class ScrcpyObserver {
     }
   }
 
+  async waitForActivity({ timeout = 1_000, since = this.mark(), minFrames = 1 } = {}) {
+    if (!this.active) throw this.failure || new Error('scrcpy观察器未启动。')
+    this.activityChecks += 1
+    const started = this.now()
+    const deadline = started + timeout
+    const baseline = since.activityFrameCount ?? since.frameCount ?? this.activityFrameCount
+    while (true) {
+      if (!this.active) throw this.failure || new Error('scrcpy观察器已断开。')
+      const now = this.now()
+      const activityFrames = this.activityFrameCount - baseline
+      if (activityFrames >= minFrames) {
+        this.activitySuccesses += 1
+        return { activity: true, activityFrames, waitedMs: now - started }
+      }
+      if (now >= deadline) {
+        this.activityTimeouts += 1
+        return { activity: false, activityFrames, waitedMs: now - started }
+      }
+      await this.delay(Math.min(50, deadline - now))
+    }
+  }
+
   snapshot() {
     const now = this.now()
     const recent = this.frames.filter(frame => frame.at >= now - 1_000)
@@ -318,6 +338,9 @@ class ScrcpyObserver {
       quiet_checks: this.quietChecks,
       quiet_successes: this.quietSuccesses,
       quiet_timeouts: this.quietTimeouts,
+      activity_checks: this.activityChecks,
+      activity_successes: this.activitySuccesses,
+      activity_timeouts: this.activityTimeouts,
       failure: this.failure?.message || null,
     }
   }
@@ -336,8 +359,6 @@ class ScrcpyObserver {
     }
     this.port = null
     this.frames = []
-    this.frameCount = 0
-    this.activityFrameCount = 0
     this.startedAt = null
   }
 }

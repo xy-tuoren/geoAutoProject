@@ -111,3 +111,54 @@ test('二次确认即使已有静止历史也会观察指定时长', async () =>
   assert.ok(result.waitedMs >= 120)
   assert.ok(result.waitedMs < 200)
 })
+
+test('活动等待在新活动帧到达后立即返回', async () => {
+  let now = 1_000
+  const observer = new ScrcpyObserver({
+    now: () => now,
+    delay: async milliseconds => {
+      now += milliseconds
+      if (now >= 1_150) observer.activityFrameCount += 1
+    },
+  })
+  observer.socket = { destroyed: false }
+  observer.session = { codec: 'h264', width: 160, height: 360 }
+  const since = observer.mark()
+
+  const result = await observer.waitForActivity({ timeout: 600, since })
+
+  assert.equal(result.activity, true)
+  assert.equal(result.activityFrames, 1)
+  assert.equal(result.waitedMs, 150)
+  assert.equal(observer.snapshot().activity_successes, 1)
+})
+
+test('停止和重启观察器不会清空批次累计指标', async () => {
+  const observer = new ScrcpyObserver()
+  observer.frameCount = 12
+  observer.activityFrameCount = 5
+  observer.quietChecks = 3
+
+  await observer.stop()
+
+  const snapshot = observer.snapshot()
+  assert.equal(snapshot.frames, 12)
+  assert.equal(snapshot.activity_frames, 5)
+  assert.equal(snapshot.quiet_checks, 3)
+})
+
+test('活动等待超时会返回可观测结果', async () => {
+  let now = 0
+  const observer = new ScrcpyObserver({
+    now: () => now,
+    delay: async milliseconds => { now += milliseconds },
+  })
+  observer.socket = { destroyed: false }
+  observer.session = { codec: 'h264', width: 160, height: 360 }
+
+  const result = await observer.waitForActivity({ timeout: 120 })
+
+  assert.equal(result.activity, false)
+  assert.equal(result.waitedMs, 120)
+  assert.equal(observer.snapshot().activity_timeouts, 1)
+})

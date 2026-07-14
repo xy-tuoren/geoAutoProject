@@ -228,6 +228,10 @@ function createRunner(options) {
   let cachedSendBounds = null
   let observerFallbackReason = null
   let observerFallbackLogged = false
+  let observerRecoveryAttempts = 0
+  let observerRecoverySuccesses = 0
+  let observerRecoveryFailures = 0
+  let adbPngCaptures = 0
   const log = text => options.log(`${text}${String(text).endsWith('\n') ? '' : '\n'}`)
   const ui = options.uiClient || new U2Client({
     root: options.root,
@@ -243,11 +247,20 @@ function createRunner(options) {
   })
   const checkCancelled = () => { if (cancelled) throw new CancelledError() }
 
-  function observerMetadata() {
+  function recoverySnapshot() {
+    return {
+      attempts: observerRecoveryAttempts,
+      successes: observerRecoverySuccesses,
+      failures: observerRecoveryFailures,
+      adbPngCaptures,
+    }
+  }
+
+  function observerMetadata(baseline = null, recoveryBaseline = null) {
     const snapshot = typeof observer.snapshot === 'function'
       ? observer.snapshot()
       : { active: Boolean(observer.active), version: SCRCPY_VERSION, frames: 0 }
-    return {
+    const metadata = {
       scrcpy_observer_requested: true,
       scrcpy_observer_active: Boolean(snapshot.active),
       scrcpy_observer_version: snapshot.version || SCRCPY_VERSION,
@@ -260,8 +273,27 @@ function createRunner(options) {
       scrcpy_observer_quiet_checks: snapshot.quiet_checks || 0,
       scrcpy_observer_quiet_successes: snapshot.quiet_successes || 0,
       scrcpy_observer_quiet_timeouts: snapshot.quiet_timeouts || 0,
+      scrcpy_observer_activity_checks: snapshot.activity_checks || 0,
+      scrcpy_observer_activity_successes: snapshot.activity_successes || 0,
+      scrcpy_observer_activity_timeouts: snapshot.activity_timeouts || 0,
+      scrcpy_observer_recovery_attempts: observerRecoveryAttempts,
+      scrcpy_observer_recovery_successes: observerRecoverySuccesses,
+      scrcpy_observer_recovery_failures: observerRecoveryFailures,
+      adb_png_captures: adbPngCaptures,
       ...(observerFallbackReason ? { scrcpy_observer_fallback_reason: observerFallbackReason } : {}),
     }
+    if (baseline) {
+      for (const key of ['frames', 'activity_frames', 'noise_frames', 'quiet_checks', 'quiet_successes', 'quiet_timeouts', 'activity_checks', 'activity_successes', 'activity_timeouts']) {
+        metadata[`scrcpy_observer_question_${key}`] = Math.max(0, Number(snapshot[key] || 0) - Number(baseline[key] || 0))
+      }
+    }
+    if (recoveryBaseline) {
+      metadata.scrcpy_observer_question_recovery_attempts = observerRecoveryAttempts - recoveryBaseline.attempts
+      metadata.scrcpy_observer_question_recovery_successes = observerRecoverySuccesses - recoveryBaseline.successes
+      metadata.scrcpy_observer_question_recovery_failures = observerRecoveryFailures - recoveryBaseline.failures
+      metadata.adb_png_captures_question = adbPngCaptures - recoveryBaseline.adbPngCaptures
+    }
+    return metadata
   }
 
   async function disableObserver(error) {
@@ -273,8 +305,57 @@ function createRunner(options) {
     await observer.stop().catch(() => {})
   }
 
+  async function recoverObserver(error) {
+    // captureStableObserved also executes hierarchy and PNG callbacks. If
+    // scrcpy itself is still healthy, preserve those errors instead of masking
+    // them with an unrelated observer restart.
+    if (observer.active && !observer.failure) throw error
+    if (cancelled || !activeSerial || observerRecoveryAttempts >= 1) {
+      await disableObserver(error)
+      return false
+    }
+    observerRecoveryAttempts += 1
+    log(`scrcpy观察器连接中断，正在自动恢复（1/1）：${error?.message || error}`)
+    await observer.stop().catch(() => {})
+    try {
+      await waitForAdbDevice(options.adbPath, activeSerial, 10_000)
+      checkCancelled()
+      await observer.start(activeSerial)
+      observerRecoverySuccesses += 1
+      log('scrcpy观察器已自动恢复，继续使用画面活动检测')
+      return true
+    } catch (recoveryError) {
+      observerRecoveryFailures += 1
+      await disableObserver(new Error(`${error?.message || error}；自动恢复失败：${recoveryError.message}`))
+      return false
+    }
+  }
+
+  async function waitForVisualQuiet({ timeout = 1_200, fallbackMs = 600 } = {}) {
+    checkCancelled()
+    for (let attempt = 0; attempt < 2 && observer.active; attempt += 1) {
+      try {
+        const quiet = await observer.waitForQuiet({
+          timeout,
+          windowMs: 400,
+          quietMs: 250,
+          maxFrames: 1,
+          minWaitMs: 120,
+        })
+        if (quiet.quiet) return true
+        break
+      } catch (error) {
+        if (!(await recoverObserver(error))) break
+      }
+    }
+    checkCancelled()
+    await sleep(fallbackMs)
+    return false
+  }
+
   async function screenshot() {
     checkCancelled()
+    adbPngCaptures += 1
     return adbScreenshot(options.adbPath, activeSerial)
   }
 
@@ -364,10 +445,14 @@ function createRunner(options) {
     const newSession = boundsForNodeAttribute(await source(), 'content-desc', '开启新会话')
     if (!newSession) return false
     await tap((newSession[0] + newSession[2]) / 2, (newSession[1] + newSession[3]) / 2)
-    await sleep(1_000)
+    await waitForVisualQuiet({ timeout: 1_200, fallbackMs: 1_000 })
     for (const text of ['确定', '确认', '开始', '新会话']) {
       const button = visibleLabelBounds(await source(), text)
-      if (button) { await tap((button[0] + button[2]) / 2, (button[1] + button[3]) / 2); await sleep(1_000); break }
+      if (button) {
+        await tap((button[0] + button[2]) / 2, (button[1] + button[3]) / 2)
+        await waitForVisualQuiet({ timeout: 1_200, fallbackMs: 1_000 })
+        break
+      }
     }
     return true
   }
@@ -409,11 +494,17 @@ function createRunner(options) {
     return { status: hierarchyIsLoading(lastXml) ? 'loading_timeout' : 'timeout', xml: lastXml }
   }
 
-  async function waitForStableReply(timeout) {
-    if (!observer.active) return waitForStableReplyPixels(timeout)
+  async function waitForStableReply(timeout, { startedAt = Date.now() } = {}) {
     const minWait = 12_000
+    const initialElapsed = Math.max(0, Date.now() - startedAt)
+    if (!observer.active) {
+      return waitForStableReplyPixels(
+        Math.max(1_000, timeout - initialElapsed),
+        { minWait: Math.max(0, minWait - initialElapsed) },
+      )
+    }
     const stableMilliseconds = 5_000
-    const started = Date.now()
+    const started = startedAt
     let lastProgress = 0
     while (Date.now() - started < timeout) {
       checkCancelled()
@@ -446,7 +537,7 @@ function createRunner(options) {
           return { status: 'stable', xml }
         }
       } catch (error) {
-        await disableObserver(error)
+        if (await recoverObserver(error)) continue
         const remaining = Math.max(1_000, timeout - (Date.now() - started))
         return waitForStableReplyPixels(remaining, { minWait: 0 })
       }
@@ -475,6 +566,24 @@ function createRunner(options) {
   }
 
   async function waitForRegionPixelsStable(bounds, timeout = 8_000) {
+    if (observer.active) {
+      const started = Date.now()
+      try {
+        const observed = await captureStableObserved({
+          observer,
+          capture: async () => cropImage(await screenshot(), bounds),
+          hierarchy: source,
+          hierarchyLoading: () => false,
+        }, Math.min(timeout, 2_500))
+        if (observed.stable) return observed.frame
+      } catch (error) {
+        if (await recoverObserver(error)) {
+          const remaining = Math.max(500, timeout - (Date.now() - started))
+          return waitForRegionPixelsStable(bounds, remaining)
+        }
+      }
+      timeout = Math.max(500, timeout - (Date.now() - started))
+    }
     let frame = await cropImage(await screenshot(), bounds)
     const deadline = Date.now() + timeout
     while (Date.now() < deadline) {
@@ -500,7 +609,10 @@ function createRunner(options) {
         observerFallbackReason ||= 'scrcpy在限定时间内未确认画面静止'
         log('capture: scrcpy未在2.5秒内确认画面静止，本屏使用双ADB PNG夹心校验')
       } catch (error) {
-        await disableObserver(error)
+        if (await recoverObserver(error)) {
+          const remaining = Math.max(1_000, timeout - (Date.now() - started))
+          return waitForStableReplyRegion(bounds, remaining)
+        }
       }
       timeout = Math.max(1_000, timeout - (Date.now() - started))
     }
@@ -652,8 +764,27 @@ function createRunner(options) {
     const deadline = Date.now() + timeout
     let consecutiveReady = 0
     let best = { ready: false, cards: 0, images: 0, loaded: 0, unloaded: 0 }
+    let activityMark = null
+    await waitForVisualQuiet({ timeout: Math.min(1_200, timeout), fallbackMs: 250 })
     while (Date.now() < deadline) {
       checkCancelled()
+      if (activityMark && observer.active) {
+        try {
+          const remaining = Math.max(100, deadline - Date.now())
+          const activity = await observer.waitForActivity({ timeout: Math.min(600, remaining), since: activityMark })
+          if (activity.activity) {
+            await observer.waitForQuiet({
+              timeout: Math.min(1_200, Math.max(100, deadline - Date.now())),
+              windowMs: 400,
+              quietMs: 250,
+              maxFrames: 1,
+              minWaitMs: 120,
+            })
+          }
+        } catch (error) {
+          await recoverObserver(error)
+        }
+      }
       const xml = await source()
       const cards = visibleLabelBoundsList(xml, '查看说明书').filter(bounds => boundsIntersect(bounds, listBounds))
       const imageBounds = boundsListForNodeAttribute(xml, 'class', 'android.widget.ImageView').filter(bounds => {
@@ -669,7 +800,8 @@ function createRunner(options) {
       best = { ready, cards: cards.length, images: imageBounds.length, loaded, unloaded: Math.max(expected - loaded, imageBounds.length - loaded, 0) }
       consecutiveReady = ready ? consecutiveReady + 1 : 0
       if (consecutiveReady >= 2) return best
-      await sleep(600)
+      activityMark = observer.active ? observer.mark() : null
+      if (!observer.active) await sleep(600)
     }
     return best
   }
@@ -687,7 +819,6 @@ function createRunner(options) {
     const height = bottom - top
     while (frames.length < maxPages) {
       await swipe(x, top + height * 0.75, top + height * 0.25, 800)
-      await sleep(200)
       readiness.push(await waitForProductImagesReady(bounds))
       const frame = await waitForRegionPixelsStable(bounds, 2_000)
       if (await imagesSimilar(frames.at(-1), frame, 3)) {
@@ -711,10 +842,10 @@ function createRunner(options) {
       if (!sheet) return
       const [left, top, right, bottom] = sheet
       await tap(right - Math.max(24, Math.floor((right - left) / 16)), top + Math.max(24, Math.floor((bottom - top) / 10)))
-      await sleep(600)
+      await waitForVisualQuiet({ timeout: 900, fallbackMs: 600 })
       if (!boundsForNodeAttribute(await source(), 'resource-id', `${DEFAULT_PACKAGE}:id/bullet_container`)) return
       await ui.press('back')
-      await sleep(600)
+      await waitForVisualQuiet({ timeout: 900, fallbackMs: 600 })
     }
   }
 
@@ -752,7 +883,7 @@ function createRunner(options) {
     if (!trigger) { log('capture: 本回答未出现参考/推荐药品卡片'); return null }
     log('capture: 已发现推荐药品入口，正在展开并截图')
     await tap(trigger[0], trigger[1])
-    await sleep(800)
+    await waitForVisualQuiet({ timeout: 1_200, fallbackMs: 800 })
     try {
       const xml = await source()
       const list = boundsForNodeAttribute(xml, 'class', 'androidx.recyclerview.widget.RecyclerView')
@@ -782,7 +913,7 @@ function createRunner(options) {
 
   let payloadMaxLongImageHeight = DEFAULT_MAX_LONG_IMAGE_HEIGHT
 
-  async function saveArtifacts({ outDir, stem, question, status, xml, meta, stitch = true }) {
+  async function saveArtifacts({ outDir, stem, question, status, xml, meta, stitch = true, observerBaseline, recoveryBaseline }) {
     await fs.mkdir(outDir, { recursive: true })
     const xmlPath = path.join(outDir, `${stem}.xml`)
     const metadataPath = path.join(outDir, `${stem}.json`)
@@ -840,12 +971,14 @@ function createRunner(options) {
       }
     } else await fs.writeFile(screenshotPath, await screenshot())
     await fs.writeFile(xmlPath, xml || await normalizedHierarchy(), 'utf8')
-    resultMeta = { ...resultMeta, ...observerMetadata() }
+    resultMeta = { ...resultMeta, ...observerMetadata(observerBaseline, recoveryBaseline) }
     await fs.writeFile(metadataPath, JSON.stringify({ question, status, created_at: new Date().toISOString().replace(/\.\d{3}Z$/, ''), screenshot: screenshotPath, hierarchy: xmlPath, ...resultMeta }, null, 2), 'utf8')
     return { screenshot: screenshotPath, hierarchy: xmlPath, metadata: metadataPath }
   }
 
   async function askOnce(payload, batchDirectory, question, index) {
+    const observerBaseline = typeof observer.snapshot === 'function' ? observer.snapshot() : {}
+    const recoveryBaseline = recoverySnapshot()
     if (payload.newSession) {
       log('stage: 正在切换到新会话')
       await tapNewSession()
@@ -862,12 +995,30 @@ function createRunner(options) {
       ui_fallback_enabled: false,
     }
     log('stage: 正在发送问题')
+    const sendMark = observer.active ? observer.mark() : null
+    const replyStartedAt = Date.now()
     await tapSend()
     log('stage: 问题已发送，等待回答稳定')
-    await sleep(2_000)
-    const result = await waitForStableReply(payload.timeout * 1_000)
+    if (sendMark && observer.active && typeof observer.waitForActivity === 'function') {
+      try {
+        const activity = await observer.waitForActivity({ timeout: 2_000, since: sendMark })
+        if (activity.activity) log('waiting: scrcpy已检测到回答画面开始变化')
+      } catch (error) {
+        await recoverObserver(error)
+      }
+    } else await sleep(2_000)
+    const result = await waitForStableReply(payload.timeout * 1_000, { startedAt: replyStartedAt })
     log(`stage: 回答等待结束（${result.status}），开始截图`)
-    return saveArtifacts({ outDir: directory, stem: '回答', question, status: result.status, xml: result.xml, meta })
+    return saveArtifacts({
+      outDir: directory,
+      stem: '回答',
+      question,
+      status: result.status,
+      xml: result.xml,
+      meta,
+      observerBaseline,
+      recoveryBaseline,
+    })
   }
 
   return {
@@ -885,7 +1036,7 @@ function createRunner(options) {
         } catch (error) {
           await disableObserver(error)
         }
-        await sleep(800)
+        await waitForVisualQuiet({ timeout: 1_200, fallbackMs: 800 })
         await waitForInput(15_000)
         log(`device=${payload.serial} package=${DEFAULT_PACKAGE} batch=${batchDirectory}`)
         for (const [zeroIndex, question] of payload.questions.entries()) {
