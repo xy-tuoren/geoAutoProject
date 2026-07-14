@@ -479,17 +479,16 @@ test('参考药品标题旁存在真实可点击按钮时使用按钮中心而�
   assert.deepEqual(referenceProductsTrigger(xml, [0, 200, 1272, 2300]), [1174, 1438])
 })
 
-test('检测到药品入口后必须从首屏采到末屏并完成正文位置恢复', () => {
+test('检测到回答尾部药品入口后只要求完整采集药品，不依赖正文锚点恢复', () => {
   const complete = { firstViewportIncluded: true, imagesReady: true, confirmedEnd: true, continuityVerified: true }
 
-  assert.equal(referenceProductsCaptureComplete({ detected: false, products: null, restoreVerified: false }), true)
-  assert.equal(referenceProductsCaptureComplete({ detected: true, products: null, restoreVerified: true }), false)
-  assert.equal(referenceProductsCaptureComplete({ detected: true, products: { ...complete, firstViewportIncluded: false }, restoreVerified: true }), false)
-  assert.equal(referenceProductsCaptureComplete({ detected: true, products: { ...complete, imagesReady: false }, restoreVerified: true }), false)
-  assert.equal(referenceProductsCaptureComplete({ detected: true, products: { ...complete, confirmedEnd: false }, restoreVerified: true }), false)
-  assert.equal(referenceProductsCaptureComplete({ detected: true, products: { ...complete, continuityVerified: false }, restoreVerified: true }), false)
-  assert.equal(referenceProductsCaptureComplete({ detected: true, products: complete, restoreVerified: false }), false)
-  assert.equal(referenceProductsCaptureComplete({ detected: true, products: complete, restoreVerified: true }), true)
+  assert.equal(referenceProductsCaptureComplete({ detected: false, products: null }), true)
+  assert.equal(referenceProductsCaptureComplete({ detected: true, products: null }), false)
+  assert.equal(referenceProductsCaptureComplete({ detected: true, products: { ...complete, firstViewportIncluded: false } }), false)
+  assert.equal(referenceProductsCaptureComplete({ detected: true, products: { ...complete, imagesReady: false } }), false)
+  assert.equal(referenceProductsCaptureComplete({ detected: true, products: { ...complete, confirmedEnd: false } }), false)
+  assert.equal(referenceProductsCaptureComplete({ detected: true, products: { ...complete, continuityVerified: false } }), false)
+  assert.equal(referenceProductsCaptureComplete({ detected: true, products: complete }), true)
 })
 
 test('新版药品抽屉无图片节点时从卡片上半部推断药品图片区域', () => {

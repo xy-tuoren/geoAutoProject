@@ -2,7 +2,7 @@ const fs = require('node:fs/promises')
 const path = require('node:path')
 const { execFile } = require('node:child_process')
 const { sleep, createBatchDirectory, questionArtifactDirectory } = require('./utils')
-const { iterNodes, nodeAttr, hierarchyIsLoading, parseBounds, boundsIntersect, boundsCenterY, estimateVerticalScrollShift, replyTailOnScreen, questionVisible, currentQuestionText, findChatScrollBounds, validateCaptureViewport, replyCaptureBounds, visibleLabelBounds, visibleLabelBoundsList, boundsForNodeAttribute, evidencePanelBounds, evidenceMinimumHeight, referenceProductsSection, referenceProductImageBounds } = require('./hierarchy')
+const { iterNodes, nodeAttr, hierarchyIsLoading, parseBounds, boundsIntersect, boundsCenterY, estimateVerticalScrollShift, questionVisible, currentQuestionText, findChatScrollBounds, validateCaptureViewport, replyCaptureBounds, visibleLabelBounds, visibleLabelBoundsList, boundsForNodeAttribute, evidencePanelBounds, evidenceMinimumHeight, referenceProductsSection, referenceProductImageBounds } = require('./hierarchy')
 const { imageInfo, cropImage, imagesSimilar, imageRegionsStable, imageLooksLoaded, verifyFrameOverlap, verifyProductGridOverlap, composeLongImages } = require('./images')
 const { U2Client } = require('./u2-client')
 const { ScrcpyObserver, SCRCPY_VERSION } = require('./scrcpy-observer')
@@ -135,8 +135,8 @@ function referenceProductsTrigger(xml, chatBounds) {
   return null
 }
 
-function referenceProductsCaptureComplete({ detected, products, restoreVerified }) {
-  return !detected || Boolean(products?.firstViewportIncluded && products?.imagesReady && products?.confirmedEnd && products?.continuityVerified && restoreVerified)
+function referenceProductsCaptureComplete({ detected, products }) {
+  return !detected || Boolean(products?.firstViewportIncluded && products?.imagesReady && products?.confirmedEnd && products?.continuityVerified)
 }
 
 function calibratedProductFallbackOverlap(overlaps) {
@@ -751,13 +751,12 @@ function createRunner(options) {
     const fallbackReasons = []
     let productDetected = false
     let products = null
-    let productRestoreVerified = false
     let productCaptureAttempts = 0
     let productCaptureMs = 0
-    const captureProductsIfVisible = async (xml, anchorFrame) => {
-      if (products) return null
+    const captureProductsIfVisible = async xml => {
+      if (products) return true
       const trigger = referenceProductsTrigger(xml, bounds)
-      if (!trigger) return null
+      if (!trigger) return false
       productDetected = true
       const started = Date.now()
       let lastError = null
@@ -774,24 +773,13 @@ function createRunner(options) {
           } catch (error) {
             lastError = error
             if (attempt < 1) {
-              log(`capture: 推荐药品采集未完成，恢复正文锚点后重试（2/2）：${error.message}`)
-              const retryAnchor = await waitForStableReplyRegion(bounds, 3_000)
-              if (!retryAnchor.stable || !(await imagesSimilar(anchorFrame, retryAnchor.frame, 3))) {
-                throw new Error(`推荐药品采集重试前无法恢复正文位置：${error.message}`)
-              }
+              log(`capture: 推荐药品采集未完成，在回答尾部入口直接重试（2/2）：${error.message}`)
             }
           }
         }
         if (!products) throw new Error(`推荐药品为必采内容，但两次采集均未完成：${lastError?.message || '未知错误'}`)
-        let restored = await waitForStableReplyRegion(bounds, 3_000)
-        productRestoreVerified = restored.stable && await imagesSimilar(anchorFrame, restored.frame, 3)
-        if (!productRestoreVerified) {
-          restored = await waitForStableReplyRegion(bounds, 3_000)
-          productRestoreVerified = restored.stable && await imagesSimilar(anchorFrame, restored.frame, 3)
-        }
-        if (!productRestoreVerified) throw new Error('推荐药品截图完成，但关闭抽屉后无法恢复正文滚动位置')
-        log('capture: 推荐药品已在回答滚动过程中完成采集，正文位置恢复校验通过')
-        return restored
+        log('capture: 推荐药品已按回答尾部顺序完整采集，本题截图结束')
+        return true
       } finally {
         productCaptureMs += Date.now() - started
       }
@@ -801,13 +789,7 @@ function createRunner(options) {
     for (let page = 0; page < maxPages; page += 1) {
       let xml = capture.xml || await source()
       if (!frames.length || !(await imagesSimilar(frames.at(-1), frame, 3))) { frames.push(frame); log(`capture: page ${frames.length}`) }
-      const restored = await captureProductsIfVisible(xml, frame)
-      if (restored) {
-        capture = restored
-        frame = restored.frame
-        xml = restored.xml || xml
-      }
-      if (replyTailOnScreen(xml, bounds) && !hierarchyIsLoading(xml)) { log('capture: reached on-screen reply tail'); break }
+      if (await captureProductsIfVisible(xml)) break
       const before = frame
       const scroll = await swipeChat(bounds, 'down', scrollFraction, { eventDrivenSettle: true })
       const shift = scroll.distance
@@ -862,15 +844,7 @@ function createRunner(options) {
         } else noProgress += 1
         frame = after
         capture = afterCapture
-        const restored = await captureProductsIfVisible(afterXml, after)
-        if (restored) {
-          afterCapture = restored
-          after = restored.frame
-          afterXml = restored.xml || afterXml
-          frame = after
-          capture = afterCapture
-        }
-        if (replyTailOnScreen(afterXml, bounds) && !hierarchyIsLoading(afterXml)) { log('capture: reached on-screen reply tail after swipe'); break }
+        if (await captureProductsIfVisible(afterXml)) break
         if (scroll.canScrollMore === false) { log('capture: reached device-reported scroll boundary'); break }
       }
     }
@@ -887,7 +861,6 @@ function createRunner(options) {
       evidenceExpanded: evidence.expanded,
       productDetected,
       products,
-      productRestoreVerified,
       productCaptureAttempts,
       productCaptureMs,
     }
@@ -1130,9 +1103,9 @@ function createRunner(options) {
     if (stitch) {
       const replyCaptureStarted = Date.now()
       const capture = await captureFullReplyFrames(question)
-      const { frames, transitions, bounds, recaptureCount, fullRetryCount, fallbackReasons, topNavigationMs, evidenceEmbedded, evidenceExpanded, productDetected, products, productRestoreVerified, productCaptureAttempts, productCaptureMs } = capture
-      if (!referenceProductsCaptureComplete({ detected: productDetected, products, restoreVerified: productRestoreVerified })) {
-        throw new Error('检测到推荐药品入口，但药品截图或正文位置恢复未完整完成')
+      const { frames, transitions, bounds, recaptureCount, fullRetryCount, fallbackReasons, topNavigationMs, evidenceEmbedded, evidenceExpanded, productDetected, products, productCaptureAttempts, productCaptureMs } = capture
+      if (!referenceProductsCaptureComplete({ detected: productDetected, products })) {
+        throw new Error('检测到推荐药品入口，但药品截图未完整完成')
       }
       const seamsTotal = Math.max(0, frames.length - 1)
       const seamsVerified = transitions.filter(transition => transition.verified).length
@@ -1161,7 +1134,8 @@ function createRunner(options) {
         reference_products_detected: productDetected,
         reference_products_capture_required: productDetected,
         reference_products_inline_capture: Boolean(products),
-        reference_products_restore_verified: Boolean(productRestoreVerified),
+        reference_products_restore_required: false,
+        reference_products_terminal_sequence: Boolean(products),
         reference_products_retry_count: Math.max(0, productCaptureAttempts - (productDetected ? 1 : 0)),
         reference_products_post_scan_swipes: 0,
         reference_products_capture_ms: productCaptureMs,
@@ -1183,7 +1157,7 @@ function createRunner(options) {
           reference_products_unloaded_images: products.unloaded,
           reference_products_confirmed_end: products.confirmedEnd,
           reference_products_first_viewport_included: products.firstViewportIncluded,
-          reference_products_capture_complete: products.firstViewportIncluded && products.imagesReady && products.confirmedEnd && products.continuityVerified && productRestoreVerified,
+          reference_products_capture_complete: products.firstViewportIncluded && products.imagesReady && products.confirmedEnd && products.continuityVerified,
           reference_products_calibrated_seams: products.calibratedSeams,
         })
       }
