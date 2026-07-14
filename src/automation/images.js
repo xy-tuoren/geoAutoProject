@@ -260,7 +260,10 @@ function overlapTilesStable(previous, current, overlap, band) {
   return true
 }
 
-async function findVerticalOverlapWithScore(previous, current, expected = null) {
+async function findVerticalOverlapWithScore(previous, current, expected = null, {
+  bands = [[0.06, 0.43], [0.57, 0.94]],
+  minimumUsable = bands.length,
+} = {}) {
   const [previousRaw, currentRaw] = await Promise.all([rawImage(previous), rawImage(current)])
   const maxOverlap = Math.min(previousRaw.height, currentRaw.height) - 8
   const minOverlap = Math.min(40, Math.floor(maxOverlap / 2))
@@ -272,12 +275,11 @@ async function findVerticalOverlapWithScore(previous, current, expected = null) 
     high = Math.min(maxOverlap, Math.round(expected) + 260)
     if (low >= high) { low = minOverlap; high = maxOverlap }
   }
-  // The centre gap masks the app's pinned down-arrow. Both remaining text
-  // regions must independently find the same vertical displacement.
-  const bands = [[0.06, 0.43], [0.57, 0.94]]
+  // The default centre gap masks the app's pinned down-arrow. Both remaining
+  // text regions must independently find the same vertical displacement.
   const results = bands.map(band => bestBandOverlap(previousRaw, currentRaw, band, low, high))
   const usable = results.filter(result => result.contentRatio >= 0.004)
-  if (usable.length < 2) return { overlap: expected ?? results[0].overlap, candidateOverlaps: usable.map(result => result.overlap), score: Math.max(...results.map(result => result.score)), valid: false, reason: '相邻截图缺少足够的可比内容' }
+  if (usable.length < minimumUsable) return { overlap: expected ?? results[0].overlap, candidateOverlaps: usable.map(result => result.overlap), score: Math.max(...results.map(result => result.score)), valid: false, reason: '相邻截图缺少足够的可比内容' }
   const overlaps = usable.map(result => result.overlap)
   if (Math.max(...overlaps) - Math.min(...overlaps) > 3) {
     return { overlap: Math.round(overlaps.reduce((sum, value) => sum + value, 0) / overlaps.length), candidateOverlaps: overlaps, score: Math.max(...usable.map(result => result.score)), valid: false, reason: `不同图像区域测得的滚动位移不一致（重叠 ${overlaps.join('/')}px）` }
@@ -294,6 +296,23 @@ async function verifyFrameOverlap(previous, current, expected) {
   const result = await findVerticalOverlapWithScore(previous, current, expected)
   if (!result.valid) {
     const error = new Error(`无法验证相邻截图连续性（${result.reason || `差异分数 ${result.score.toFixed(1)}`}）；已停止无缝拼接以避免叠字或漏图。`)
+    error.candidateOverlaps = result.candidateOverlaps || []
+    error.suggestedOverlap = result.overlap
+    throw error
+  }
+  return result.overlap
+}
+
+async function verifyProductGridOverlap(previous, current, expected) {
+  // Product rows can legitimately contain only one card.  A blank right
+  // column therefore cannot serve as an independent seam witness; compare
+  // the complete grid width and still require pixel/tile continuity.
+  const result = await findVerticalOverlapWithScore(previous, current, expected, {
+    bands: [[0.04, 0.96]],
+    minimumUsable: 1,
+  })
+  if (!result.valid) {
+    const error = new Error(`无法验证药品网格截图连续性（${result.reason || `差异分数 ${result.score.toFixed(1)}`}）`)
     error.candidateOverlaps = result.candidateOverlaps || []
     error.suggestedOverlap = result.overlap
     throw error
@@ -461,4 +480,4 @@ async function textSeamsAreValid(frames, seams) {
   })
 }
 
-module.exports = { imageInfo, cropImage, imagesMeanDiff, imagesSimilar, imageRegionsStable, imageHasVisibleContent, imageLooksLoaded, alignCropToWhitespace, stackFramesInGroups, verifyFrameOverlap, stitchFramesInGroups, stitchFramesWithOverlaps, stackFramesWithSeparators, stitchFramesWithTransitions, composeLongImages, cropFramesAtTextSeams, textSeamsAreValid }
+module.exports = { imageInfo, cropImage, imagesMeanDiff, imagesSimilar, imageRegionsStable, imageHasVisibleContent, imageLooksLoaded, alignCropToWhitespace, stackFramesInGroups, verifyFrameOverlap, verifyProductGridOverlap, stitchFramesInGroups, stitchFramesWithOverlaps, stackFramesWithSeparators, stitchFramesWithTransitions, composeLongImages, cropFramesAtTextSeams, textSeamsAreValid }

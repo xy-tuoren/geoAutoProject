@@ -133,6 +133,13 @@ class ScrcpyObserver {
     this.activityChecks = 0
     this.activitySuccesses = 0
     this.activityTimeouts = 0
+    this.settleChecks = 0
+    this.settleSuccesses = 0
+    this.settleTimeouts = 0
+    this.settleFastSuccesses = 0
+    this.settleConservativeSuccesses = 0
+    this.settleNoActivity = 0
+    this.settleWaitMs = 0
   }
 
   get active() {
@@ -321,6 +328,49 @@ class ScrcpyObserver {
     }
   }
 
+  async waitForSettleSince(since, {
+    activityTimeout = 200,
+    quietMs = 140,
+    conservativeQuietMs = 250,
+    fastTimeout = 900,
+    hardTimeout = 2_500,
+  } = {}) {
+    if (!this.active) throw this.failure || new Error('scrcpy观察器未启动。')
+    const started = this.now()
+    const sinceAt = Number.isFinite(since?.at) ? since.at : started
+    const deadline = Math.max(started, sinceAt + hardTimeout)
+    this.settleChecks += 1
+    const finish = result => {
+      const waitedMs = this.now() - started
+      this.settleWaitMs += waitedMs
+      if (result.settled) this.settleSuccesses += 1
+      else this.settleTimeouts += 1
+      if (!result.activity) this.settleNoActivity += 1
+      else if (result.settled && result.conservative) this.settleConservativeSuccesses += 1
+      else if (result.settled) this.settleFastSuccesses += 1
+      return { ...result, waitedMs }
+    }
+
+    const activity = await this.waitForActivity({ timeout: activityTimeout, since })
+    if (!activity.activity) return finish({ settled: true, activity: false, conservative: false, lastActivityAt: null })
+
+    while (true) {
+      if (!this.active) throw this.failure || new Error('scrcpy观察器已断开。')
+      const now = this.now()
+      const activityFrames = this.frames.filter(frame => (frame.activity ?? frameCarriesActivity(frame)) && frame.at >= sinceAt && frame.at <= now)
+      const lastActivityAt = activityFrames.at(-1)?.at ?? now
+      const conservative = now - started >= fastTimeout
+      const requiredQuietMs = conservative ? conservativeQuietMs : quietMs
+      if (now - lastActivityAt >= requiredQuietMs) {
+        return finish({ settled: true, activity: true, conservative, lastActivityAt, quietForMs: now - lastActivityAt })
+      }
+      if (now >= deadline) {
+        return finish({ settled: false, activity: true, conservative: true, lastActivityAt, quietForMs: Math.max(0, now - lastActivityAt) })
+      }
+      await this.delay(Math.min(50, deadline - now))
+    }
+  }
+
   snapshot() {
     const now = this.now()
     const recent = this.frames.filter(frame => frame.at >= now - 1_000)
@@ -341,6 +391,13 @@ class ScrcpyObserver {
       activity_checks: this.activityChecks,
       activity_successes: this.activitySuccesses,
       activity_timeouts: this.activityTimeouts,
+      settle_checks: this.settleChecks,
+      settle_successes: this.settleSuccesses,
+      settle_timeouts: this.settleTimeouts,
+      settle_fast_successes: this.settleFastSuccesses,
+      settle_conservative_successes: this.settleConservativeSuccesses,
+      settle_no_activity: this.settleNoActivity,
+      settle_wait_ms: this.settleWaitMs,
       failure: this.failure?.message || null,
     }
   }

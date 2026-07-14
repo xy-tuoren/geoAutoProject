@@ -5,11 +5,11 @@ const os = require('node:os')
 const path = require('node:path')
 const sharp = require('sharp')
 const XLSX = require('xlsx')
-const { questionVisible, replyTailOnScreen, findChatScrollBounds, validateCaptureViewport, floatingScrollControlBounds, replyCaptureBounds, estimateVerticalScrollShift, sharedTextSeam, evidencePanelBounds, visibleLabelBounds, visibleLabelBoundsList, boundsListForNodeAttribute, referenceProductsSection } = require('../../src/automation/hierarchy')
-const { stackFramesInGroups, verifyFrameOverlap, imageInfo, imageLooksLoaded, imagesSimilar, imageRegionsStable, alignCropToWhitespace, stitchFramesWithOverlaps, composeLongImages, cropFramesAtTextSeams } = require('../../src/automation/images')
+const { questionVisible, currentQuestionText, replyTailOnScreen, findChatScrollBounds, validateCaptureViewport, floatingScrollControlBounds, replyCaptureBounds, estimateVerticalScrollShift, sharedTextSeam, evidencePanelBounds, visibleLabelBounds, visibleLabelBoundsList, boundsListForNodeAttribute, referenceProductsSection, referenceProductImageBounds } = require('../../src/automation/hierarchy')
+const { stackFramesInGroups, verifyFrameOverlap, verifyProductGridOverlap, imageInfo, imageLooksLoaded, imagesSimilar, imageRegionsStable, alignCropToWhitespace, stitchFramesWithOverlaps, composeLongImages, cropFramesAtTextSeams } = require('../../src/automation/images')
 const { createBatchDirectory, questionArtifactDirectory } = require('../../src/automation/utils')
 const { loadQuestionFile } = require('../../src/questions')
-const { adbConnectionLost, captureStableObserved, captureStableSandwich, chatSwipePlan, conservativeFallbackOverlap, buildReplyImages, fillQuestionInput, hierarchyBelongsToPackage, historyOnboardingVisible, maxLongImageHeight, prepareEmbeddedEvidence, scrollEndConfirmed } = require('../../src/automation/runner')
+const { adbConnectionLost, captureStableObserved, captureStableSandwich, calibratedProductFallbackOverlap, chatSwipePlan, conservativeFallbackOverlap, buildReplyImages, fillQuestionInput, hierarchyBelongsToPackage, historyOnboardingVisible, maxLongImageHeight, prepareEmbeddedEvidence, referenceProductsCaptureComplete, referenceProductsTrigger, referenceProductViewportReadiness, scrollEndConfirmed } = require('../../src/automation/runner')
 
 const CHAT_BOUNDS = [0, 200, 1080, 1800]
 
@@ -99,6 +99,35 @@ test('scrcpy确认静止后只截取一张无损PNG，并校验层级读取期�
   assert.deepEqual(events, ['quiet', 'hierarchy', 'capture', 'quiet'])
 })
 
+test('滑动后的稳定截图优先使用活动标记快速判静止', async () => {
+  const events = []
+  const settleSince = { at: 1_000, frameCount: 4, activityFrameCount: 2 }
+  const observer = {
+    waitForSettleSince: async mark => {
+      events.push(['settle', mark])
+      return { settled: true, activity: true }
+    },
+    waitForQuiet: async () => { events.push(['quiet']); return { quiet: true } },
+    mark: () => ({ frameCount: 7, activityFrameCount: 2 }),
+  }
+
+  const result = await captureStableObserved({
+    observer,
+    settleSince,
+    capture: async () => { events.push(['capture']); return Buffer.from('png') },
+    hierarchy: async () => { events.push(['hierarchy']); return '<hierarchy />' },
+    hierarchyLoading: () => false,
+  })
+
+  assert.equal(result.stable, true)
+  assert.deepEqual(events, [
+    ['settle', settleSince],
+    ['hierarchy'],
+    ['capture'],
+    ['quiet'],
+  ])
+})
+
 test('只将聊天区域内且可见的问题视为当前问题', () => {
   const hidden = '<hierarchy><node text="这是一个很长的问题" visible-to-user="false" bounds="[20,300][1060,460]" /></hierarchy>'
   const visible = '<hierarchy><node text="这是一个很长的问题" visible-to-user="true" bounds="[20,300][1060,460]" /></hierarchy>'
@@ -114,6 +143,29 @@ test('兼容 class 命名的 UiAutomator 层级节点', () => {
 test('层级节点未写可见属性时仍按可见节点处理', () => {
   const xml = '<hierarchy><node class="android.widget.TextView" text="系统层级问题" bounds="[80,900][900,980]" /></hierarchy>'
   assert.equal(questionVisible(xml, '系统层级问题', [0, 400, 1080, 1800]), true)
+})
+
+test('从右侧消息气泡自动识别当前已有问题而不依赖输入框', () => {
+  const xml = '<hierarchy><node class="android.view.View" bounds="[0,200][1272,2300]">'
+    + '<node class="android.view.View" bounds="[65,558][1207,715]">'
+    + '<node class="android.view.View" bounds="[715,558][1155,715]">'
+    + '<node class="android.widget.TextView" text="腹泻脱水用什么药" content-desc="腹泻脱水用什么药" bounds="[715,604][1155,669]" />'
+    + '</node></node>'
+    + '<node class="android.view.View" bounds="[0,786][1272,2200]">'
+    + '<node class="android.widget.TextView" text="腹泻脱水首选口服补液盐" bounds="[65,970][1207,1192]" />'
+    + '</node></node></hierarchy>'
+  assert.equal(currentQuestionText(xml, [0, 440, 1272, 2315]), '腹泻脱水用什么药')
+})
+
+test('药品卡片里的医保标签不能被误识别为当前问题', () => {
+  const xml = '<hierarchy><node class="android.view.View" bounds="[0,440][1272,2315]">'
+    + '<node class="android.widget.HorizontalScrollView" bounds="[0,1200][1272,2315]">'
+    + '<node class="android.view.ViewGroup" bounds="[588,1400][1106,2315]">'
+    + '<node class="android.view.View" bounds="[619,2050][1048,2261]">'
+    + '<node class="android.view.View" bounds="[761,2105][917,2261]">'
+    + '<node class="android.widget.TextView" text="医保甲类" content-desc="" bounds="[772,2160][906,2206]" />'
+    + '</node></node></node></node></node></hierarchy>'
+  assert.equal(currentQuestionText(xml, [0, 440, 1272, 2315]), null)
 })
 
 test('新 Android 层级格式可识别引用资料卡和推荐药品入口', () => {
@@ -258,6 +310,29 @@ test('按已验证的精确重叠高度拼接，不再二次猜测滚动距离',
   assert.deepEqual(await imageInfo(stitched), { width: 20, height: 34 })
 })
 
+test('单列药品行使用整宽校验，不把右侧黑色空栏当成接缝证据', async () => {
+  const width = 240
+  const height = 300
+  const raw = Buffer.alloc(width * height * 3)
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < 110; x += 1) {
+      const offset = (y * width + x) * 3
+      raw[offset] = (y * 37 + x * 11) % 256
+      raw[offset + 1] = (y * 13 + x * 29) % 256
+      raw[offset + 2] = (y * 7 + x * 19) % 256
+    }
+  }
+  const previous = await sharp(raw, { raw: { width, height, channels: 3 } }).png().toBuffer()
+  const current = await sharp(previous).extract({ left: 0, top: 80, width, height: 220 }).extend({ bottom: 80, background: 'black' }).png().toBuffer()
+  assert.equal(await verifyProductGridOverlap(previous, current, 220), 220)
+})
+
+test('药品动态接缝仅在前序滚动位移一致时采用保守重叠', () => {
+  assert.equal(calibratedProductFallbackOverlap([403, 391]), null)
+  assert.equal(calibratedProductFallbackOverlap([403, 391, 393, 410]), 383)
+  assert.equal(calibratedProductFallbackOverlap([403, 391, 520]), null)
+})
+
 test('批次和问题目录保持与旧版一致，CSV 默认读取问题列', async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'node-automation-test-'))
   try {
@@ -384,6 +459,64 @@ test('参考药品卡片虽无文本，也能凭结构（Compose 面板+横向�
   const section = referenceProductsSection(xml)
   assert.deepEqual(section.panel, [0, 673, 1080, 1714])
   assert.deepEqual(section.tap, [981, 721])
+})
+
+test('回答滚动阶段直接返回参考药品入口坐标', () => {
+  const xml = '<hierarchy>'
+    + '<node class="androidx.compose.ui.viewinterop.ViewFactoryHolder" bounds="[0,673][1080,1714]">'
+    + '<node class="android.widget.ImageView" bounds="[942,682][1020,760]" />'
+    + '<node class="android.widget.HorizontalScrollView" scrollable="true" bounds="[0,817][1080,1714]" />'
+    + '</node></hierarchy>'
+
+  assert.deepEqual(referenceProductsTrigger(xml, CHAT_BOUNDS), [981, 721])
+})
+
+test('参考药品标题旁存在真实可点击按钮时使用按钮中心而非估算坐标', () => {
+  const xml = '<hierarchy>'
+    + '<node text="参考药品" class="android.widget.TextView" bounds="[65,1394][1096,1482]" />'
+    + '<node class="android.view.View" clickable="true" bounds="[1096,1360][1253,1517]" />'
+    + '</hierarchy>'
+  assert.deepEqual(referenceProductsTrigger(xml, [0, 200, 1272, 2300]), [1174, 1438])
+})
+
+test('检测到药品入口后必须从首屏采到末屏并完成正文位置恢复', () => {
+  const complete = { firstViewportIncluded: true, imagesReady: true, confirmedEnd: true, continuityVerified: true }
+
+  assert.equal(referenceProductsCaptureComplete({ detected: false, products: null, restoreVerified: false }), true)
+  assert.equal(referenceProductsCaptureComplete({ detected: true, products: null, restoreVerified: true }), false)
+  assert.equal(referenceProductsCaptureComplete({ detected: true, products: { ...complete, firstViewportIncluded: false }, restoreVerified: true }), false)
+  assert.equal(referenceProductsCaptureComplete({ detected: true, products: { ...complete, imagesReady: false }, restoreVerified: true }), false)
+  assert.equal(referenceProductsCaptureComplete({ detected: true, products: { ...complete, confirmedEnd: false }, restoreVerified: true }), false)
+  assert.equal(referenceProductsCaptureComplete({ detected: true, products: { ...complete, continuityVerified: false }, restoreVerified: true }), false)
+  assert.equal(referenceProductsCaptureComplete({ detected: true, products: complete, restoreVerified: false }), false)
+  assert.equal(referenceProductsCaptureComplete({ detected: true, products: complete, restoreVerified: true }), true)
+})
+
+test('新版药品抽屉无图片节点时从卡片上半部推断药品图片区域', () => {
+  const list = [0, 1280, 1272, 2744]
+  const xml = '<hierarchy>'
+    + '<node class="androidx.recyclerview.widget.RecyclerView" bounds="[0,1280][1272,2744]">'
+    + '<node class="android.view.ViewGroup" bounds="[42,1424][560,2413]" />'
+    + '<node class="android.view.ViewGroup" bounds="[588,1424][1106,2413]" />'
+    + '<node class="android.view.ViewGroup" bounds="[42,2641][560,2744]" />'
+    + '</node></hierarchy>'
+  const result = referenceProductImageBounds(xml, list)
+  assert.equal(result.mode, 'inferred_card_artwork')
+  assert.deepEqual(result.bounds, [[73, 1454, 529, 1968], [619, 1454, 1075, 1968]])
+})
+
+test('药品稳定截图直接复用完成图片就绪判断', async () => {
+  const artwork = await sharp({ create: { width: 140, height: 140, channels: 3, background: '#fff' } })
+    .composite([{ input: await sharp({ create: { width: 80, height: 60, channels: 3, background: '#d71945' } }).png().toBuffer(), left: 30, top: 40 }])
+    .png().toBuffer()
+  const frame = await sharp({ create: { width: 400, height: 500, channels: 3, background: '#000' } })
+    .composite([{ input: artwork, left: 30, top: 50 }])
+    .png().toBuffer()
+  const xml = '<hierarchy><node class="android.widget.ImageView" bounds="[30,150][170,290]" /></hierarchy>'
+  const result = await referenceProductViewportReadiness(frame, xml, [0, 100, 400, 600])
+  assert.equal(result.ready, true)
+  assert.equal(result.mode, 'explicit_images')
+  assert.equal(result.loaded, 1)
 })
 
 test('普通资料卡（Compose 面板但无横向药品列表）不会被误判为参考药品', () => {

@@ -2,8 +2,8 @@ const fs = require('node:fs/promises')
 const path = require('node:path')
 const { execFile } = require('node:child_process')
 const { sleep, createBatchDirectory, questionArtifactDirectory } = require('./utils')
-const { iterNodes, nodeAttr, hierarchyIsLoading, parseBounds, boundsIntersect, boundsCenterY, estimateVerticalScrollShift, replyTailOnScreen, questionVisible, findChatScrollBounds, validateCaptureViewport, replyCaptureBounds, visibleLabelBounds, visibleLabelBoundsList, boundsForNodeAttribute, boundsListForNodeAttribute, evidencePanelBounds, evidenceMinimumHeight, referenceProductsSection } = require('./hierarchy')
-const { imageInfo, cropImage, imagesSimilar, imageRegionsStable, imageLooksLoaded, verifyFrameOverlap, composeLongImages } = require('./images')
+const { iterNodes, nodeAttr, hierarchyIsLoading, parseBounds, boundsIntersect, boundsCenterY, estimateVerticalScrollShift, replyTailOnScreen, questionVisible, currentQuestionText, findChatScrollBounds, validateCaptureViewport, replyCaptureBounds, visibleLabelBounds, visibleLabelBoundsList, boundsForNodeAttribute, evidencePanelBounds, evidenceMinimumHeight, referenceProductsSection, referenceProductImageBounds } = require('./hierarchy')
+const { imageInfo, cropImage, imagesSimilar, imageRegionsStable, imageLooksLoaded, verifyFrameOverlap, verifyProductGridOverlap, composeLongImages } = require('./images')
 const { U2Client } = require('./u2-client')
 const { ScrcpyObserver, SCRCPY_VERSION } = require('./scrcpy-observer')
 const { bundledScrcpyServer } = require('../runtime-paths')
@@ -113,6 +113,66 @@ function scrollEndConfirmed(canScrollMore, unchangedCount) {
   return canScrollMore === false || unchangedCount >= 2
 }
 
+function referenceProductsTrigger(xml, chatBounds) {
+  for (const label of ['参考药品', '推荐药品']) {
+    const bounds = visibleLabelBounds(xml, label)
+    if (!bounds || !boundsIntersect(bounds, chatBounds)) continue
+    const centerY = boundsCenterY(bounds)
+    const exact = iterNodes(xml).map(attrs => ({
+      clickable: nodeAttr(attrs, 'clickable') === 'true',
+      rawBounds: nodeAttr(attrs, 'bounds'),
+    })).filter(item => item.clickable && item.rawBounds).map(item => parseBounds(item.rawBounds)).filter(candidate =>
+      candidate[0] >= bounds[2] - 20
+      && candidate[1] <= centerY
+      && candidate[3] >= centerY
+      && boundsIntersect(candidate, chatBounds))
+      .sort((a, b) => a[0] - b[0])[0]
+    if (exact) return [Math.floor((exact[0] + exact[2]) / 2), Math.floor((exact[1] + exact[3]) / 2)]
+    return [chatBounds[2] - Math.max(20, Math.floor((chatBounds[2] - chatBounds[0]) / 15)), boundsCenterY(bounds)]
+  }
+  const section = referenceProductsSection(xml)
+  if (section && boundsIntersect(section.panel, chatBounds)) return section.tap
+  return null
+}
+
+function referenceProductsCaptureComplete({ detected, products, restoreVerified }) {
+  return !detected || Boolean(products?.firstViewportIncluded && products?.imagesReady && products?.confirmedEnd && products?.continuityVerified && restoreVerified)
+}
+
+function calibratedProductFallbackOverlap(overlaps) {
+  const recent = overlaps.filter(Number.isFinite).slice(-8)
+  if (recent.length < 3) return null
+  const low = Math.min(...recent)
+  const high = Math.max(...recent)
+  if (high - low > 64) return null
+  // Prefer a few pixels of harmless duplicate background over cutting into a
+  // product row when the current overlap contains animated/lazy artwork.
+  return Math.max(0, low - 8)
+}
+
+async function referenceProductViewportReadiness(frame, xml, listBounds) {
+  const candidates = referenceProductImageBounds(xml, listBounds)
+  const frameSize = await imageInfo(frame)
+  const relativeBounds = candidates.bounds.map(bounds => [
+    Math.max(0, bounds[0] - listBounds[0]),
+    Math.max(0, bounds[1] - listBounds[1]),
+    Math.min(frameSize.width, bounds[2] - listBounds[0]),
+    Math.min(frameSize.height, bounds[3] - listBounds[1]),
+  ]).filter(bounds => bounds[2] - bounds[0] >= 60 && bounds[3] - bounds[1] >= 45)
+  const loadedFlags = await Promise.all(relativeBounds.map(async bounds => imageLooksLoaded(await cropImage(frame, bounds))))
+  const loaded = loadedFlags.filter(Boolean).length
+  const viewportLoaded = relativeBounds.length ? true : await imageLooksLoaded(frame)
+  const ready = relativeBounds.length ? loaded === relativeBounds.length : viewportLoaded
+  return {
+    ready,
+    mode: candidates.mode,
+    cards: visibleLabelBoundsList(xml, '查看说明书').filter(bounds => boundsIntersect(bounds, listBounds)).length || relativeBounds.length,
+    images: relativeBounds.length,
+    loaded,
+    unloaded: relativeBounds.length ? relativeBounds.length - loaded : (ready ? 0 : 1),
+  }
+}
+
 async function buildReplyImages(frames, { transitions = [], maxHeight = DEFAULT_MAX_LONG_IMAGE_HEIGHT } = {}) {
   return composeLongImages(frames, { transitions, maxHeight, separatorHeight: 24 })
 }
@@ -182,6 +242,7 @@ async function captureStableObserved({
   capture,
   hierarchy,
   hierarchyLoading,
+  settleSince = null,
   now = Date.now,
 }, timeout = 2_500) {
   const deadline = now() + timeout
@@ -190,13 +251,15 @@ async function captureStableObserved({
   let attempts = 0
   while (now() < deadline) {
     const remaining = deadline - now()
-    const quiet = await observer.waitForQuiet({
-      timeout: Math.max(100, remaining),
-      windowMs: 450,
-      quietMs: 250,
-      maxFrames: 1,
-    })
-    if (!quiet.quiet) break
+    const settled = settleSince && attempts === 0 && typeof observer.waitForSettleSince === 'function'
+      ? await observer.waitForSettleSince(settleSince, { hardTimeout: Math.max(100, remaining) })
+      : await observer.waitForQuiet({
+          timeout: Math.max(100, remaining),
+          windowMs: 450,
+          quietMs: 250,
+          maxFrames: 1,
+        })
+    if (!(settled.settled ?? settled.quiet)) break
     const mark = observer.mark()
     lastXml = await hierarchy()
     lastFrame = await capture()
@@ -204,10 +267,10 @@ async function captureStableObserved({
     const confirmRemaining = Math.max(100, Math.min(800, deadline - now()))
     const confirmed = await observer.waitForQuiet({
       timeout: confirmRemaining,
-      windowMs: 250,
-      quietMs: 120,
+      windowMs: 180,
+      quietMs: 80,
       maxFrames: 1,
-      minWaitMs: Math.min(120, confirmRemaining),
+      minWaitMs: Math.min(80, confirmRemaining),
     })
     const currentMark = observer.mark()
     const activityFramesDuringCapture = (currentMark.activityFrameCount ?? currentMark.frameCount)
@@ -276,6 +339,13 @@ function createRunner(options) {
       scrcpy_observer_activity_checks: snapshot.activity_checks || 0,
       scrcpy_observer_activity_successes: snapshot.activity_successes || 0,
       scrcpy_observer_activity_timeouts: snapshot.activity_timeouts || 0,
+      scrcpy_observer_settle_checks: snapshot.settle_checks || 0,
+      scrcpy_observer_settle_successes: snapshot.settle_successes || 0,
+      scrcpy_observer_settle_timeouts: snapshot.settle_timeouts || 0,
+      scrcpy_observer_settle_fast_successes: snapshot.settle_fast_successes || 0,
+      scrcpy_observer_settle_conservative_successes: snapshot.settle_conservative_successes || 0,
+      scrcpy_observer_settle_no_activity: snapshot.settle_no_activity || 0,
+      scrcpy_observer_settle_wait_ms: snapshot.settle_wait_ms || 0,
       scrcpy_observer_recovery_attempts: observerRecoveryAttempts,
       scrcpy_observer_recovery_successes: observerRecoverySuccesses,
       scrcpy_observer_recovery_failures: observerRecoveryFailures,
@@ -283,7 +353,7 @@ function createRunner(options) {
       ...(observerFallbackReason ? { scrcpy_observer_fallback_reason: observerFallbackReason } : {}),
     }
     if (baseline) {
-      for (const key of ['frames', 'activity_frames', 'noise_frames', 'quiet_checks', 'quiet_successes', 'quiet_timeouts', 'activity_checks', 'activity_successes', 'activity_timeouts']) {
+      for (const key of ['frames', 'activity_frames', 'noise_frames', 'quiet_checks', 'quiet_successes', 'quiet_timeouts', 'activity_checks', 'activity_successes', 'activity_timeouts', 'settle_checks', 'settle_successes', 'settle_timeouts', 'settle_fast_successes', 'settle_conservative_successes', 'settle_no_activity', 'settle_wait_ms']) {
         metadata[`scrcpy_observer_question_${key}`] = Math.max(0, Number(snapshot[key] || 0) - Number(baseline[key] || 0))
       }
     }
@@ -361,11 +431,16 @@ function createRunner(options) {
 
   async function source() {
     checkCancelled()
-    const xml = await ui.dumpHierarchy()
-    if (!hierarchyBelongsToPackage(xml)) {
-      throw new Error(`当前前台页面不是小荷App（层级中缺少 ${DEFAULT_PACKAGE}），已停止UI操作。`)
+    let xml = ''
+    // During bottom-sheet attach/detach UiAutomator can briefly serialize an
+    // empty transitional root even though WindowManager still reports the app
+    // in front. Retry only this read-only operation; clicks are never replayed.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      xml = await ui.dumpHierarchy()
+      if (hierarchyBelongsToPackage(xml)) return xml
+      if (attempt < 2) await sleep(120)
     }
-    return xml
+    throw new Error(`当前前台页面不是小荷App（层级中缺少 ${DEFAULT_PACKAGE}），已停止UI操作。`)
   }
 
   async function tap(x, y) {
@@ -551,6 +626,7 @@ function createRunner(options) {
     speed = 1400,
     settle = 60,
     fallbackDuration = 900,
+    eventDrivenSettle = false,
   } = {}) {
     const [left, top, right, bottom] = bounds
     const height = bottom - top
@@ -559,10 +635,11 @@ function createRunner(options) {
     const x = left + (right - left) * 0.84
     const center = Math.floor((top + bottom) / 2)
     const duration = Math.max(120, Math.round(distance / speed * 1_000))
+    const activityMark = eventDrivenSettle && observer.active ? observer.mark() : null
     if (direction === 'up') await swipe(x, center - Math.floor(distance / 2), center + Math.ceil(distance / 2), duration || fallbackDuration)
     else await swipe(x, center + Math.ceil(distance / 2), center - Math.floor(distance / 2), duration || fallbackDuration)
-    await sleep(settle)
-    return { distance, canScrollMore }
+    if (!activityMark) await sleep(settle)
+    return { distance, canScrollMore, activityMark }
   }
 
   async function waitForRegionPixelsStable(bounds, timeout = 8_000) {
@@ -595,7 +672,7 @@ function createRunner(options) {
     return frame
   }
 
-  async function waitForStableReplyRegion(bounds, timeout = 8_000) {
+  async function waitForStableReplyRegion(bounds, timeout = 8_000, { settleSince = null } = {}) {
     if (observer.active) {
       const started = Date.now()
       try {
@@ -604,6 +681,7 @@ function createRunner(options) {
           capture: async () => cropImage(await screenshot(), bounds),
           hierarchy: source,
           hierarchyLoading: hierarchyIsLoading,
+          settleSince,
         }, Math.min(timeout, 2_500))
         if (observed.stable) return observed
         observerFallbackReason ||= 'scrcpy在限定时间内未确认画面静止'
@@ -671,23 +749,69 @@ function createRunner(options) {
     let noProgress = 0
     let recaptureCount = 0
     const fallbackReasons = []
-    let productsSeen = false
-    const observeAuxiliaryCards = xml => {
-      productsSeen ||= Boolean(referenceProductsSection(xml)
-        || visibleLabelBounds(xml, '参考药品')
-        || visibleLabelBounds(xml, '推荐药品'))
+    let productDetected = false
+    let products = null
+    let productRestoreVerified = false
+    let productCaptureAttempts = 0
+    let productCaptureMs = 0
+    const captureProductsIfVisible = async (xml, anchorFrame) => {
+      if (products) return null
+      const trigger = referenceProductsTrigger(xml, bounds)
+      if (!trigger) return null
+      productDetected = true
+      const started = Date.now()
+      let lastError = null
+      try {
+        for (let attempt = 0; attempt < 2 && !products; attempt += 1) {
+          productCaptureAttempts += 1
+          try {
+            const candidate = await captureReferenceProductsAtTrigger(trigger)
+            if (!candidate.firstViewportIncluded) throw new Error('推荐药品首项所在视口未纳入截图')
+            if (!candidate.imagesReady) throw new Error(`推荐药品图片仍有 ${candidate.unloaded} 处未确认加载`)
+            if (!candidate.confirmedEnd) throw new Error('推荐药品列表未确认到底')
+            if (!candidate.continuityVerified) throw new Error('推荐药品拼接连续性未通过校验')
+            products = candidate
+          } catch (error) {
+            lastError = error
+            if (attempt < 1) {
+              log(`capture: 推荐药品采集未完成，恢复正文锚点后重试（2/2）：${error.message}`)
+              const retryAnchor = await waitForStableReplyRegion(bounds, 3_000)
+              if (!retryAnchor.stable || !(await imagesSimilar(anchorFrame, retryAnchor.frame, 3))) {
+                throw new Error(`推荐药品采集重试前无法恢复正文位置：${error.message}`)
+              }
+            }
+          }
+        }
+        if (!products) throw new Error(`推荐药品为必采内容，但两次采集均未完成：${lastError?.message || '未知错误'}`)
+        let restored = await waitForStableReplyRegion(bounds, 3_000)
+        productRestoreVerified = restored.stable && await imagesSimilar(anchorFrame, restored.frame, 3)
+        if (!productRestoreVerified) {
+          restored = await waitForStableReplyRegion(bounds, 3_000)
+          productRestoreVerified = restored.stable && await imagesSimilar(anchorFrame, restored.frame, 3)
+        }
+        if (!productRestoreVerified) throw new Error('推荐药品截图完成，但关闭抽屉后无法恢复正文滚动位置')
+        log('capture: 推荐药品已在回答滚动过程中完成采集，正文位置恢复校验通过')
+        return restored
+      } finally {
+        productCaptureMs += Date.now() - started
+      }
     }
     let capture = initialCapture
     let frame = capture.frame
     for (let page = 0; page < maxPages; page += 1) {
-      const xml = capture.xml || await source()
-      observeAuxiliaryCards(xml)
+      let xml = capture.xml || await source()
       if (!frames.length || !(await imagesSimilar(frames.at(-1), frame, 3))) { frames.push(frame); log(`capture: page ${frames.length}`) }
+      const restored = await captureProductsIfVisible(xml, frame)
+      if (restored) {
+        capture = restored
+        frame = restored.frame
+        xml = restored.xml || xml
+      }
       if (replyTailOnScreen(xml, bounds) && !hierarchyIsLoading(xml)) { log('capture: reached on-screen reply tail'); break }
       const before = frame
-      const scroll = await swipeChat(bounds, 'down', scrollFraction)
+      const scroll = await swipeChat(bounds, 'down', scrollFraction, { eventDrivenSettle: true })
       const shift = scroll.distance
-      let afterCapture = await waitForStableReplyRegion(bounds)
+      let afterCapture = await waitForStableReplyRegion(bounds, 8_000, { settleSince: scroll.activityMark })
       let after = afterCapture.frame
       if (await imagesSimilar(before, after, 3)) {
         noProgress += 1
@@ -697,7 +821,6 @@ function createRunner(options) {
         }
       } else {
         let afterXml = afterCapture.xml || await source()
-        observeAuxiliaryCards(afterXml)
         const frameHeight = (await imageInfo(before)).height
         let measuredShift = estimateVerticalScrollShift(xml, afterXml, bounds)
         let reliableMeasuredShift = measuredShift !== null && measuredShift <= shift * 1.35 ? measuredShift : null
@@ -712,7 +835,6 @@ function createRunner(options) {
           afterCapture = await waitForStableReplyRegion(bounds, 3_000)
           after = afterCapture.frame
           afterXml = afterCapture.xml || await source()
-          observeAuxiliaryCards(afterXml)
           measuredShift = estimateVerticalScrollShift(xml, afterXml, bounds)
           reliableMeasuredShift = measuredShift !== null && measuredShift <= shift * 1.35 ? measuredShift : null
           const retryExpectedShift = reliableMeasuredShift ?? shift
@@ -740,10 +862,19 @@ function createRunner(options) {
         } else noProgress += 1
         frame = after
         capture = afterCapture
+        const restored = await captureProductsIfVisible(afterXml, after)
+        if (restored) {
+          afterCapture = restored
+          after = restored.frame
+          afterXml = restored.xml || afterXml
+          frame = after
+          capture = afterCapture
+        }
         if (replyTailOnScreen(afterXml, bounds) && !hierarchyIsLoading(afterXml)) { log('capture: reached on-screen reply tail after swipe'); break }
         if (scroll.canScrollMore === false) { log('capture: reached device-reported scroll boundary'); break }
       }
     }
+    if (!productDetected) log('capture: 回答滚动过程中未发现参考/推荐药品入口，无需完成后重复扫描')
     const result = {
       frames: frames.length ? frames : [await cropImage(await screenshot(), bounds)],
       transitions,
@@ -754,161 +885,238 @@ function createRunner(options) {
       topNavigationMs,
       evidenceEmbedded: evidence.found,
       evidenceExpanded: evidence.expanded,
-      productsSeen,
+      productDetected,
+      products,
+      productRestoreVerified,
+      productCaptureAttempts,
+      productCaptureMs,
     }
     if (fallbackReasons.length) log('capture: 不可靠接缝已局部重采并安全分隔，不再整题回滚重采')
     return result
   }
 
-  async function waitForProductImagesReady(listBounds, timeout = 12_000) {
+  async function captureProductViewport(listBounds, timeout = 4_000, { settleSince = null } = {}) {
     const deadline = Date.now() + timeout
-    let consecutiveReady = 0
-    let best = { ready: false, cards: 0, images: 0, loaded: 0, unloaded: 0 }
-    let activityMark = null
-    await waitForVisualQuiet({ timeout: Math.min(1_200, timeout), fallbackMs: 250 })
+    let latest = null
     while (Date.now() < deadline) {
       checkCancelled()
-      if (activityMark && observer.active) {
+      const remaining = Math.max(250, deadline - Date.now())
+      let capture
+      if (observer.active) {
         try {
-          const remaining = Math.max(100, deadline - Date.now())
-          const activity = await observer.waitForActivity({ timeout: Math.min(600, remaining), since: activityMark })
-          if (activity.activity) {
-            await observer.waitForQuiet({
-              timeout: Math.min(1_200, Math.max(100, deadline - Date.now())),
-              windowMs: 400,
-              quietMs: 250,
-              maxFrames: 1,
-              minWaitMs: 120,
-            })
-          }
+          capture = await captureStableObserved({
+            observer,
+            capture: async () => cropImage(await screenshot(), listBounds),
+            hierarchy: source,
+            hierarchyLoading: () => false,
+            settleSince,
+          }, Math.min(2_500, remaining))
+        } catch (error) {
+          if (await recoverObserver(error)) continue
+        }
+      }
+      if (!capture?.stable) {
+        capture = await captureStableSandwich({
+          capture: async () => cropImage(await screenshot(), listBounds),
+          hierarchy: source,
+          framesStable: imageRegionsStable,
+          hierarchyLoading: () => false,
+          interval: 80,
+        }, remaining)
+      }
+      const readiness = await referenceProductViewportReadiness(capture.frame, capture.xml, listBounds)
+      latest = { ...capture, readiness }
+      if (capture.stable && readiness.ready) {
+        if (!observer.active) return latest
+        const confirmMark = observer.mark()
+        try {
+          const confirmed = await observer.waitForQuiet({
+            timeout: Math.min(1_200, Math.max(650, deadline - Date.now())),
+            windowMs: 750,
+            quietMs: 650,
+            maxFrames: 1,
+            minWaitMs: 650,
+          })
+          const currentMark = observer.mark()
+          const activityFrames = (currentMark.activityFrameCount ?? currentMark.frameCount)
+            - (confirmMark.activityFrameCount ?? confirmMark.frameCount)
+          // Reuse the lossless PNG when the extra observation window remains
+          // quiet.  If lazy artwork or scroll rebound appears, loop once more
+          // and replace it instead of stitching two different render states.
+          if (confirmed.quiet && activityFrames === 0) return latest
         } catch (error) {
           await recoverObserver(error)
         }
       }
-      const xml = await source()
-      const cards = visibleLabelBoundsList(xml, '查看说明书').filter(bounds => boundsIntersect(bounds, listBounds))
-      const imageBounds = boundsListForNodeAttribute(xml, 'class', 'android.widget.ImageView').filter(bounds => {
-        const width = bounds[2] - bounds[0]
-        const height = bounds[3] - bounds[1]
-        return boundsIntersect(bounds, listBounds) && width >= 60 && height >= 45
-      })
-      const screen = await screenshot()
-      const loadedFlags = await Promise.all(imageBounds.map(async bounds => imageLooksLoaded(await cropImage(screen, bounds))))
-      const loaded = loadedFlags.filter(Boolean).length
-      const expected = Math.max(1, cards.length)
-      const ready = imageBounds.length >= expected && loaded === imageBounds.length
-      best = { ready, cards: cards.length, images: imageBounds.length, loaded, unloaded: Math.max(expected - loaded, imageBounds.length - loaded, 0) }
-      consecutiveReady = ready ? consecutiveReady + 1 : 0
-      if (consecutiveReady >= 2) return best
-      activityMark = observer.active ? observer.mark() : null
-      if (!observer.active) await sleep(600)
+      settleSince = observer.active ? observer.mark() : null
+      await waitForVisualQuiet({ timeout: Math.min(700, Math.max(100, deadline - Date.now())), fallbackMs: 180 })
     }
-    return best
+    return latest
   }
 
-  async function captureScrollingRegion(bounds, maxPages = 12) {
+  async function captureScrollingRegion(bounds, initialCapture = null) {
     const readiness = []
-    readiness.push(await waitForProductImagesReady(bounds))
-    const frames = [await waitForRegionPixelsStable(bounds, 2_000)]
-    let stalled = 0
+    const initial = initialCapture || await captureProductViewport(bounds)
+    if (!initial) throw new Error('推荐药品首屏未能完成稳定截图')
+    readiness.push(initial.readiness)
+    const frames = [initial.frame]
     let confirmedEnd = false
-    let continuityVerified = true
-    const overlaps = []
+    const transitions = []
+    let unchangedCount = 0
+    let seamRecaptures = 0
+    let fullRangeSearches = 0
     const [left, top, right, bottom] = bounds
-    const x = left + (right - left) * 0.32
+    // The sheet is expanded before this function starts, so a gesture inside
+    // the card area now belongs to the vertical RecyclerView rather than the
+    // bottom-sheet drag handle.
     const height = bottom - top
-    while (frames.length < maxPages) {
-      await swipe(x, top + height * 0.75, top + height * 0.25, 800)
-      readiness.push(await waitForProductImagesReady(bounds))
-      const frame = await waitForRegionPixelsStable(bounds, 2_000)
+    // The product count is not bounded. Completion is defined only by the
+    // RecyclerView producing the same settled viewport after repeated swipe
+    // attempts; cancellation remains available to stop a genuinely stuck UI.
+    while (!confirmedEnd) {
+      const activityMark = observer.active ? observer.mark() : null
+      const swipeFractions = [0.32, 0.5, 0.68]
+      const x = left + (right - left) * swipeFractions[Math.min(unchangedCount, swipeFractions.length - 1)]
+      await swipe(x, top + height * 0.82, top + height * 0.18, unchangedCount ? 800 : 520)
+      let capture = await captureProductViewport(bounds, 4_000, { settleSince: activityMark })
+      if (!capture) throw new Error('推荐药品滚动后未能完成稳定截图')
+      readiness.push(capture.readiness)
+      let frame = capture.frame
       if (await imagesSimilar(frames.at(-1), frame, 3)) {
-        stalled += 1
-        if (stalled >= 2) { confirmedEnd = true; break }
-      } else {
-        stalled = 0
-        if (continuityVerified) {
-          try { overlaps.push(await verifyFrameOverlap(frames.at(-1), frame, Math.max(12, Math.floor(height / 2)))) }
-          catch { continuityVerified = false }
+        unchangedCount += 1
+        const requiredUnchanged = frames.length === 1 ? 3 : 2
+        if (unchangedCount >= requiredUnchanged) {
+          confirmedEnd = true
+          break
         }
+        continue
+      } else {
+        unchangedCount = 0
+        const previous = frames.at(-1)
+        const expectedOverlap = Math.max(12, Math.floor(height * 0.28))
+        let overlap = null
+        let transition = null
+        let firstError = null
+        try {
+          overlap = await verifyFrameOverlap(previous, frame, expectedOverlap)
+        } catch (error) {
+          firstError = error
+          try { overlap = await verifyProductGridOverlap(previous, frame, expectedOverlap) } catch {
+            fullRangeSearches += 1
+            try { overlap = await verifyProductGridOverlap(previous, frame, null) } catch {}
+          }
+        }
+        if (overlap === null) {
+          seamRecaptures += 1
+          capture = await captureProductViewport(bounds, 3_000)
+          if (!capture) throw firstError
+          readiness[readiness.length - 1] = capture.readiness
+          frame = capture.frame
+          try {
+            overlap = await verifyFrameOverlap(previous, frame, expectedOverlap)
+          } catch (error) {
+            try { overlap = await verifyProductGridOverlap(previous, frame, expectedOverlap) } catch {
+              fullRangeSearches += 1
+              try { overlap = await verifyProductGridOverlap(previous, frame, null) } catch (retryError) {
+                const fallbackOverlap = calibratedProductFallbackOverlap(transitions.filter(item => item.verified).map(item => item.overlap))
+                if (fallbackOverlap === null) {
+                  throw new Error(`推荐药品第 ${frames.length + 1} 屏接缝重采后仍无法验证，已拒绝生成带灰线和重复商品的长图：${retryError.message || error.message}`)
+                }
+                transition = { verified: false, calibrated: true, fallbackOverlap, reason: retryError.message || error.message }
+                log(`capture: 推荐药品第 ${frames.length + 1} 屏含局部动态内容，按前序一致位移保守拼接（重叠 ${fallbackOverlap}px，无灰线）`)
+              }
+            }
+          }
+        }
+        transitions.push(transition || { verified: true, overlap })
         frames.push(frame)
       }
     }
-    return { frames, overlaps, readiness, confirmedEnd, continuityVerified }
+    const calibratedSeams = transitions.filter(item => item.calibrated).length
+    const continuityVerified = transitions.length === Math.max(0, frames.length - 1)
+      && transitions.every(item => item.verified || item.calibrated)
+    return { frames, transitions, readiness, confirmedEnd, continuityVerified, calibratedSeams, seamRecaptures, fullRangeSearches }
   }
 
   async function closeReferenceProductsDrawer() {
     for (let attempt = 0; attempt < 3; attempt += 1) {
-      const sheet = boundsForNodeAttribute(await source(), 'resource-id', `${DEFAULT_PACKAGE}:id/bullet_container`)
-      if (!sheet) return
+      const xml = await source()
+      const sheet = boundsForNodeAttribute(xml, 'resource-id', `${DEFAULT_PACKAGE}:id/bullet_container`)
+      if (!sheet) return true
+      const list = boundsForNodeAttribute(xml, 'class', 'androidx.recyclerview.widget.RecyclerView')
       const [left, top, right, bottom] = sheet
-      await tap(right - Math.max(24, Math.floor((right - left) / 16)), top + Math.max(24, Math.floor((bottom - top) / 10)))
+      const closeY = list ? Math.floor((top + list[1]) / 2) : top + Math.max(24, Math.floor((bottom - top) / 10))
+      await tap(right - Math.max(24, Math.floor((right - left) / 16)), closeY)
       await waitForVisualQuiet({ timeout: 900, fallbackMs: 600 })
-      if (!boundsForNodeAttribute(await source(), 'resource-id', `${DEFAULT_PACKAGE}:id/bullet_container`)) return
+      if (!boundsForNodeAttribute(await source(), 'resource-id', `${DEFAULT_PACKAGE}:id/bullet_container`)) return true
       await ui.press('back')
       await waitForVisualQuiet({ timeout: 900, fallbackMs: 600 })
     }
+    return !boundsForNodeAttribute(await source(), 'resource-id', `${DEFAULT_PACKAGE}:id/bullet_container`)
   }
 
-  async function captureReferenceProducts(question, { seenDuringReply = true } = {}) {
-    if (!seenDuringReply) { log('capture: 回答滚动过程中未发现参考/推荐药品卡片，跳过重复扫描'); return null }
-    const size = await windowSize()
-    const chatBounds = findChatScrollBounds(await source(), size)
-    validateCaptureViewport(size, chatBounds)
-    const productLabels = ['参考药品', '推荐药品']
-    const findTrigger = async () => {
-      const xml = await source()
-      // Compose renders the section label off the accessibility tree, so detect
-      // the card carousel structurally first and fall back to text if present.
-      const section = referenceProductsSection(xml)
-      if (section) return section.tap
-      for (const label of productLabels) {
-        const bounds = visibleLabelBounds(xml, label)
-        if (bounds) return [chatBounds[2] - Math.max(20, Math.floor((chatBounds[2] - chatBounds[0]) / 15)), boundsCenterY(bounds)]
-      }
-      return null
-    }
-    let trigger = await findTrigger()
-    if (!trigger && !(await scrollQuestionIntoView(question, chatBounds))) return null
-    let noProgress = 0
-    let previous = await cropImage(await screenshot(), chatBounds)
-    for (let index = 0; index < 12 && !trigger; index += 1) {
-      trigger = await findTrigger()
-      if (trigger) break
-      await swipeChat(chatBounds, 'down')
-      const next = await cropImage(await screenshot(), chatBounds)
-      noProgress = (await imagesSimilar(previous, next, 3)) ? noProgress + 1 : 0
-      if (noProgress >= 3) break
-      previous = next
-    }
-    if (!trigger) { log('capture: 本回答未出现参考/推荐药品卡片'); return null }
-    log('capture: 已发现推荐药品入口，正在展开并截图')
+  async function captureReferenceProductsAtTrigger(trigger, { restoreDrawer = true } = {}) {
+    log('capture: 回答滚动中发现推荐药品入口，正在从首项开始采集完整列表')
     await tap(trigger[0], trigger[1])
     await waitForVisualQuiet({ timeout: 1_200, fallbackMs: 800 })
+    let result = null
     try {
-      const xml = await source()
-      const list = boundsForNodeAttribute(xml, 'class', 'androidx.recyclerview.widget.RecyclerView')
-      const sheet = boundsForNodeAttribute(xml, 'resource-id', `${DEFAULT_PACKAGE}:id/bullet_container`)
-      if (!list || !sheet || list[3] - list[1] < 100) {
-        log('capture: 推荐药品入口已点击，但未识别到药品列表抽屉')
-        return null
+      const deadline = Date.now() + 3_500
+      let list = null
+      let sheet = null
+      while (Date.now() < deadline && (!list || !sheet)) {
+        const xml = await source()
+        list = boundsForNodeAttribute(xml, 'class', 'androidx.recyclerview.widget.RecyclerView')
+        sheet = boundsForNodeAttribute(xml, 'resource-id', `${DEFAULT_PACKAGE}:id/bullet_container`)
+        if (!list || !sheet) await sleep(100)
       }
-      const header = await cropImage(await screenshot(), [sheet[0], sheet[1], sheet[2], list[1]])
-      const capture = await captureScrollingRegion(list)
-      const headerSize = await imageInfo(header)
+      if (!list || !sheet || list[3] - list[1] < 100) {
+        throw new Error('推荐药品入口已点击，但未识别到药品列表抽屉')
+      }
+      for (let attempt = 0; attempt < 3 && list[1] > list[3] * 0.2; attempt += 1) {
+        const [left, top, right, bottom] = list
+        const height = bottom - top
+        const previousTop = top
+        // Drag the sheet header/handle, not RecyclerView content. A gesture in
+        // the product grid can scroll to a middle card before the first frame
+        // and was the source of the missing/duplicated opening products.
+        const headerHeight = Math.max(60, top - sheet[1])
+        const fromY = top - Math.min(headerHeight * 0.35, 70)
+        const toY = Math.max(140, top - Math.max(700, height * 0.65))
+        await swipe(left + (right - left) * 0.5, fromY, toY, 350)
+        const expandDeadline = Date.now() + 2_500
+        while (Date.now() < expandDeadline) {
+          await sleep(100)
+          const expandedXml = await source()
+          const expandedList = boundsForNodeAttribute(expandedXml, 'class', 'androidx.recyclerview.widget.RecyclerView')
+          const expandedSheet = boundsForNodeAttribute(expandedXml, 'resource-id', `${DEFAULT_PACKAGE}:id/bullet_container`)
+          if (expandedList && expandedSheet && expandedList[1] < previousTop - 40) {
+            list = expandedList
+            sheet = expandedSheet
+            break
+          }
+        }
+        if (list[1] >= previousTop - 40) await waitForVisualQuiet({ timeout: 700, fallbackMs: 250 })
+      }
+      if (list[1] > list[3] * 0.2) throw new Error(`推荐药品抽屉未完全展开（列表顶部=${list[1]}），为避免从中间药品开始已停止采集`)
+      await waitForVisualQuiet({ timeout: 900, fallbackMs: 250 })
+      log(`capture: 推荐药品抽屉已先展开，列表视口=${list[3] - list[1]}px`)
+      const expandedInitial = await captureProductViewport(list)
+      if (!expandedInitial) throw new Error('推荐药品展开后首屏未能完成稳定截图')
+      const capture = await captureScrollingRegion(list, expandedInitial)
       const chunks = await composeLongImages(capture.frames, {
-        overlaps: capture.overlaps,
-        continuityVerified: capture.continuityVerified,
-        maxHeight: Math.max(1_000, maxLongImageHeight(payloadMaxLongImageHeight) - headerSize.height),
+        transitions: capture.transitions,
+        maxHeight: maxLongImageHeight(payloadMaxLongImageHeight),
+        separatorHeight: 0,
       })
-      const firstSize = await imageInfo(chunks[0])
-      const sharp = require('sharp')
-      chunks[0] = await sharp({ create: { width: Math.max(headerSize.width, firstSize.width), height: headerSize.height + firstSize.height, channels: 3, background: '#000' } })
-        .composite([{ input: header, left: 0, top: 0 }, { input: chunks[0], left: 0, top: headerSize.height }]).png().toBuffer()
       const unloaded = capture.readiness.reduce((sum, item) => sum + item.unloaded, 0)
       const imagesReady = capture.readiness.every(item => item.ready)
       log(`capture: 推荐药品截图完成，共 ${capture.frames.length} 屏，图片${imagesReady ? '已全部加载' : `仍有 ${unloaded} 处未确认加载`}`)
-      return { images: chunks, pages: capture.frames.length, imagesReady, unloaded, confirmedEnd: capture.confirmedEnd, continuityVerified: capture.continuityVerified }
-    } finally { await closeReferenceProductsDrawer() }
+      result = { images: chunks, pages: capture.frames.length, firstViewportIncluded: true, firstViewportStandalone: false, imagesReady, unloaded, confirmedEnd: capture.confirmedEnd, continuityVerified: capture.continuityVerified, calibratedSeams: capture.calibratedSeams, seamRecaptures: capture.seamRecaptures, fullRangeSearches: capture.fullRangeSearches, readinessModes: [...new Set(capture.readiness.map(item => item.mode))] }
+    } finally {
+      if (restoreDrawer && !(await closeReferenceProductsDrawer())) throw new Error('推荐药品截图完成后无法关闭药品列表抽屉')
+    }
+    return result
   }
 
   let payloadMaxLongImageHeight = DEFAULT_MAX_LONG_IMAGE_HEIGHT
@@ -922,7 +1130,10 @@ function createRunner(options) {
     if (stitch) {
       const replyCaptureStarted = Date.now()
       const capture = await captureFullReplyFrames(question)
-      const { frames, transitions, bounds, recaptureCount, fullRetryCount, fallbackReasons, topNavigationMs, evidenceEmbedded, evidenceExpanded, productsSeen } = capture
+      const { frames, transitions, bounds, recaptureCount, fullRetryCount, fallbackReasons, topNavigationMs, evidenceEmbedded, evidenceExpanded, productDetected, products, productRestoreVerified, productCaptureAttempts, productCaptureMs } = capture
+      if (!referenceProductsCaptureComplete({ detected: productDetected, products, restoreVerified: productRestoreVerified })) {
+        throw new Error('检测到推荐药品入口，但药品截图或正文位置恢复未完整完成')
+      }
       const seamsTotal = Math.max(0, frames.length - 1)
       const seamsVerified = transitions.filter(transition => transition.verified).length
       const continuityVerified = transitions.length === seamsTotal && seamsVerified === seamsTotal
@@ -947,13 +1158,17 @@ function createRunner(options) {
         reply_evidence_embedded: evidenceEmbedded,
         reply_evidence_expanded: evidenceExpanded,
         reply_capture_ms: replyCaptureMs,
+        reference_products_detected: productDetected,
+        reference_products_capture_required: productDetected,
+        reference_products_inline_capture: Boolean(products),
+        reference_products_restore_verified: Boolean(productRestoreVerified),
+        reference_products_retry_count: Math.max(0, productCaptureAttempts - (productDetected ? 1 : 0)),
+        reference_products_post_scan_swipes: 0,
+        reference_products_capture_ms: productCaptureMs,
         ...(fallbackReasons.length ? { reply_fallback_reason: fallbackReasons.join('；') } : {}),
         long_image_max_height: payloadMaxLongImageHeight,
       }
       log(`capture: 回答截图完成，帧=${frames.length}，精确接缝=${seamsVerified}/${seamsTotal}，安全重复接缝=${seamsTotal - seamsVerified}，重采=${recaptureCount}，模式=${resultMeta.reply_capture_mode}，耗时=${replyCaptureMs}ms`)
-      // Evidence is already expanded into the first reply frame. Only the
-      // interactive reference-products drawer still needs a separate capture.
-      const products = await captureReferenceProducts(question, { seenDuringReply: productsSeen })
       if (products) {
         const paths = []
         for (const [index, image] of products.images.entries()) { const file = path.join(outDir, `${stem}_参考药品_${String(index + 1).padStart(3, '0')}.png`); await fs.writeFile(file, image); paths.push(file) }
@@ -961,12 +1176,15 @@ function createRunner(options) {
           reference_products_screenshot: paths[0],
           reference_products_parts: paths,
           reference_products_pages: products.pages,
-          reference_products_capture_mode: products.continuityVerified ? 'verified_overlap_stitch' : 'separate_viewports',
+          reference_products_capture_mode: products.firstViewportStandalone ? 'standalone_first_viewport_then_verified_overlap_stitch' : (products.continuityVerified ? 'verified_overlap_stitch' : 'separate_viewports'),
           reference_products_continuity_verified: products.continuityVerified,
+          reference_products_first_viewport_standalone: products.firstViewportStandalone,
           reference_products_images_ready: products.imagesReady,
           reference_products_unloaded_images: products.unloaded,
           reference_products_confirmed_end: products.confirmedEnd,
-          reference_products_capture_complete: products.imagesReady && products.confirmedEnd,
+          reference_products_first_viewport_included: products.firstViewportIncluded,
+          reference_products_capture_complete: products.firstViewportIncluded && products.imagesReady && products.confirmedEnd && products.continuityVerified && productRestoreVerified,
+          reference_products_calibrated_seams: products.calibratedSeams,
         })
       }
     } else await fs.writeFile(screenshotPath, await screenshot())
@@ -1022,6 +1240,86 @@ function createRunner(options) {
   }
 
   return {
+    async captureCurrentAnswer(payload) {
+      activeSerial = payload.serial
+      payloadMaxLongImageHeight = maxLongImageHeight(payload.maxLongImageHeight)
+      const outputRoot = path.resolve(payload.outputDir)
+      const batchDirectory = await createBatchDirectory(outputRoot)
+      try {
+        await waitForAdbDevice(options.adbPath, payload.serial)
+        await ui.start(payload.serial)
+        try {
+          await observer.start(payload.serial)
+        } catch (error) {
+          await disableObserver(error)
+        }
+        await waitForVisualQuiet({ timeout: 1_200, fallbackMs: 600 })
+        const observerBaseline = typeof observer.snapshot === 'function' ? observer.snapshot() : {}
+        const recoveryBaseline = recoverySnapshot()
+        let xml = await source()
+        const alreadyOpen = Boolean(boundsForNodeAttribute(xml, 'resource-id', `${DEFAULT_PACKAGE}:id/bullet_container`))
+        if (alreadyOpen) throw new Error('当前药品抽屉已经打开，无法证明仍位于第一项；为避免漏药，本次未继续操作，也未输入或发送新问题。')
+        const size = await windowSize()
+        const chatBounds = findChatScrollBounds(xml, size)
+        validateCaptureViewport(size, chatBounds)
+        let question = currentQuestionText(xml, chatBounds)
+        let unchangedAtTop = 0
+        let locateFrame = question ? null : await cropImage(await screenshot(), chatBounds)
+        while (!question && unchangedAtTop < 2) {
+          const scroll = await swipeChat(chatBounds, 'up', 0.45, { speed: 2_600, settle: 100, eventDrivenSettle: true })
+          const settled = await waitForStableReplyRegion(chatBounds, 3_000, { settleSince: scroll.activityMark })
+          xml = settled.xml || await source()
+          question = currentQuestionText(xml, chatBounds)
+          unchangedAtTop = await imagesSimilar(locateFrame, settled.frame, 3) ? unchangedAtTop + 1 : 0
+          locateFrame = settled.frame
+        }
+        if (!question) {
+          await waitForVisualQuiet({ timeout: 900, fallbackMs: 300 })
+          xml = await source()
+          question = currentQuestionText(xml, chatBounds)
+        }
+        if (!question) throw new Error('无法从当前已有回答向上定位对应问题；本次未输入、未发送，也未新建会话。')
+        log(`capture: 已识别当前已有问题“${question}”，开始执行正文、引用资料和完整参考药品归档；不会输入或发送内容`)
+        const directory = questionArtifactDirectory(batchDirectory, 1, question)
+        return await saveArtifacts({
+          outDir: directory,
+          stem: '回答',
+          question,
+          status: 'existing_reply',
+          xml,
+          meta: {
+          serial: payload.serial,
+            batch_id: path.basename(batchDirectory),
+            question_index: 1,
+            question_directory: directory,
+            existing_reply_capture: true,
+            input_performed: false,
+            send_performed: false,
+            new_session_performed: false,
+            ui_backend: 'python_uiautomator2_strict',
+            ui_fallback_enabled: false,
+          },
+          observerBaseline,
+          recoveryBaseline,
+        })
+      } catch (error) {
+        await fs.writeFile(path.join(batchDirectory, 'automation-failure.json'), JSON.stringify({
+          created_at: new Date().toISOString(),
+          serial: payload.serial,
+          mode: 'capture_current_existing_reply',
+          input_performed: false,
+          send_performed: false,
+          new_session_performed: false,
+          error_name: error?.name || 'Error',
+          error_message: error?.message || String(error),
+          stack: error?.stack || null,
+        }, null, 2), 'utf8').catch(() => {})
+        throw error
+      } finally {
+        await observer.stop().catch(() => {})
+        await ui.stop().catch(() => {})
+      }
+    },
     async run(payload) {
       activeSerial = payload.serial
       payloadMaxLongImageHeight = maxLongImageHeight(payload.maxLongImageHeight)
@@ -1078,6 +1376,10 @@ module.exports = {
   chatSwipePlan,
   hierarchyBelongsToPackage,
   scrollEndConfirmed,
+  referenceProductsTrigger,
+  referenceProductsCaptureComplete,
+  calibratedProductFallbackOverlap,
+  referenceProductViewportReadiness,
   prepareEmbeddedEvidence,
   fillQuestionInput,
   captureStableSandwich,

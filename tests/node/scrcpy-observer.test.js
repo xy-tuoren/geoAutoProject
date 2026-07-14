@@ -162,3 +162,126 @@ test('活动等待超时会返回可观测结果', async () => {
   assert.equal(result.waitedMs, 120)
   assert.equal(observer.snapshot().activity_timeouts, 1)
 })
+
+test('滑动静止检测按最后活动帧快速返回', async () => {
+  let now = 1_000
+  const observer = new ScrcpyObserver({
+    now: () => now,
+    delay: async milliseconds => {
+      now += milliseconds
+      if ([1_050, 1_100, 1_150].includes(now)) {
+        observer.activityFrameCount += 1
+        observer.frames.push({ at: now, size: 2_000, keyFrame: false, activity: true })
+      }
+    },
+  })
+  observer.socket = { destroyed: false }
+  observer.session = { codec: 'h264', width: 160, height: 360 }
+  const since = observer.mark()
+
+  const result = await observer.waitForSettleSince(since, {
+    activityTimeout: 200,
+    quietMs: 140,
+    fastTimeout: 900,
+    hardTimeout: 2_500,
+  })
+
+  assert.equal(result.settled, true)
+  assert.equal(result.activity, true)
+  assert.equal(result.conservative, false)
+  assert.equal(result.lastActivityAt, 1_150)
+  assert.equal(result.waitedMs, 300)
+})
+
+test('长动画超过快速窗口后使用保守静止阈值', async () => {
+  let now = 0
+  const observer = new ScrcpyObserver({
+    now: () => now,
+    delay: async milliseconds => {
+      now += milliseconds
+      if (now <= 1_000) {
+        observer.activityFrameCount += 1
+        observer.frames.push({ at: now, size: 2_000, keyFrame: false, activity: true })
+      }
+    },
+  })
+  observer.socket = { destroyed: false }
+  observer.session = { codec: 'h264', width: 160, height: 360 }
+  const since = observer.mark()
+
+  const result = await observer.waitForSettleSince(since, {
+    activityTimeout: 200,
+    quietMs: 140,
+    conservativeQuietMs: 250,
+    fastTimeout: 900,
+    hardTimeout: 2_500,
+  })
+
+  assert.equal(result.settled, true)
+  assert.equal(result.conservative, true)
+  assert.equal(result.lastActivityAt, 1_000)
+  assert.equal(result.waitedMs, 1_250)
+})
+
+test('快速窗口从静止等待开始计算而不是从滑动命令开始', async () => {
+  let now = 1_500
+  const observer = new ScrcpyObserver({
+    now: () => now,
+    delay: async milliseconds => { now += milliseconds },
+  })
+  observer.socket = { destroyed: false }
+  observer.session = { codec: 'h264', width: 160, height: 360 }
+  observer.activityFrameCount = 1
+  observer.frames = [{ at: 1_400, size: 2_000, keyFrame: false, activity: true }]
+
+  const result = await observer.waitForSettleSince({ at: 0, frameCount: 0, activityFrameCount: 0 }, {
+    quietMs: 140,
+    conservativeQuietMs: 250,
+    fastTimeout: 900,
+  })
+
+  assert.equal(result.settled, true)
+  assert.equal(result.conservative, false)
+  assert.equal(result.waitedMs, 50)
+})
+
+test('滑动没有产生画面活动时短等待后返回', async () => {
+  let now = 0
+  const observer = new ScrcpyObserver({
+    now: () => now,
+    delay: async milliseconds => { now += milliseconds },
+  })
+  observer.socket = { destroyed: false }
+  observer.session = { codec: 'h264', width: 160, height: 360 }
+
+  const result = await observer.waitForSettleSince(observer.mark(), { activityTimeout: 200 })
+
+  assert.equal(result.settled, true)
+  assert.equal(result.activity, false)
+  assert.equal(result.waitedMs, 200)
+  assert.equal(observer.snapshot().settle_no_activity, 1)
+})
+
+test('持续活动超过硬上限时返回静止超时', async () => {
+  let now = 0
+  const observer = new ScrcpyObserver({
+    now: () => now,
+    delay: async milliseconds => {
+      now += milliseconds
+      observer.activityFrameCount += 1
+      observer.frames.push({ at: now, size: 2_000, keyFrame: false, activity: true })
+    },
+  })
+  observer.socket = { destroyed: false }
+  observer.session = { codec: 'h264', width: 160, height: 360 }
+
+  const result = await observer.waitForSettleSince(observer.mark(), {
+    activityTimeout: 100,
+    fastTimeout: 200,
+    hardTimeout: 500,
+  })
+
+  assert.equal(result.settled, false)
+  assert.equal(result.waitedMs, 500)
+  assert.equal(observer.snapshot().settle_timeouts, 1)
+})

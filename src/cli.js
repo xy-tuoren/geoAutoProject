@@ -5,6 +5,7 @@ const { bundledAdbPath, projectRoot } = require('./runtime-paths')
 
 function usage() {
   console.log('用法：npm run run:android -- --serial <设备序列号> --output-dir <目录> [--timeout <秒>] [--max-long-image-height <像素>] [--new-session] <问题>')
+  console.log('      npm run run:android -- --serial <设备序列号> --output-dir <目录> --capture-current-answer')
 }
 
 function parseArguments(argv) {
@@ -16,6 +17,7 @@ function parseArguments(argv) {
     else if (value === '--timeout') options.timeout = Number(argv[++index])
     else if (value === '--max-long-image-height') options.maxLongImageHeight = Number(argv[++index])
     else if (value === '--new-session') options.newSession = true
+    else if (value === '--capture-current-answer' || value === '--capture-current-reference-products') options.captureCurrentAnswer = true
     else if (value === '--help' || value === '-h') options.help = true
     else options.questions.push(value)
   }
@@ -24,7 +26,7 @@ function parseArguments(argv) {
 
 async function main() {
   const payload = parseArguments(process.argv.slice(2))
-  if (payload.help || !payload.serial || !payload.outputDir || !payload.questions.length || !Number.isFinite(payload.timeout) || payload.timeout <= 0) {
+  if (payload.help || !payload.serial || !payload.outputDir || (!payload.captureCurrentAnswer && !payload.questions.length) || !Number.isFinite(payload.timeout) || payload.timeout <= 0) {
     usage()
     process.exitCode = payload.help ? 0 : 2
     return
@@ -37,7 +39,8 @@ async function main() {
     adbPath: adb,
     log: text => process.stdout.write(text),
   })
-  await runner.run(payload)
+  if (payload.captureCurrentAnswer) console.log(JSON.stringify(await runner.captureCurrentAnswer(payload)))
+  else await runner.run(payload)
 }
 
 main().catch(error => {

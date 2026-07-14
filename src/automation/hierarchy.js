@@ -155,6 +155,48 @@ function questionVisible(xml, question, chatBounds) {
   })
 }
 
+// Locate the latest visible user bubble without reading from or focusing the
+// composer.  A user message is rendered as a right-inset bubble inside a
+// substantially wider chat row; assistant paragraphs use the full-width left
+// column and therefore do not have this nested geometry.
+function currentQuestionText(xml, chatBounds) {
+  const chatWidth = chatBounds[2] - chatBounds[0]
+  const candidates = []
+  const visit = (node, ancestors) => {
+    const text = nodeAttr(node.attrs, 'text')
+    const description = nodeAttr(node.attrs, 'content-desc')
+    const label = text || description
+    const rawBounds = nodeAttr(node.attrs, 'bounds')
+    if (label && rawBounds && nodeIsVisible(node.attrs) && nodeAttr(node.attrs, 'class') === 'android.widget.TextView'
+      && description === label
+      && !/^\d{1,2}:\d{2}$/.test(label) && !/^\d+[.)、]?$/.test(label)) {
+      const bounds = parseBounds(rawBounds)
+      const parent = ancestors.at(-1)
+      const parentRaw = parent && nodeAttr(parent.attrs, 'bounds')
+      const parentBounds = parentRaw ? parseBounds(parentRaw) : null
+      // In the chat Compose tree the message row is the direct parent of the
+      // bubble container. Product badges can have the same right-inset shape,
+      // but only inside several additional card/carousel ancestors.
+      const row = ancestors.at(-2)
+      const rowBounds = row ? parseBounds(nodeAttr(row.attrs, 'bounds')) : null
+      if (parentBounds && rowBounds && boundsIntersect(bounds, chatBounds)
+        && rowBounds[2] - rowBounds[0] >= chatWidth * 0.72
+        && rowBounds[0] <= bounds[0] && rowBounds[2] >= bounds[2]
+        && parentBounds[0] >= rowBounds[0] + chatWidth * 0.18
+        && parentBounds[2] <= rowBounds[2] - chatWidth * 0.02
+        && parentBounds[2] - parentBounds[0] <= (rowBounds[2] - rowBounds[0]) * 0.86
+        && Math.abs(parentBounds[0] - bounds[0]) <= chatWidth * 0.04
+        && Math.abs(parentBounds[2] - bounds[2]) <= chatWidth * 0.04) {
+        candidates.push({ label, bottom: bounds[3] })
+      }
+    }
+    for (const child of node.children) visit(child, [...ancestors, node])
+  }
+  visit(parseNodeTree(xml), [])
+  candidates.sort((a, b) => b.bottom - a.bottom)
+  return candidates[0]?.label || null
+}
+
 function findChatScrollBounds(xml, screenSize) {
   let best = null
   let bestArea = 0
@@ -319,4 +361,49 @@ function referenceProductsSection(xml) {
   return { panel, cardsTop, tap }
 }
 
-module.exports = { LOADING_TEXT_MARKERS, iterNodes, nodeAttr, nodeIsVisible, parseBounds, boundsIntersect, boundsCenterY, estimateVerticalScrollShift, sharedTextSeam, hierarchyIsLoading, visibleNodesWithLabel, replyTailOnScreen, questionVisible, findChatScrollBounds, validateCaptureViewport, floatingScrollControlBounds, replyCaptureBounds, visibleLabelBounds, visibleLabelBoundsList, boundsForNodeAttribute, boundsListForNodeAttribute, evidencePanelBounds, panelIsClipped, evidenceMinimumHeight, parseNodeTree, referenceProductsSection }
+// Some app/device combinations expose product artwork as ImageView nodes,
+// while others expose each Compose product card as an opaque ViewGroup.  In
+// the latter case infer only the artwork portion near the top of a fully sized
+// card; this lets capture readiness remain image-aware without waiting for
+// accessibility labels that will never appear.
+function referenceProductImageBounds(xml, listBounds) {
+  const listWidth = listBounds[2] - listBounds[0]
+  const listHeight = listBounds[3] - listBounds[1]
+  const explicit = boundsListForNodeAttribute(xml, 'class', 'android.widget.ImageView').filter(bounds => {
+    const width = bounds[2] - bounds[0]
+    const height = bounds[3] - bounds[1]
+    return boundsIntersect(bounds, listBounds) && width >= 60 && height >= 45
+  })
+  if (explicit.length) return { mode: 'explicit_images', bounds: explicit }
+
+  const inferred = []
+  const seen = new Set()
+  for (const attrs of iterNodes(xml)) {
+    if (nodeAttr(attrs, 'class') !== 'android.view.ViewGroup') continue
+    const rawBounds = nodeAttr(attrs, 'bounds')
+    if (!rawBounds) continue
+    const card = parseBounds(rawBounds)
+    const width = card[2] - card[0]
+    const height = card[3] - card[1]
+    if (width < listWidth * 0.28 || width > listWidth * 0.5 || height < listHeight * 0.32) continue
+    const marginX = Math.max(8, Math.round(width * 0.06))
+    const artwork = [
+      card[0] + marginX,
+      card[1] + Math.round(height * 0.03),
+      card[2] - marginX,
+      card[1] + Math.round(height * 0.55),
+    ]
+    const visible = [
+      Math.max(listBounds[0], artwork[0]),
+      Math.max(listBounds[1], artwork[1]),
+      Math.min(listBounds[2], artwork[2]),
+      Math.min(listBounds[3], artwork[3]),
+    ]
+    if (visible[2] - visible[0] < 60 || visible[3] - visible[1] < 80) continue
+    const key = visible.join(',')
+    if (!seen.has(key)) { seen.add(key); inferred.push(visible) }
+  }
+  return { mode: inferred.length ? 'inferred_card_artwork' : 'viewport_content', bounds: inferred }
+}
+
+module.exports = { LOADING_TEXT_MARKERS, iterNodes, nodeAttr, nodeIsVisible, parseBounds, boundsIntersect, boundsCenterY, estimateVerticalScrollShift, sharedTextSeam, hierarchyIsLoading, visibleNodesWithLabel, replyTailOnScreen, questionVisible, currentQuestionText, findChatScrollBounds, validateCaptureViewport, floatingScrollControlBounds, replyCaptureBounds, visibleLabelBounds, visibleLabelBoundsList, boundsForNodeAttribute, boundsListForNodeAttribute, evidencePanelBounds, panelIsClipped, evidenceMinimumHeight, parseNodeTree, referenceProductsSection, referenceProductImageBounds }
