@@ -10,7 +10,7 @@ const { stackFramesInGroups, verifyFrameOverlap, verifyProductGridOverlap, image
 const { createBatchDirectory, questionArtifactDirectory, batchArtifactDirectories, entryArtifactDirectories, questionArtifactDirectories } = require('../../src/automation/utils')
 const { EventLog, classifyAutomationLog } = require('../../src/automation/event-log')
 const { loadQuestionFile } = require('../../src/questions')
-const { adbConnectionLost, automationEntries, captureFailureDiagnostics, captureStableObserved, captureStableSandwich, calibratedProductFallbackOverlap, chatSwipePlan, conservativeFallbackOverlap, buildReplyImages, CancelledError, DouyinSearchResultNotFoundError, DOUYIN_MINIAPP_ENTRY_FILENAME, DOUYIN_SEARCH_SUMMARY_FILENAME, TOUTIAO_SEARCH_SUMMARY_FILENAME, douyinGenericAiAnswerBounds, douyinMiniAppCaptureBounds, douyinMiniAppEntryBounds, douyinSearchInput, douyinSearchResultTarget, douyinSearchResultsBounds, douyinViewFullBounds, failedRetryItems, fillQuestionInput, hierarchyBelongsToPackage, historyOnboardingVisible, maxLongImageHeight, miniAppReferenceProductsTrigger, normalizeAutomationEntries, observerRegionFallbackOptions, prepareEmbeddedEvidence, referenceProductDrawerBounds, referenceProductsCaptureComplete, referenceProductSheetExpanded, referenceProductsTrigger, referenceProductViewportReadiness, refreshedReferenceProductsTrigger, requireQuestionLocated, retryAttemptCount, runDouyinSearchResultAttempts, runQuestionsWithRecovery, scrollEndConfirmed, shouldRetryFullReplyCapture, toutiaoHomeSearchBounds, toutiaoOcrViewMoreTarget, toutiaoSearchInput, toutiaoViewMoreBounds, waitForPackageHierarchy } = require('../../src/automation/runner')
+const { adbConnectionLost, automationEntries, captureFailureDiagnostics, captureStableObserved, captureStableSandwich, calibratedProductFallbackOverlap, chatSwipePlan, conservativeFallbackOverlap, buildReplyImages, CancelledError, DouyinSearchResultNotFoundError, DOUYIN_MINIAPP_ENTRY_FILENAME, DOUYIN_SEARCH_SUMMARY_FILENAME, TOUTIAO_SEARCH_SUMMARY_FILENAME, douyinGenericAiAnswerBounds, douyinMiniAppCaptureBounds, douyinMiniAppEntryBounds, douyinSearchInput, douyinSearchResultTarget, douyinSearchResultsBounds, douyinViewFullBounds, failedRetryItems, fillQuestionInput, hierarchyBelongsToPackage, historyOnboardingVisible, maxLongImageHeight, miniAppReferenceProductsTrigger, normalizeAutomationEntries, observerRegionFallbackOptions, prepareEmbeddedEvidence, referenceProductDrawerBounds, referenceProductsCaptureComplete, referenceProductSheetExpanded, referenceProductsTrigger, referenceProductViewportReadiness, refreshedReferenceProductsTrigger, requireQuestionLocated, retryAttemptCount, runDouyinSearchResultAttempts, runQuestionsWithRecovery, scrollEndConfirmed, scrollSingleQuestionSessionToTop, shouldRetryFullReplyCapture, toutiaoHomeSearchBounds, toutiaoOcrViewMoreTarget, toutiaoSearchInput, toutiaoViewMoreBounds, waitForPackageHierarchy } = require('../../src/automation/runner')
 
 const CHAT_BOUNDS = [0, 200, 1080, 1800]
 
@@ -375,6 +375,33 @@ test('输入层级误报为空时仍先清空，避免把新问题追加到残�
 test('定位不到刚发送的问题时拒绝截取旧回答', () => {
   assert.doesNotThrow(() => requireQuestionLocated(true, '新问题'))
   assert.throws(() => requireQuestionLocated(false, '新问题'), /避免截取旧回答/)
+})
+
+test('新会话不依赖问题气泡结构，连续两次稳定画面无变化即确认到顶', async () => {
+  const settledFrames = ['中部1', '顶部', '顶部', '顶部']
+  let swipeCount = 0
+  const result = await scrollSingleQuestionSessionToTop({
+    capture: async () => ({ frame: '底部' }),
+    swipeUp: async () => ({ attempt: ++swipeCount }),
+    settle: async () => ({ frame: settledFrames.shift() }),
+    framesSimilar: async (first, second) => first === second,
+  })
+  assert.equal(result.confirmed, true)
+  assert.equal(result.swipes, 4)
+  assert.equal(result.capture.frame, '顶部')
+})
+
+test('新会话持续可滚动且超时时明确失败，不把未到顶当成成功', async () => {
+  let elapsed = 0
+  let frame = 0
+  await assert.rejects(() => scrollSingleQuestionSessionToTop({
+    capture: async () => ({ frame: frame++ }),
+    swipeUp: async () => { elapsed += 60; return {} },
+    settle: async () => ({ frame: frame++ }),
+    framesSimilar: async () => false,
+    timeout: 100,
+    now: () => elapsed,
+  }), /未能.*确认到达会话顶部/)
 })
 
 test('稳定帧夹心校验首轮只需要两次截图', async () => {

@@ -716,6 +716,30 @@ function requireQuestionLocated(found, question) {
   if (!found) throw new Error(`未能在当前会话中定位刚发送的问题“${question}”，为避免截取旧回答已停止本题`)
 }
 
+async function scrollSingleQuestionSessionToTop({
+  capture,
+  swipeUp,
+  settle,
+  framesSimilar = imagesSimilar,
+  timeout = 120_000,
+  now = () => Date.now(),
+}) {
+  const startedAt = now()
+  let current = await capture()
+  let unchangedCount = 0
+  let swipes = 0
+  while (now() - startedAt < timeout) {
+    const scroll = await swipeUp()
+    const next = await settle(scroll)
+    swipes += 1
+    if (await framesSimilar(current.frame, next.frame, 3)) unchangedCount += 1
+    else unchangedCount = 0
+    current = next
+    if (unchangedCount >= 2) return { capture: current, swipes, confirmed: true }
+  }
+  throw new Error(`新会话已创建，但${Math.round(timeout / 1000)}秒内未能通过连续两次无变化确认到达会话顶部。`)
+}
+
 function calibratedProductFallbackOverlap(overlaps) {
   const recent = overlaps.filter(Number.isFinite).slice(-8)
   if (recent.length < 3) return null
@@ -2041,15 +2065,28 @@ function createRunner(options) {
     return questionVisible(await source(), question, bounds)
   }
 
-  async function captureFullReplyFrames(question, maxPages = 30, { scrollFraction = 0.45, allowFullRetry = true } = {}) {
+  async function captureFullReplyFrames(question, maxPages = 30, {
+    scrollFraction = 0.45,
+    allowFullRetry = true,
+    singleQuestionSession = false,
+  } = {}) {
     const size = await windowSize()
     const initialXml = await source()
     const navigationBounds = findChatScrollBounds(initialXml, size)
     validateCaptureViewport(size, navigationBounds)
     const topNavigationStarted = Date.now()
-    requireQuestionLocated(await scrollQuestionIntoView(question, navigationBounds), question)
+    let topBoundary = null
+    if (singleQuestionSession) {
+      topBoundary = await scrollSingleQuestionSessionToTop({
+        capture: () => waitForStableReplyRegion(navigationBounds),
+        swipeUp: () => swipeChat(navigationBounds, 'up', 0.65, { speed: 3_200, settle: 80, eventDrivenSettle: true }),
+        settle: scroll => waitForStableReplyRegion(navigationBounds, 8_000, { settleSince: scroll.activityMark }),
+      })
+    } else requireQuestionLocated(await scrollQuestionIntoView(question, navigationBounds), question)
     const topNavigationMs = Date.now() - topNavigationStarted
-    log(`capture: 快速定位当前问题顶部耗时=${topNavigationMs}ms`)
+    log(singleQuestionSession
+      ? `capture: 新会话已连续两次滚动无变化，确认位于会话顶部（回滚尝试=${topBoundary.swipes}，耗时=${topNavigationMs}ms）`
+      : `capture: 快速定位当前问题顶部耗时=${topNavigationMs}ms`)
     const evidence = await prepareEmbeddedEvidence({
       source,
       tap,
@@ -2057,7 +2094,7 @@ function createRunner(options) {
       waitForStable: waitForStableReplyRegion,
       log,
     }, navigationBounds)
-    if (!questionVisible(evidence.capture.xml || await source(), question, navigationBounds)) {
+    if (!singleQuestionSession && !questionVisible(evidence.capture.xml || await source(), question, navigationBounds)) {
       requireQuestionLocated(await scrollQuestionIntoView(question, navigationBounds), question)
       evidence.capture = await waitForStableReplyRegion(navigationBounds)
       log('capture: 引用资料展开后已重新确认问题气泡完整位于首屏')
@@ -2200,11 +2237,21 @@ function createRunner(options) {
       products,
       productCaptureAttempts,
       productCaptureMs,
+      captureMetadata: {
+        reply_top_confirmed: true,
+        reply_top_navigation_method: singleQuestionSession ? 'new_session_scroll_boundary' : 'question_bubble',
+        reply_question_structure_validation_required: !singleQuestionSession,
+        ...(singleQuestionSession ? { reply_top_confirmation_swipes: topBoundary.swipes } : {}),
+      },
     }
     if (shouldRetryFullReplyCapture({ fallbackReasons, allowFullRetry, products })) {
       log(`capture: 首轮存在不可靠接缝，等待${Math.round(REPLY_STABLE_QUIET_MS / 1000)}秒最终静止后从问题顶部整题重采一次`)
       await waitForFinalVisualQuiet()
-      const retry = await captureFullReplyFrames(question, maxPages, { scrollFraction: 0.3, allowFullRetry: false })
+      const retry = await captureFullReplyFrames(question, maxPages, {
+        scrollFraction: 0.3,
+        allowFullRetry: false,
+        singleQuestionSession,
+      })
       retry.recaptureCount += recaptureCount
       retry.fullRetryCount = 1
       retry.topNavigationMs += topNavigationMs
@@ -2954,6 +3001,9 @@ function createRunner(options) {
       status: result.status,
       xml: result.xml,
       meta,
+      captureMethod: newSessionPerformed
+        ? currentQuestion => captureFullReplyFrames(currentQuestion, 30, { singleQuestionSession: true })
+        : captureFullReplyFrames,
       observerBaseline,
       recoveryBaseline,
     })
@@ -3529,6 +3579,7 @@ module.exports = {
   referenceProductsCaptureComplete,
   referenceProductSheetExpanded,
   requireQuestionLocated,
+  scrollSingleQuestionSessionToTop,
   calibratedProductFallbackOverlap,
   referenceProductViewportReadiness,
   prepareEmbeddedEvidence,
