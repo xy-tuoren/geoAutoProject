@@ -32,7 +32,6 @@
   "build": {
     "appId": "com.xiaohe.questionautomation",
     "productName": "geo数据采集",
-    "buildResources": "assets",
     "asar": false,
     "files": [
       "src/**/*",

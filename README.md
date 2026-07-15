@@ -54,7 +54,7 @@ npm run run:android -- \
   --questions-file ./questions.batch.txt
 ```
 
-Windows 安装包由 GitHub Actions 在 `windows-latest` 上构建。手动运行 `Build Windows` 工作流只生成可下载的 Artifact；推送 `v*` 版本标签会在测试和打包成功后自动创建或更新 GitHub Release，并上传 `.exe`、`.blockmap` 与自动更新所需的 `latest.yml`：
+Windows 安装包由 GitHub Actions 在 `windows-latest` 上构建。手动运行 `Build Windows` 工作流只生成可下载的 Artifact；推送 `v*` 版本标签会在测试和打包成功后自动创建或更新 GitHub Release，并上传 `.exe`、`.blockmap` 与自动更新所需的 `latest.yml`。当前 macOS 工作流仅保留手动构建，不会随版本标签执行：
 
 ```bash
 git tag v0.2.0
