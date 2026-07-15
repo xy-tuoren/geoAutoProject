@@ -850,6 +850,23 @@ function shouldRetryFullReplyCapture({ fallbackReasons = [], allowFullRetry = tr
   return Boolean(allowFullRetry && !products && fallbackReasons.length)
 }
 
+function failedRetryItems(summary) {
+  if (!summary || !Array.isArray(summary.results)) throw new Error('批次汇总缺少 results，无法识别失败题。')
+  return summary.results
+    .map((result, resultIndex) => ({ ...result, resultIndex }))
+    .filter(result => result.status === 'failed')
+    .map(result => {
+      if (!result.entry_id || !result.question || !Number.isInteger(result.question_index)) {
+        throw new Error('批次汇总中的失败题信息不完整，无法安全重试。')
+      }
+      return result
+    })
+}
+
+function retryAttemptCount(summary) {
+  return Math.max(0, Number(summary?.retry_count) || 0) + 1
+}
+
 function createRunner(options) {
   let cancelled = false
   let activeSerial = null
@@ -2986,6 +3003,157 @@ function createRunner(options) {
         await flushArtifactLogs().catch(() => {})
       }
     },
+    async retryFailedBatch(payload) {
+      activeSerial = payload.serial
+      payloadMaxLongImageHeight = maxLongImageHeight(payload.maxLongImageHeight)
+      const batchDirectory = path.resolve(String(payload.batchDirectory || ''))
+      if (!batchDirectory || batchDirectory === path.parse(batchDirectory).root) throw new Error('请选择要重试的原批次。')
+      const batchArtifacts = batchArtifactDirectories(batchDirectory)
+      const summaryPath = path.join(batchArtifacts.diagnosticDirectory, 'batch-summary.json')
+      let previousSummary
+      try {
+        previousSummary = JSON.parse(await fs.readFile(summaryPath, 'utf8'))
+      } catch (error) {
+        throw new Error(`无法读取原批次汇总：${error.message}`)
+      }
+      const retryItems = failedRetryItems(previousSummary)
+      if (!retryItems.length) throw new Error('该批次没有可重试的失败题。')
+      if (!payload.serial) throw new Error('请选择 Android 设备后再重试失败题。')
+      const entriesById = new Map(automationEntries().map(entry => [entry.id, entry]))
+      for (const item of retryItems) {
+        if (!entriesById.has(item.entry_id)) throw new Error(`原批次使用的入口“${item.entry_id}”已不可用，无法安全重试。`)
+      }
+      const retryAttempt = retryAttemptCount(previousSummary)
+      const results = [...previousSummary.results]
+      const retryStartedAt = new Date().toISOString()
+      const retryFailures = []
+      let completed = Number(previousSummary.completed) || results.filter(result => result.status === 'completed').length
+      let failed = 0
+      await initializeArtifactLogging(batchArtifacts, payload, 'retry_failed_questions')
+      try {
+        await waitForAdbDevice(options.adbPath, payload.serial)
+        await ui.start(payload.serial)
+        try {
+          await observer.start(payload.serial)
+        } catch (error) {
+          await disableObserver(error)
+        }
+        log(`retry: batch=${batchDirectory} attempt=${retryAttempt} failed_questions=${retryItems.length}`)
+        for (const item of retryItems) {
+          checkCancelled()
+          const entry = entriesById.get(item.entry_id)
+          const entryCount = Array.isArray(previousSummary.entries) ? previousSummary.entries.length : 1
+          const entryIndex = Math.max(0, (previousSummary.entries || []).findIndex(candidate => candidate.id === entry.id))
+          const entryArtifacts = entryArtifactDirectories(batchArtifacts, entryIndex + 1, entry.label, entryCount)
+          const artifacts = questionArtifactDirectories(entryArtifacts, item.question_index, item.question)
+          const failurePath = path.join(artifacts.diagnosticDirectory, '失败.json')
+          await startQuestionLogging(artifacts, {
+            batch_id: path.basename(batchDirectory),
+            serial: payload.serial,
+            entry_id: entry.id,
+            entry_label: entry.label,
+            question: item.question,
+            question_index: item.question_index,
+            retry_attempt: retryAttempt,
+          })
+          try {
+            // A failed attempt may have produced partial delivery PNGs. They must
+            // never be mistaken for the replacement result of this retry.
+            await fs.rm(artifacts.deliveryDirectory, { recursive: true, force: true })
+            await prepareEntry(entry)
+            log(`retry: [${item.question_index}] ${entry.label} / ${item.question}`)
+            const result = await askOnce(payload, artifacts, item.question, item.question_index)
+            const replacement = {
+              status: 'completed',
+              entry_id: entry.id,
+              entry_label: entry.label,
+              question: item.question,
+              question_index: item.question_index,
+              delivery_directory: artifacts.deliveryDirectory,
+              diagnostic_directory: artifacts.diagnosticDirectory,
+              event_log: path.join(artifacts.diagnosticDirectory, '执行日志.jsonl'),
+              retry_attempt: retryAttempt,
+              retried_at: new Date().toISOString(),
+              ...result,
+            }
+            results[item.resultIndex] = replacement
+            completed += 1
+            await fs.rename(failurePath, path.join(artifacts.diagnosticDirectory, `失败_重试前_${retryAttempt}.json`)).catch(error => {
+              if (error.code !== 'ENOENT') throw error
+            })
+            await finishQuestionLogging('question_completed', { retry_attempt: retryAttempt, screenshot: result.screenshot, metadata: result.metadata })
+          } catch (error) {
+            if (fatalBatchError(error)) throw error
+            failed += 1
+            const failure = {
+              created_at: new Date().toISOString(),
+              status: 'failed',
+              artifact_layout_version: 2,
+              serial: payload.serial,
+              batch_id: path.basename(batchDirectory),
+              question: item.question,
+              question_index: item.question_index,
+              question_directory: artifacts.diagnosticDirectory,
+              delivery_directory: artifacts.deliveryDirectory,
+              diagnostic_directory: artifacts.diagnosticDirectory,
+              event_log: path.join(artifacts.diagnosticDirectory, '执行日志.jsonl'),
+              batch_event_log: batchEventLog.filePath,
+              entry_id: entry.id,
+              entry_label: entry.label,
+              entry_package: entry.packageName,
+              retry_attempt: retryAttempt,
+              error_name: error?.name || 'Error',
+              error_message: error?.message || String(error),
+              stack: error?.stack || null,
+            }
+            await fs.mkdir(artifacts.diagnosticDirectory, { recursive: true })
+            await fs.writeFile(failurePath, JSON.stringify(failure, null, 2), 'utf8')
+            results[item.resultIndex] = {
+              status: 'failed', entry_id: entry.id, entry_label: entry.label,
+              question: item.question, question_index: item.question_index,
+              delivery_directory: artifacts.deliveryDirectory, diagnostic_directory: artifacts.diagnosticDirectory,
+              event_log: path.join(artifacts.diagnosticDirectory, '执行日志.jsonl'), failure: failurePath,
+              retry_attempt: retryAttempt,
+            }
+            retryFailures.push({ entry_id: entry.id, entry_label: entry.label, question: item.question, question_index: item.question_index, failure: failurePath, error_name: failure.error_name, error_message: failure.error_message })
+            log(`retry failed: [${item.question_index}] ${entry.label} / ${item.question}: ${failure.error_message}`)
+            await finishQuestionLogging('question_failed', { retry_attempt: retryAttempt, failure: failurePath, error_name: failure.error_name, error_message: failure.error_message })
+          }
+        }
+        const remainingFailures = results.filter(result => result.status === 'failed')
+        const summary = {
+          ...previousSummary,
+          updated_at: new Date().toISOString(),
+          serial: payload.serial,
+          completed: results.filter(result => result.status === 'completed').length,
+          failed: remainingFailures.length,
+          status: remainingFailures.length ? 'completed_with_failures' : 'completed',
+          results,
+          failures: remainingFailures.map(result => retryFailures.find(failure => failure.entry_id === result.entry_id && failure.question_index === result.question_index && failure.question === result.question) || {
+            entry_id: result.entry_id, entry_label: result.entry_label, question: result.question,
+            question_index: result.question_index, failure: result.failure,
+          }),
+          retry_count: retryAttempt,
+          retry_history: [...(Array.isArray(previousSummary.retry_history) ? previousSummary.retry_history : []), {
+            attempt: retryAttempt, started_at: retryStartedAt, finished_at: new Date().toISOString(),
+            requested: retryItems.length, completed: retryItems.length - failed, failed,
+          }],
+          summary: summaryPath,
+        }
+        await fs.writeFile(summaryPath, JSON.stringify(summary, null, 2), 'utf8')
+        log(`重试完成：本次成功=${retryItems.length - failed}，仍失败=${failed}，原批次汇总=${summaryPath}`)
+        await batchEventLog.record('batch_result_saved', { category: 'lifecycle', details: { retry_attempt: retryAttempt, total: summary.total, completed: summary.completed, failed: summary.failed, summary: summaryPath } })
+        return summary
+      } catch (error) {
+        await finishQuestionLogging('question_failed', { retry_attempt: retryAttempt, error_name: error?.name || 'Error', error_message: error?.message || String(error), fatal: true }).catch(() => {})
+        await batchEventLog.record('batch_retry_failed', { category: 'error', details: { retry_attempt: retryAttempt, error_name: error?.name || 'Error', error_message: error?.message || String(error) } }).catch(() => {})
+        throw error
+      } finally {
+        await observer.stop().catch(() => {})
+        await ui.stop().catch(() => {})
+        await flushArtifactLogs().catch(() => {})
+      }
+    },
     async stop() {
       cancelled = true
       await observer.stop().catch(() => {})
@@ -3037,6 +3205,8 @@ module.exports = {
   captureStableObserved,
   observerRegionFallbackOptions,
   shouldRetryFullReplyCapture,
+  failedRetryItems,
+  retryAttemptCount,
   fatalBatchError,
   runQuestionsWithRecovery,
   adbConnectionLost,

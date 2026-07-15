@@ -12,6 +12,8 @@
 
 Windows 开发环境在项目目录执行一次 `npm run setup`，再运行 `npm start`。`setup` 会安装 npm 依赖、准备内置 ADB，并用 uv/PyInstaller 构建 Python uiautomator2 sidecar。Electron 面板支持设备刷新、问题文件导入、目录选择、日志流、停止任务和响应式布局。
 
+一批执行结束后，如有单题失败，面板会启用“重试失败项”。它只重跑失败题，沿用原批次、原入口和原题号；成功结果会写回该批次的 `交付图片/`，汇总文件同步更新。此前失败记录会保留为 `失败_重试前_*.json`，不会覆盖成功题或重新生成一个批次。
+
 常用开发命令：
 
 ```bash
@@ -22,6 +24,8 @@ npm run prepare:u2 # 构建当前平台的Python uiautomator2 sidecar
 npm run prepare:scrcpy # 下载并校验官方scrcpy server
 npm run dist       # 准备内置运行时并打包桌面应用
 ```
+
+更完整的本地开发、真机验收、Windows/macOS 打包、GitHub Release 发布和自动更新说明见 [开发、打包、发布与自动更新](docs/development-deployment.md)。
 
 完整归档当前会话中已经存在的回答（不会新建会话、聚焦输入框、输入或发送问题），与正式任务使用同一流程采集回答正文、引用资料和从首项到末项的全部参考药品：
 

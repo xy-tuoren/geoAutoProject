@@ -441,7 +441,7 @@ textarea {
 
 .action-buttons {
   display: grid;
-  grid-template-columns: 1.35fr .85fr;
+  grid-template-columns: 1.35fr 1fr .85fr;
   gap: 10px;
   margin-top: auto;
 }
@@ -539,5 +539,5 @@ textarea {
   .topbar-actions { align-items: flex-end; flex-direction: column; }
   .status { max-width: 100%; }
   .update-action { max-width: 100%; }
-  .action-buttons { grid-template-columns: 1fr 1fr; }
+  .action-buttons { grid-template-columns: 1fr 1fr 1fr; }
 }

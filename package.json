@@ -1,6 +1,6 @@
 {
   "name": "question-automation-electron",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "description": "Cross-platform Electron operator panel for ADB question automation.",
   "repository": {
@@ -32,6 +32,7 @@
   "build": {
     "appId": "com.xiaohe.questionautomation",
     "productName": "geo数据采集",
+    "buildResources": "assets",
     "asar": false,
     "files": [
       "src/**/*",
@@ -53,15 +54,21 @@
       {
         "from": "vendor/scrcpy",
         "to": "vendor/scrcpy"
+      },
+      {
+        "from": "assets",
+        "to": "assets"
       }
     ],
     "mac": {
+      "icon": "assets/icon.icns",
       "target": [
         "dmg"
       ],
       "category": "public.app-category.productivity"
     },
     "win": {
+      "icon": "assets/icon.ico",
       "target": [
         "nsis"
       ],

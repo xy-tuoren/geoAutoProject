@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld('automation', {
   importQuestions: payload => ipcRenderer.invoke('questions:import', payload),
   getPathForFile: file => webUtils.getPathForFile(file),
   start: payload => ipcRenderer.invoke('automation:start', payload),
+  retryFailed: payload => ipcRenderer.invoke('automation:retry-failed', payload),
   stop: () => ipcRenderer.invoke('automation:stop'),
   copyText: text => ipcRenderer.invoke('clipboard:write', text),
   exportLog: text => ipcRenderer.invoke('log:export', text),

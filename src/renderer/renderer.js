@@ -4,10 +4,12 @@ const device = $('#device')
 const status = $('#status')
 const log = $('#log')
 const start = $('#start')
+const retryFailed = $('#retry-failed')
 const stop = $('#stop')
 const entryList = $('#entry-list')
 const updateAction = $('#update-action')
 let updateState = null
+let retryBatchDirectory = null
 
 function renderUpdateState(next) {
   updateState = next
@@ -211,14 +213,36 @@ start.addEventListener('click', async () => {
     start.disabled = true; stop.disabled = false; status.textContent = '任务正在执行…'; appendLog('\n$ 启动自动化任务\n')
   } catch (error) { status.textContent = error.message || '无法启动任务' }
 })
+retryFailed.addEventListener('click', async () => {
+  if (!retryBatchDirectory) { status.textContent = '当前没有可重试的失败批次'; return }
+  const timeout = Number($('#timeout').value)
+  const maxLongImageHeight = Number($('#max-long-image-height').value)
+  if (!Number.isFinite(timeout) || timeout <= 0 || !Number.isInteger(maxLongImageHeight) || maxLongImageHeight < 3000 || maxLongImageHeight > 30000) {
+    status.textContent = '请先检查单题超时和长图上限设置'
+    return
+  }
+  try {
+    await window.automation.retryFailed({
+      serial: device.value,
+      batchDirectory: retryBatchDirectory,
+      timeout,
+      newSession: $('#new-session').checked,
+      maxLongImageHeight,
+    })
+    start.disabled = true; retryFailed.disabled = true; stop.disabled = false
+    status.textContent = '正在重试失败项…'; appendLog(`\n$ 重试原批次失败项：${retryBatchDirectory}\n`)
+  } catch (error) { status.textContent = error.message || '无法重试失败项' }
+})
 stop.addEventListener('click', () => window.automation.stop())
 window.automation.onLog(appendLog)
-window.automation.onFinished(({ code, summary }) => {
+window.automation.onFinished(({ code, summary, retried }) => {
   start.disabled = false
   stop.disabled = true
-  if (code !== 0) status.textContent = `任务结束，退出码 ${code}`
-  else if (summary?.failed) status.textContent = `执行完成：成功 ${summary.completed}，失败 ${summary.failed}`
-  else status.textContent = `执行完成：成功 ${summary?.completed ?? 0}`
+  retryBatchDirectory = summary?.failed ? summary.batch_directory : null
+  retryFailed.disabled = !retryBatchDirectory
+  if (code !== 0) status.textContent = `${retried ? '重试' : '任务'}结束，退出码 ${code}`
+  else if (summary?.failed) status.textContent = `${retried ? '重试完成' : '执行完成'}：成功 ${summary.completed}，失败 ${summary.failed}；可点击“重试失败项”`
+  else status.textContent = `${retried ? '失败项已全部重试成功' : '执行完成'}：成功 ${summary?.completed ?? 0}`
 })
 window.automation.onUpdateState(renderUpdateState)
 

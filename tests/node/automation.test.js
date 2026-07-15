@@ -10,7 +10,7 @@ const { stackFramesInGroups, verifyFrameOverlap, verifyProductGridOverlap, image
 const { createBatchDirectory, questionArtifactDirectory, batchArtifactDirectories, entryArtifactDirectories, questionArtifactDirectories } = require('../../src/automation/utils')
 const { EventLog, classifyAutomationLog } = require('../../src/automation/event-log')
 const { loadQuestionFile } = require('../../src/questions')
-const { adbConnectionLost, automationEntries, captureStableObserved, captureStableSandwich, calibratedProductFallbackOverlap, chatSwipePlan, conservativeFallbackOverlap, buildReplyImages, CancelledError, DouyinSearchResultNotFoundError, DOUYIN_MINIAPP_ENTRY_FILENAME, DOUYIN_SEARCH_SUMMARY_FILENAME, TOUTIAO_SEARCH_SUMMARY_FILENAME, douyinGenericAiAnswerBounds, douyinMiniAppCaptureBounds, douyinMiniAppEntryBounds, douyinSearchInput, douyinSearchResultTarget, douyinSearchResultsBounds, douyinViewFullBounds, fillQuestionInput, hierarchyBelongsToPackage, historyOnboardingVisible, maxLongImageHeight, miniAppReferenceProductsTrigger, normalizeAutomationEntries, observerRegionFallbackOptions, prepareEmbeddedEvidence, referenceProductDrawerBounds, referenceProductsCaptureComplete, referenceProductSheetExpanded, referenceProductsTrigger, referenceProductViewportReadiness, refreshedReferenceProductsTrigger, requireQuestionLocated, runDouyinSearchResultAttempts, runQuestionsWithRecovery, scrollEndConfirmed, shouldRetryFullReplyCapture, toutiaoSearchInput, toutiaoViewMoreBounds, waitForPackageHierarchy } = require('../../src/automation/runner')
+const { adbConnectionLost, automationEntries, captureStableObserved, captureStableSandwich, calibratedProductFallbackOverlap, chatSwipePlan, conservativeFallbackOverlap, buildReplyImages, CancelledError, DouyinSearchResultNotFoundError, DOUYIN_MINIAPP_ENTRY_FILENAME, DOUYIN_SEARCH_SUMMARY_FILENAME, TOUTIAO_SEARCH_SUMMARY_FILENAME, douyinGenericAiAnswerBounds, douyinMiniAppCaptureBounds, douyinMiniAppEntryBounds, douyinSearchInput, douyinSearchResultTarget, douyinSearchResultsBounds, douyinViewFullBounds, failedRetryItems, fillQuestionInput, hierarchyBelongsToPackage, historyOnboardingVisible, maxLongImageHeight, miniAppReferenceProductsTrigger, normalizeAutomationEntries, observerRegionFallbackOptions, prepareEmbeddedEvidence, referenceProductDrawerBounds, referenceProductsCaptureComplete, referenceProductSheetExpanded, referenceProductsTrigger, referenceProductViewportReadiness, refreshedReferenceProductsTrigger, requireQuestionLocated, retryAttemptCount, runDouyinSearchResultAttempts, runQuestionsWithRecovery, scrollEndConfirmed, shouldRetryFullReplyCapture, toutiaoSearchInput, toutiaoViewMoreBounds, waitForPackageHierarchy } = require('../../src/automation/runner')
 
 const CHAT_BOUNDS = [0, 200, 1080, 1800]
 
@@ -27,6 +27,23 @@ test('桌面入口默认小荷App，并按选择顺序去重执行', () => {
   assert.deepEqual(entries.map(entry => entry.id), ['douyin-xiaohe-miniapp', 'xiaohe-app'])
   assert.deepEqual(automationEntries().map(entry => entry.id), ['xiaohe-app', 'douyin-xiaohe-miniapp', 'toutiao-xiaohe-miniapp'])
   assert.throws(() => normalizeAutomationEntries(['unknown-entry']), /未知入口/)
+})
+
+test('失败重试只选择失败题，并保留原结果位置和题号', () => {
+  const summary = {
+    retry_count: 1,
+    results: [
+      { status: 'completed', entry_id: 'xiaohe-app', question: '第一题', question_index: 1 },
+      { status: 'failed', entry_id: 'xiaohe-app', question: '第二题', question_index: 2 },
+      { status: 'failed', entry_id: 'douyin-xiaohe-miniapp', question: '第三题', question_index: 3 },
+    ],
+  }
+  assert.deepEqual(failedRetryItems(summary).map(item => [item.resultIndex, item.entry_id, item.question, item.question_index]), [
+    [1, 'xiaohe-app', '第二题', 2],
+    [2, 'douyin-xiaohe-miniapp', '第三题', 3],
+  ])
+  assert.equal(retryAttemptCount(summary), 2)
+  assert.throws(() => failedRetryItems({ results: [{ status: 'failed', question: '缺少入口', question_index: 1 }] }), /信息不完整/)
 })
 
 test('单题失败后重新准备入口并继续执行后续问题', async () => {

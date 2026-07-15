@@ -29,6 +29,11 @@ function adbCommand() {
 }
 
 function appRoot() { return app.getAppPath() }
+function windowIconPath() {
+  return app.isPackaged
+    ? path.join(process.resourcesPath, 'assets', 'app-icon.png')
+    : path.join(root, 'assets', 'app-icon.png')
+}
 
 function run(command, args, options = {}) {
   return new Promise((resolve, reject) => {
@@ -65,6 +70,7 @@ function createWindow() {
     minHeight: 700,
     backgroundColor: '#eef2f8',
     title: 'geo数据采集',
+    icon: windowIconPath(),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -153,6 +159,39 @@ ipcMain.handle('automation:start', async (event, payload) => {
       logError('任务失败:', error.message)
       event.sender.send('automation:log', `${error.stack || error.message}\n`)
       event.sender.send('automation:finished', { code: error instanceof CancelledError ? 130 : 1 })
+    })
+    .finally(() => {
+      activeTask = null
+      updateManager?.notify()
+    })
+  return true
+})
+
+ipcMain.handle('automation:retry-failed', async (event, payload) => {
+  if (activeTask) throw new Error('已有任务正在执行。')
+  if (!payload?.serial || !payload?.batchDirectory) throw new Error('请选择 Android 设备并保留原批次后再重试。')
+  log('重试失败题:', `serial=${payload.serial}`, `batch=${payload.batchDirectory}`)
+  const runner = createRunner({
+    root: appRoot(),
+    isPackaged: app.isPackaged,
+    resourcesPath: process.resourcesPath,
+    adbPath: adbCommand(),
+    log: text => {
+      process.stdout.write(text.endsWith('\n') ? text : `${text}\n`)
+      event.sender.send('automation:log', text)
+    },
+  })
+  activeTask = runner
+  updateManager?.notify()
+  void runner.retryFailedBatch(payload)
+    .then(summary => {
+      log('失败题重试完成')
+      event.sender.send('automation:finished', { code: 0, summary, retried: true })
+    })
+    .catch(error => {
+      logError('失败题重试失败:', error.message)
+      event.sender.send('automation:log', `${error.stack || error.message}\n`)
+      event.sender.send('automation:finished', { code: error instanceof CancelledError ? 130 : 1, retried: true })
     })
     .finally(() => {
       activeTask = null
