@@ -1,8 +1,9 @@
 const fs = require('node:fs/promises')
 const path = require('node:path')
 const { execFile } = require('node:child_process')
-const { sleep, safeSlug, createBatchDirectory, questionArtifactDirectory } = require('./utils')
-const { iterNodes, nodeAttr, nodeIsVisible, hierarchyIsLoading, parseBounds, boundsIntersect, boundsCenterY, estimateVerticalScrollShift, questionVisible, currentQuestionText, findChatScrollBounds, validateCaptureViewport, replyCaptureBounds, visibleLabelBounds, visibleLabelBoundsList, boundsForNodeAttribute, evidencePanelBounds, evidenceMinimumHeight, referenceProductsSection, referenceProductImageBounds } = require('./hierarchy')
+const { sleep, createBatchDirectory, batchArtifactDirectories, entryArtifactDirectories, questionArtifactDirectories } = require('./utils')
+const { EventLog } = require('./event-log')
+const { iterNodes, nodeAttr, nodeIsVisible, hierarchyIsLoading, parseBounds, parseNodeTree, boundsIntersect, boundsCenterY, estimateVerticalScrollShift, questionVisible, currentQuestionText, findChatScrollBounds, validateCaptureViewport, replyCaptureBounds, visibleLabelBounds, visibleLabelBoundsList, boundsForNodeAttribute, evidencePanelBounds, evidenceMinimumHeight, referenceProductsSection, referenceProductImageBounds } = require('./hierarchy')
 const { imageInfo, cropImage, imagesSimilar, imageRegionsStable, imageLooksLoaded, verifyFrameOverlap, verifyProductGridOverlap, composeLongImages } = require('./images')
 const { U2Client } = require('./u2-client')
 const { ScrcpyObserver, SCRCPY_VERSION } = require('./scrcpy-observer')
@@ -14,7 +15,10 @@ const REPLY_STABLE_QUIET_MS = 3_000
 const DEFAULT_ENTRY_ID = 'xiaohe-app'
 const SEARCH_SUMMARY_FILENAME = '回答_智能总结.png'
 const DOUYIN_SEARCH_SUMMARY_FILENAME = SEARCH_SUMMARY_FILENAME
+const DOUYIN_MINIAPP_ENTRY_FILENAME = '回答_小程序入口.png'
 const TOUTIAO_SEARCH_SUMMARY_FILENAME = SEARCH_SUMMARY_FILENAME
+const DOUYIN_SUMMARY_PREFERENCE_MS = 3_000
+const DOUYIN_INITIAL_RESULT_WAIT_MS = 12_000
 const ENTRY_DEFINITIONS = Object.freeze({
   'xiaohe-app': Object.freeze({
     id: 'xiaohe-app',
@@ -141,6 +145,86 @@ function douyinViewFullBounds(xml, screenSize) {
   return candidates[0] || null
 }
 
+function treeNodes(root, result = []) {
+  for (const child of root.children || []) {
+    result.push(child)
+    treeNodes(child, result)
+  }
+  return result
+}
+
+function douyinMiniAppEntryBounds(xml, screenSize) {
+  if (!douyinSearchInput(xml) || screenSize.width >= screenSize.height) return null
+  const width = screenSize.width
+  const height = screenSize.height
+  const candidates = []
+  for (const node of treeNodes(parseNodeTree(xml))) {
+    const attrs = node.attrs
+    if (nodeAttr(attrs, 'class') !== 'android.widget.FrameLayout'
+      || nodeAttr(attrs, 'resource-id')
+      || nodeAttr(attrs, 'text')
+      || nodeAttr(attrs, 'content-desc')) continue
+    const rawBounds = nodeAttr(attrs, 'bounds')
+    if (!rawBounds) continue
+    const cardBounds = parseBounds(rawBounds)
+    const cardWidth = cardBounds[2] - cardBounds[0]
+    const cardHeight = cardBounds[3] - cardBounds[1]
+    if (cardWidth < width * 0.4 || cardWidth > width * 0.55
+      || cardHeight < height * 0.22 || cardHeight > height * 0.4
+      || cardBounds[1] < height * 0.38 || cardBounds[3] > height
+      || node.children.length < 3 || node.children.length > 6
+      || node.children.some(child => nodeAttr(child.attrs, 'class') !== 'android.view.ViewGroup')) continue
+    const descendants = treeNodes(node)
+    if (descendants.some(child => nodeAttr(child.attrs, 'resource-id')
+      || nodeAttr(child.attrs, 'text') || nodeAttr(child.attrs, 'content-desc'))) continue
+    const header = node.children.find(child => {
+      const childRaw = nodeAttr(child.attrs, 'bounds')
+      if (!childRaw || !(child.children || []).length) return false
+      const bounds = parseBounds(childRaw)
+      return bounds[2] - bounds[0] >= cardWidth * 0.75
+        && bounds[3] - bounds[1] >= cardHeight * 0.12
+        && bounds[3] - bounds[1] <= cardHeight * 0.3
+        && bounds[1] - cardBounds[1] <= cardHeight * 0.1
+    })
+    if (!header) continue
+    const tapBounds = parseBounds(nodeAttr(header.attrs, 'bounds'))
+    const actions = node.children.filter(child => {
+      const childRaw = nodeAttr(child.attrs, 'bounds')
+      if (!childRaw || child === header) return false
+      const bounds = parseBounds(childRaw)
+      return bounds[2] - bounds[0] >= cardWidth * 0.75 && bounds[1] >= tapBounds[3] - Math.round(cardHeight * 0.02)
+    })
+    if (actions.length < 2) continue
+    candidates.push({ cardBounds, tapBounds })
+  }
+  candidates.sort((a, b) => a.cardBounds[1] - b.cardBounds[1] || a.cardBounds[0] - b.cardBounds[0])
+  return candidates[0] || null
+}
+
+function douyinSearchResultTarget(xml, screenSize) {
+  const viewFull = douyinViewFullBounds(xml, screenSize)
+  if (viewFull) return { mode: 'smart_summary', viewFull }
+  const entry = douyinMiniAppEntryBounds(xml, screenSize)
+  return entry ? { mode: 'miniapp_entry_card', ...entry } : null
+}
+
+function douyinSearchResultsBounds(xml, screenSize) {
+  const candidates = []
+  for (const attrs of iterNodes(xml)) {
+    if (!nodeIsVisible(attrs)
+      || nodeAttr(attrs, 'package') !== ENTRY_DEFINITIONS['douyin-xiaohe-miniapp'].packageName
+      || nodeAttr(attrs, 'class') !== 'androidx.recyclerview.widget.RecyclerView') continue
+    const rawBounds = nodeAttr(attrs, 'bounds')
+    if (!rawBounds) continue
+    const bounds = parseBounds(rawBounds)
+    if (bounds[2] - bounds[0] < screenSize.width * 0.8
+      || bounds[3] - bounds[1] < screenSize.height * 0.45) continue
+    candidates.push(bounds)
+  }
+  candidates.sort((a, b) => (b[2] - b[0]) * (b[3] - b[1]) - (a[2] - a[0]) * (a[3] - a[1]))
+  return candidates[0] || null
+}
+
 function douyinMiniAppCaptureBounds(xml, screenSize) {
   if (douyinSearchInput(xml)) return null
   const close = boundsForNodeAttribute(xml, 'content-desc', '关闭')
@@ -155,10 +239,86 @@ function douyinMiniAppCaptureBounds(xml, screenSize) {
     const bounds = parseBounds(rawBounds)
     if (bounds[2] - bounds[0] >= width * 0.8 && bounds[1] > height * 0.55) fixedBottomTops.push(bounds[1])
   }
-  const top = Math.max(close[3] + Math.round(height * 0.012), Math.floor(height * 0.095))
   const bottom = fixedBottomTops.length ? Math.min(...fixedBottomTops) : Math.floor(height * 0.74)
+  const shellTop = Math.max(close[3] + Math.round(height * 0.012), Math.floor(height * 0.095))
+  const scrollingContentTops = iterNodes(xml).flatMap(attrs => {
+    if (!nodeIsVisible(attrs) || nodeAttr(attrs, 'class') !== 'android.view.ViewGroup') return []
+    const rawBounds = nodeAttr(attrs, 'bounds')
+    if (!rawBounds) return []
+    const bounds = parseBounds(rawBounds)
+    const itemWidth = bounds[2] - bounds[0]
+    const itemHeight = bounds[3] - bounds[1]
+    if (itemWidth < width * 0.9
+      || Math.abs(bounds[3] - bottom) > Math.max(8, Math.round(height * 0.006))
+      || bounds[1] < shellTop
+      || bounds[1] > height * 0.35
+      || itemHeight < height * 0.4) return []
+    return [bounds[1]]
+  })
+  // The miniapp exposes its real scrolling viewport as a full-width ViewGroup.
+  // Its top sits below the pinned consultation/person selector. Cropping from
+  // the shell header instead includes that fixed strip in every frame and makes
+  // independent overlap bands report contradictory scroll distances.
+  const top = scrollingContentTops.length ? Math.max(...scrollingContentTops) : shellTop
   if (bottom - top < height * 0.4) return null
   return [0, top, width, bottom]
+}
+
+function miniAppReferenceProductsTrigger(xml, viewportBounds) {
+  const viewportWidth = viewportBounds[2] - viewportBounds[0]
+  const viewportHeight = viewportBounds[3] - viewportBounds[1]
+  const candidates = []
+  for (const node of treeNodes(parseNodeTree(xml))) {
+    if (nodeAttr(node.attrs, 'class') !== 'android.view.ViewGroup') continue
+    const rawPanel = nodeAttr(node.attrs, 'bounds')
+    if (!rawPanel) continue
+    const panel = parseBounds(rawPanel)
+    const panelWidth = panel[2] - panel[0]
+    const panelHeight = panel[3] - panel[1]
+    if (!boundsIntersect(panel, viewportBounds)
+      || panelWidth < viewportWidth * 0.84
+      || panelHeight < viewportHeight * 0.12
+      || panelHeight > viewportHeight * 0.34) continue
+    const descendants = treeNodes(node)
+    const arrow = descendants.find(child => {
+      if (nodeAttr(child.attrs, 'class') !== 'android.widget.ImageView') return false
+      const raw = nodeAttr(child.attrs, 'bounds')
+      if (!raw) return false
+      const bounds = parseBounds(raw)
+      const width = bounds[2] - bounds[0]
+      const height = bounds[3] - bounds[1]
+      return bounds[0] >= panel[0] + panelWidth * 0.78
+        && boundsCenterY(bounds) <= panel[1] + panelHeight * 0.36
+        && width >= viewportWidth * 0.02 && width <= viewportWidth * 0.09
+        && height >= viewportWidth * 0.02 && height <= viewportWidth * 0.09
+    })
+    if (!arrow) continue
+    const artwork = descendants.some(child => {
+      if (nodeAttr(child.attrs, 'class') !== 'android.view.ViewGroup') return false
+      const raw = nodeAttr(child.attrs, 'bounds')
+      if (!raw) return false
+      const bounds = parseBounds(raw)
+      const width = bounds[2] - bounds[0]
+      const height = bounds[3] - bounds[1]
+      return bounds[0] <= panel[0] + panelWidth * 0.28
+        && bounds[1] >= panel[1] + panelHeight * 0.25
+        && width >= viewportWidth * 0.1 && width <= viewportWidth * 0.3
+        && height >= viewportWidth * 0.1 && height <= viewportWidth * 0.3
+        && Math.abs(width - height) <= Math.max(width, height) * 0.25
+    })
+    if (!artwork) continue
+    const arrowBounds = parseBounds(nodeAttr(arrow.attrs, 'bounds'))
+    candidates.push({
+      panel,
+      tap: [Math.floor((arrowBounds[0] + arrowBounds[2]) / 2), boundsCenterY(arrowBounds)],
+    })
+  }
+  candidates.sort((a, b) => {
+    const areaA = (a.panel[2] - a.panel[0]) * (a.panel[3] - a.panel[1])
+    const areaB = (b.panel[2] - b.panel[0]) * (b.panel[3] - b.panel[1])
+    return areaA - areaB
+  })
+  return candidates[0]?.tap || null
 }
 
 async function waitForPackageHierarchy({
@@ -257,6 +417,7 @@ function fatalBatchError(error) {
 
 async function runQuestionsWithRecovery({
   questions,
+  beforeQuestion = async () => {},
   prepare,
   execute,
   recordFailure,
@@ -270,6 +431,7 @@ async function runQuestionsWithRecovery({
     checkCancelled()
     const index = zeroIndex + 1
     try {
+      await beforeQuestion(question, index)
       if (!prepared) {
         await prepare()
         prepared = true
@@ -348,9 +510,57 @@ function refreshedReferenceProductsTrigger(xml, chatBounds, previousTrigger) {
 }
 
 function referenceProductDrawerBounds(xml) {
-  const sheet = boundsForResourceSuffix(xml, ':id/bullet_container')
+  let sheet = boundsForResourceSuffix(xml, ':id/bullet_container')
     || boundsForResourceSuffix(xml, ':id/bullet_popup_bottom_sheet')
-  if (!sheet) return { sheet: null, list: null }
+  if (!sheet) {
+    const root = parseNodeTree(xml)
+    const nodes = treeNodes(root)
+    const parsed = nodes.flatMap(node => {
+      const rawBounds = nodeAttr(node.attrs, 'bounds')
+      return rawBounds ? [parseBounds(rawBounds)] : []
+    })
+    const screenWidth = Math.max(0, ...parsed.map(bounds => bounds[2]))
+    const screenHeight = Math.max(0, ...parsed.map(bounds => bounds[3]))
+    const structural = []
+    const visit = (node, ancestors = []) => {
+      for (const child of node.children || []) {
+        const nextAncestors = [...ancestors, child]
+        if (nodeAttr(child.attrs, 'class') === 'androidx.recyclerview.widget.RecyclerView') {
+          const rawList = nodeAttr(child.attrs, 'bounds')
+          if (rawList) {
+            const list = parseBounds(rawList)
+            const listWidth = list[2] - list[0]
+            const listHeight = list[3] - list[1]
+            if (screenWidth > 0 && screenHeight > 0
+              && listWidth >= screenWidth * 0.8
+              && listHeight >= screenHeight * 0.45
+              && list[1] >= screenHeight * 0.15
+              && list[1] <= screenHeight * 0.45
+              && list[3] >= screenHeight * 0.97) {
+              const sheetCandidates = ancestors.flatMap(ancestor => {
+                if (nodeAttr(ancestor.attrs, 'class') !== 'android.view.ViewGroup') return []
+                const raw = nodeAttr(ancestor.attrs, 'bounds')
+                if (!raw) return []
+                const bounds = parseBounds(raw)
+                return bounds[0] <= list[0] + screenWidth * 0.03
+                  && bounds[2] >= list[2] - screenWidth * 0.03
+                  && bounds[3] >= list[3] - screenHeight * 0.02
+                  && bounds[1] >= screenHeight * 0.1
+                  && bounds[1] <= list[1] - Math.max(24, screenHeight * 0.015)
+                  ? [bounds]
+                  : []
+              }).sort((a, b) => b[1] - a[1])
+              if (sheetCandidates.length) structural.push({ sheet: sheetCandidates[0], list })
+            }
+          }
+        }
+        visit(child, nextAncestors)
+      }
+    }
+    visit(root)
+    structural.sort((a, b) => b.sheet[1] - a.sheet[1])
+    return structural[0] || { sheet: null, list: null }
+  }
   let list = boundsForNodeAttribute(xml, 'class', 'androidx.recyclerview.widget.RecyclerView')
   if (!list) {
     const candidate = iterNodes(xml).find(attrs => {
@@ -593,13 +803,21 @@ function createRunner(options) {
   let observerRecoveryFailures = 0
   let observerRegionFallbacks = 0
   let adbPngCaptures = 0
-  const log = text => options.log(`${text}${String(text).endsWith('\n') ? '' : '\n'}`)
+  let batchEventLog = null
+  let activeQuestionEventLog = null
+  let activeQuestionContext = {}
+  const log = text => {
+    const message = String(text)
+    options.log(`${message}${message.endsWith('\n') ? '' : '\n'}`)
+    batchEventLog?.recordMessage(message, activeQuestionContext)
+    activeQuestionEventLog?.recordMessage(message)
+  }
   const ui = options.uiClient || new U2Client({
     root: options.root,
     isPackaged: options.isPackaged,
     resourcesPath: options.resourcesPath,
     adbPath: options.adbPath,
-    log: options.log,
+    log,
   })
   const observer = options.scrcpyObserver || new ScrcpyObserver({
     adbPath: options.adbPath,
@@ -607,6 +825,60 @@ function createRunner(options) {
     log,
   })
   const checkCancelled = () => { if (cancelled) throw new CancelledError() }
+
+  async function initializeArtifactLogging(artifacts, payload, mode) {
+    await Promise.all([
+      fs.mkdir(artifacts.deliveryDirectory, { recursive: true }),
+      fs.mkdir(artifacts.diagnosticDirectory, { recursive: true }),
+    ])
+    batchEventLog = new EventLog({
+      filePath: path.join(artifacts.diagnosticDirectory, '执行日志.jsonl'),
+      scope: 'batch',
+      context: { batch_id: path.basename(artifacts.batchDirectory), serial: payload.serial, mode },
+    })
+    await batchEventLog.record('batch_started', {
+      category: 'lifecycle',
+      details: {
+        artifact_layout_version: 2,
+        delivery_directory: artifacts.deliveryDirectory,
+        diagnostic_directory: artifacts.diagnosticDirectory,
+      },
+    })
+  }
+
+  async function startQuestionLogging(artifacts, context) {
+    activeQuestionContext = { ...context }
+    activeQuestionEventLog = new EventLog({
+      filePath: path.join(artifacts.diagnosticDirectory, '执行日志.jsonl'),
+      scope: 'question',
+      context,
+    })
+    await activeQuestionEventLog.record('question_context_ready', {
+      category: 'lifecycle',
+      details: {
+        delivery_directory: artifacts.deliveryDirectory,
+        diagnostic_directory: artifacts.diagnosticDirectory,
+      },
+    })
+  }
+
+  async function finishQuestionLogging(event, details = {}) {
+    if (!activeQuestionEventLog) return
+    await batchEventLog?.record(event, {
+      category: event === 'question_failed' ? 'error' : 'lifecycle',
+      details,
+      context: activeQuestionContext,
+    })
+    await activeQuestionEventLog.record(event, { category: event === 'question_failed' ? 'error' : 'lifecycle', details })
+    await activeQuestionEventLog.flush()
+    activeQuestionEventLog = null
+    activeQuestionContext = {}
+  }
+
+  async function flushArtifactLogs() {
+    await activeQuestionEventLog?.flush()
+    await batchEventLog?.flush()
+  }
 
   function resetEntryState(entry) {
     activeEntry = entry
@@ -966,24 +1238,60 @@ function createRunner(options) {
     return search
   }
 
-  async function waitForDouyinAnswerCard(timeout) {
+  async function waitForDouyinSearchResult(timeout) {
+    const startedAt = Date.now()
+    const initialScanDelay = Math.min(DOUYIN_INITIAL_RESULT_WAIT_MS, Math.max(5_000, Math.floor(timeout * 0.25)))
     const deadline = Date.now() + timeout
     const size = await windowSize()
     let lastProgress = 0
+    let stableEntrySignature = ''
+    let stableEntryReads = 0
+    let entryFirstSeenAt = 0
+    let searchScrolls = 0
+    let lastSearchScrollAt = 0
     while (Date.now() < deadline) {
       const xml = await source()
-      const viewFull = douyinViewFullBounds(xml, size)
-      if (viewFull) return { xml, viewFull, size }
+      const target = douyinSearchResultTarget(xml, size)
+      if (target?.mode === 'smart_summary') return { xml, target, size }
+      if (target?.mode === 'miniapp_entry_card') {
+        const signature = `${target.cardBounds.join(',')}|${target.tapBounds.join(',')}`
+        if (signature === stableEntrySignature) stableEntryReads += 1
+        else {
+          stableEntrySignature = signature
+          stableEntryReads = 1
+          entryFirstSeenAt = Date.now()
+        }
+        if (stableEntryReads >= 2 && Date.now() - entryFirstSeenAt >= DOUYIN_SUMMARY_PREFERENCE_MS) {
+          return { xml, target, size }
+        }
+      } else {
+        stableEntrySignature = ''
+        stableEntryReads = 0
+        entryFirstSeenAt = 0
+      }
+      if (!target && searchScrolls < 3
+        && Date.now() - startedAt >= initialScanDelay
+        && Date.now() - lastSearchScrollAt >= 3_500) {
+        const resultsBounds = douyinSearchResultsBounds(xml, size)
+        if (resultsBounds) {
+          searchScrolls += 1
+          lastSearchScrollAt = Date.now()
+          log(`stage: 首屏未发现智能总结或入口卡片，向下扫描抖音搜索结果（${searchScrolls}/3）`)
+          await swipeChat(resultsBounds, 'down', 0.34, { maxFraction: 0.42, speed: 1_700, eventDrivenSettle: true })
+          await waitForVisualQuiet({ timeout: 1_200, fallbackMs: 300 })
+          continue
+        }
+      }
       if (Date.now() - lastProgress >= 5_000) {
-        log('waiting: 正在等待抖音小荷AI医生搜索结果…')
+        log(`waiting: ${stableEntryReads ? '已发现小程序入口卡片，继续短暂等待智能总结优先出现' : '正在等待抖音智能总结或小荷AI医生小程序入口卡片'}…`)
         lastProgress = Date.now()
       }
       await sleep(500)
     }
-    throw new Error('抖音搜索结果中未出现小荷AI医生“查看全文”卡片。')
+    throw new Error('抖音搜索结果中既未出现小荷AI医生智能总结，也未出现可验证的小程序入口卡片。')
   }
 
-  async function captureDouyinSearchSummary(size) {
+  async function captureDouyinSearchTarget(size) {
     await waitForVisualQuiet({ timeout: 1_200, fallbackMs: 300 })
     const capture = await captureStableSandwich({
       capture: screenshot,
@@ -992,10 +1300,10 @@ function createRunner(options) {
       hierarchyLoading: () => false,
       interval: 120,
     }, 8_000)
-    if (!capture.stable) throw new Error('抖音搜索结果智能总结持续变化，无法取得稳定截图。')
-    const viewFull = douyinViewFullBounds(capture.xml, size)
-    if (!viewFull) throw new Error('截取抖音智能总结后未能再次确认“查看全文”卡片，已停止点击。')
-    return { ...capture, viewFull }
+    if (!capture.stable) throw new Error('抖音搜索结果持续变化，无法取得稳定截图。')
+    const target = douyinSearchResultTarget(capture.xml, size)
+    if (!target) throw new Error('取得稳定搜索截图后，智能总结和小程序入口卡片均已消失，已停止点击。')
+    return { ...capture, target }
   }
 
   async function openDouyinFullAnswer(viewFull, size, timeout = 12_000) {
@@ -1008,6 +1316,58 @@ function createRunner(options) {
       if (bounds) return { xml, bounds }
     }
     throw new Error('已点击抖音小荷AI医生“查看全文”，但未能确认全文页打开。')
+  }
+
+  async function openDouyinMiniAppEntry(entry, size, timeout = 12_000) {
+    const startedAt = Date.now()
+    await tap((entry.tapBounds[0] + entry.tapBounds[2]) / 2, (entry.tapBounds[1] + entry.tapBounds[3]) / 2)
+    const deadline = startedAt + timeout
+    while (Date.now() < deadline) {
+      await waitForVisualQuiet({ timeout: 1_000, fallbackMs: 400 })
+      const [xml, foreground] = await Promise.all([source(), ui.foregroundWindow()])
+      if (foreground?.package && foreground.package !== activePackageName()) {
+        throw new Error(`小程序入口点击后进入了错误应用：expected=${activePackageName()}, actual=${foreground.package}`)
+      }
+      const bounds = douyinMiniAppCaptureBounds(xml, size)
+      if (/MiniAppHostActivity/.test(foreground?.activity || '') && bounds) {
+        return { xml, bounds, activity: foreground.activity, startedAt }
+      }
+      if (Date.now() - startedAt >= 3_000 && douyinSearchInput(xml)) {
+        throw new Error('小程序入口卡片已点击，但页面仍停留在抖音搜索结果；为避免重复点击，本题已停止。')
+      }
+    }
+    throw new Error('小程序入口卡片已点击，但未能确认抖音小程序宿主页打开。')
+  }
+
+  async function waitForDouyinMiniAppAnswer(full, timeout) {
+    const deadline = full.startedAt + timeout
+    const contentHeight = full.bounds[3] - full.bounds[1]
+    const readinessBounds = [
+      full.bounds[0],
+      full.bounds[1] + Math.floor(contentHeight * 0.48),
+      full.bounds[2],
+      full.bounds[3] - Math.max(12, Math.floor(contentHeight * 0.03)),
+    ]
+    let lastProgress = 0
+    while (Date.now() < deadline) {
+      checkCancelled()
+      const frame = await cropImage(await screenshot(), readinessBounds)
+      if (await imageLooksLoaded(frame)) {
+        log('waiting: 抖音小程序回答正文已出现，继续等待画面稳定')
+        const remaining = Math.max(1_000, deadline - Date.now())
+        const stable = await waitForStableReply(remaining, { startedAt: full.startedAt })
+        if (stable.status !== 'stable') throw new Error(`抖音小程序回答已出现，但等待稳定超时（${stable.status}）。`)
+        const bounds = douyinMiniAppCaptureBounds(stable.xml, await windowSize())
+        if (!bounds) throw new Error('抖音小程序回答稳定后未能重新确认正文截图区域。')
+        return { ...full, xml: stable.xml, bounds }
+      }
+      if (Date.now() - lastProgress >= 5_000) {
+        log('waiting: 已进入抖音小荷AI医生小程序，正在等待回答正文出现…')
+        lastProgress = Date.now()
+      }
+      await sleep(1_000)
+    }
+    throw new Error('已进入抖音小荷AI医生小程序，但等待时间内未出现可截图的回答正文。')
   }
 
   async function waitForToutiaoAnswerCard(timeout) {
@@ -1288,6 +1648,11 @@ function createRunner(options) {
       waitForStable: waitForStableReplyRegion,
       log,
     }, navigationBounds)
+    if (!questionVisible(evidence.capture.xml || await source(), question, navigationBounds)) {
+      requireQuestionLocated(await scrollQuestionIntoView(question, navigationBounds), question)
+      evidence.capture = await waitForStableReplyRegion(navigationBounds)
+      log('capture: 引用资料展开后已重新确认问题气泡完整位于首屏')
+    }
     const { bounds, floatingControl } = replyCaptureBounds(evidence.capture.xml || await source(), size)
     validateCaptureViewport(size, bounds)
     log(`capture: chat bounds=${bounds.join(',')}${floatingControl ? '（已在顶部稳定后避开固定向下按钮）' : ''}`)
@@ -1419,6 +1784,7 @@ function createRunner(options) {
       fallbackReasons,
       topNavigationMs,
       questionLocated: true,
+      questionFullyVisible: true,
       evidenceEmbedded: evidence.found,
       evidenceExpanded: evidence.expanded,
       productDetected,
@@ -1464,6 +1830,10 @@ function createRunner(options) {
     let recaptureCount = 0
     let unchangedCount = 0
     let scrollAttempts = 0
+    let productDetected = false
+    let products = null
+    let productCaptureAttempts = 0
+    let productCaptureMs = 0
     if (initialQuietMs > 0) {
       log(`waiting: 正在等待${platformLabel}小荷AI全文连续${Math.round(initialQuietMs / 1000)}秒无画面活动`)
       await waitForFinalVisualQuiet({ quietMs: initialQuietMs, timeout: 25_000 })
@@ -1471,6 +1841,41 @@ function createRunner(options) {
     let capture = await waitForMiniAppStableRegion(initialBounds, platformLabel, 12_000)
     let bounds = douyinMiniAppCaptureBounds(capture.xml || initialXml, await windowSize()) || initialBounds
     if (bounds.join(',') !== initialBounds.join(',')) capture = await waitForMiniAppStableRegion(bounds, platformLabel, 8_000)
+
+    const captureProductsIfVisible = async xml => {
+      if (products) return true
+      let trigger = miniAppReferenceProductsTrigger(xml, bounds)
+      if (!trigger) return false
+      productDetected = true
+      const started = Date.now()
+      let lastError = null
+      try {
+        for (let attempt = 0; attempt < 2 && !products; attempt += 1) {
+          productCaptureAttempts += 1
+          try {
+            const candidate = await captureReferenceProductsAtTrigger(trigger, {
+              triggerResolver: latestXml => miniAppReferenceProductsTrigger(latestXml, bounds),
+            })
+            if (!candidate.firstViewportIncluded) throw new Error('参考药品首项所在视口未纳入截图')
+            if (!candidate.imagesReady) throw new Error(`参考药品图片仍有 ${candidate.unloaded} 处未确认加载`)
+            if (!candidate.confirmedEnd) throw new Error('参考药品列表未确认到底')
+            if (!candidate.continuityVerified) throw new Error('参考药品拼接连续性未通过校验')
+            products = candidate
+          } catch (error) {
+            lastError = error
+            if (attempt < 1) {
+              log(`capture: ${platformLabel}参考药品采集未完成，在回答尾部入口直接重试（2/2）：${error.message}`)
+              trigger = miniAppReferenceProductsTrigger(await source(), bounds) || trigger
+            }
+          }
+        }
+        if (!products) throw new Error(`${platformLabel}参考药品为必采内容，但两次采集均未完成：${lastError?.message || '未知错误'}`)
+        log(`capture: ${platformLabel}参考药品已从首项到末项完整采集，本题截图结束`)
+        return true
+      } finally {
+        productCaptureMs += Date.now() - started
+      }
+    }
 
     let topUnchangedCount = 0
     let topNavigationAttempts = 0
@@ -1485,7 +1890,9 @@ function createRunner(options) {
     frames.push(capture.frame)
     log(`capture: ${platformLabel}小荷AI全文 page 1`)
 
-    while (unchangedCount < 2) {
+    let terminalSequence = await captureProductsIfVisible(capture.xml || await source())
+
+    while (!terminalSequence && unchangedCount < 2) {
       scrollAttempts += 1
       const before = frames.at(-1)
       const scroll = await swipeChat(bounds, 'down', 0.5, { maxFraction: 0.58, speed: 1_600, eventDrivenSettle: true })
@@ -1526,8 +1933,9 @@ function createRunner(options) {
         transitions.push(transition)
         log(`capture: ${platformLabel}小荷AI全文 page ${frames.length}`)
       }
+      terminalSequence = await captureProductsIfVisible(afterCapture.xml || await source())
     }
-    log(`capture: ${platformLabel}小荷AI全文连续两次滚动无变化，已确认到底`)
+    if (!terminalSequence) log(`capture: ${platformLabel}小荷AI全文连续两次滚动无变化，已确认到底`)
     return {
       frames,
       transitions,
@@ -1538,10 +1946,10 @@ function createRunner(options) {
       topNavigationMs: 0,
       evidenceEmbedded: false,
       evidenceExpanded: false,
-      productDetected: false,
-      products: null,
-      productCaptureAttempts: 0,
-      productCaptureMs: 0,
+      productDetected,
+      products,
+      productCaptureAttempts,
+      productCaptureMs,
       captureMetadata: {
         [openedMetadataKey]: true,
         [`${metadataPrefix}_full_page_confirmed_top`]: true,
@@ -1557,6 +1965,16 @@ function createRunner(options) {
       platformLabel: '抖音',
       metadataPrefix: 'douyin',
       openedMetadataKey: 'douyin_view_full_opened',
+      initialQuietMs: REPLY_STABLE_QUIET_MS,
+    })
+  }
+
+  function captureDouyinMiniAppEntryAnswerFrames(initialXml, initialBounds) {
+    return captureMiniAppFullAnswerFrames(initialXml, initialBounds, {
+      platformLabel: '抖音',
+      metadataPrefix: 'douyin',
+      openedMetadataKey: 'douyin_miniapp_entry_opened',
+      initialQuietMs: REPLY_STABLE_QUIET_MS,
     })
   }
 
@@ -1735,12 +2153,22 @@ function createRunner(options) {
     return !referenceProductDrawerBounds(await source()).sheet
   }
 
-  async function captureReferenceProductsAtTrigger(trigger, { restoreDrawer = true, chatBounds = null } = {}) {
+  async function captureReferenceProductsAtTrigger(trigger, { restoreDrawer = true, chatBounds = null, triggerResolver = null } = {}) {
     log('capture: 回答滚动中发现推荐药品入口，正在从首项开始采集完整列表')
     await waitForVisualQuiet({ timeout: 1_200, fallbackMs: 350 })
     let triggerRefreshed = false
-    if (chatBounds) {
-      const refreshed = refreshedReferenceProductsTrigger(await source(), chatBounds, trigger)
+    if (chatBounds || triggerResolver) {
+      const latestXml = await source()
+      const refreshed = triggerResolver
+        ? (() => {
+            const latest = triggerResolver(latestXml)
+            if (!latest) throw new Error('推荐药品入口在点击前已离开当前视口；为避免点击错误位置已停止操作')
+            return {
+              trigger: latest,
+              moved: Math.hypot(latest[0] - trigger[0], latest[1] - trigger[1]) > 12,
+            }
+          })()
+        : refreshedReferenceProductsTrigger(latestXml, chatBounds, trigger)
       trigger = refreshed.trigger
       triggerRefreshed = refreshed.moved
       if (triggerRefreshed) log(`capture: 推荐药品入口在页面稳定后发生位移，已刷新点击坐标为 ${trigger.join(',')}`)
@@ -1812,16 +2240,21 @@ function createRunner(options) {
 
   let payloadMaxLongImageHeight = DEFAULT_MAX_LONG_IMAGE_HEIGHT
 
-  async function saveArtifacts({ outDir, stem, question, status, xml, meta, stitch = true, captureMethod = captureFullReplyFrames, observerBaseline, recoveryBaseline }) {
-    await fs.mkdir(outDir, { recursive: true })
-    const xmlPath = path.join(outDir, `${stem}.xml`)
-    const metadataPath = path.join(outDir, `${stem}.json`)
-    let screenshotPath = path.join(outDir, `${stem}.png`)
+  async function saveArtifacts({ artifacts, stem, question, status, xml, meta, stitch = true, captureMethod = captureFullReplyFrames, observerBaseline, recoveryBaseline }) {
+    const deliveryDirectory = artifacts.deliveryDirectory
+    const diagnosticDirectory = artifacts.diagnosticDirectory
+    await Promise.all([
+      fs.mkdir(deliveryDirectory, { recursive: true }),
+      fs.mkdir(diagnosticDirectory, { recursive: true }),
+    ])
+    const xmlPath = path.join(diagnosticDirectory, `${stem}.xml`)
+    const metadataPath = path.join(diagnosticDirectory, `${stem}.json`)
+    let screenshotPath = path.join(deliveryDirectory, `${stem}.png`)
     let resultMeta = { ...meta }
     if (stitch) {
       const replyCaptureStarted = Date.now()
       const capture = await captureMethod(question)
-      const { frames, transitions, bounds, recaptureCount, fullRetryCount, fallbackReasons, topNavigationMs, questionLocated, evidenceEmbedded, evidenceExpanded, productDetected, products, productCaptureAttempts, productCaptureMs, captureMetadata = {} } = capture
+      const { frames, transitions, bounds, recaptureCount, fullRetryCount, fallbackReasons, topNavigationMs, questionLocated, questionFullyVisible, evidenceEmbedded, evidenceExpanded, productDetected, products, productCaptureAttempts, productCaptureMs, captureMetadata = {} } = capture
       if (!referenceProductsCaptureComplete({ detected: productDetected, products })) {
         throw new Error('检测到推荐药品入口，但药品截图未完整完成')
       }
@@ -1831,7 +2264,7 @@ function createRunner(options) {
       const images = await buildReplyImages(frames, { transitions, maxHeight: payloadMaxLongImageHeight })
       const replyCaptureMs = Date.now() - replyCaptureStarted
       const paths = []
-      for (const [index, image] of images.entries()) { const file = path.join(outDir, `${stem}_${String(index + 1).padStart(3, '0')}.png`); await fs.writeFile(file, image); paths.push(file) }
+      for (const [index, image] of images.entries()) { const file = path.join(deliveryDirectory, `${stem}_${String(index + 1).padStart(3, '0')}.png`); await fs.writeFile(file, image); paths.push(file) }
       screenshotPath = paths[0]
       resultMeta = {
         ...resultMeta,
@@ -1847,6 +2280,7 @@ function createRunner(options) {
         reply_full_retry_count: fullRetryCount,
         reply_top_navigation_ms: topNavigationMs,
         ...(questionLocated !== undefined ? { reply_question_located: questionLocated } : {}),
+        ...(questionFullyVisible !== undefined ? { reply_question_fully_visible: questionFullyVisible } : {}),
         reply_evidence_embedded: evidenceEmbedded,
         reply_evidence_expanded: evidenceExpanded,
         reply_capture_ms: replyCaptureMs,
@@ -1865,7 +2299,7 @@ function createRunner(options) {
       log(`capture: 回答截图完成，帧=${frames.length}，精确接缝=${seamsVerified}/${seamsTotal}，安全重复接缝=${seamsTotal - seamsVerified}，重采=${recaptureCount}，模式=${resultMeta.reply_capture_mode}，耗时=${replyCaptureMs}ms`)
       if (products) {
         const paths = []
-        for (const [index, image] of products.images.entries()) { const file = path.join(outDir, `${stem}_参考药品_${String(index + 1).padStart(3, '0')}.png`); await fs.writeFile(file, image); paths.push(file) }
+        for (const [index, image] of products.images.entries()) { const file = path.join(deliveryDirectory, `${stem}_参考药品_${String(index + 1).padStart(3, '0')}.png`); await fs.writeFile(file, image); paths.push(file) }
         Object.assign(resultMeta, {
           reference_products_screenshot: paths[0],
           reference_products_parts: paths,
@@ -1885,19 +2319,31 @@ function createRunner(options) {
     } else await fs.writeFile(screenshotPath, await screenshot())
     await fs.writeFile(xmlPath, xml || await normalizedHierarchy(), 'utf8')
     resultMeta = { ...resultMeta, ...observerMetadata(observerBaseline, recoveryBaseline) }
-    await fs.writeFile(metadataPath, JSON.stringify({ question, status, created_at: new Date().toISOString().replace(/\.\d{3}Z$/, ''), screenshot: screenshotPath, hierarchy: xmlPath, ...resultMeta }, null, 2), 'utf8')
+    await fs.writeFile(metadataPath, JSON.stringify({
+      question,
+      status,
+      created_at: new Date().toISOString().replace(/\.\d{3}Z$/, ''),
+      artifact_layout_version: 2,
+      delivery_directory: deliveryDirectory,
+      diagnostic_directory: diagnosticDirectory,
+      event_log: path.join(diagnosticDirectory, '执行日志.jsonl'),
+      batch_event_log: batchEventLog?.filePath || null,
+      screenshot: screenshotPath,
+      hierarchy: xmlPath,
+      ...resultMeta,
+    }, null, 2), 'utf8')
     return { screenshot: screenshotPath, hierarchy: xmlPath, metadata: metadataPath }
   }
 
-  async function askOnceDouyin(payload, batchDirectory, question, index) {
+  async function askOnceDouyin(payload, artifacts, question, index) {
     const observerBaseline = typeof observer.snapshot === 'function' ? observer.snapshot() : {}
     const recoveryBaseline = recoverySnapshot()
     log('stage: 正在打开抖音搜索框并输入问题')
     const search = await inputDouyinQuestion(question)
-    const directory = questionArtifactDirectory(batchDirectory, index, question)
+    const directory = artifacts.diagnosticDirectory
     const meta = {
       serial: payload.serial,
-      batch_id: path.basename(batchDirectory),
+      batch_id: path.basename(artifacts.batchDirectory),
       question_index: index,
       question_directory: directory,
       entry_id: activeEntry.id,
@@ -1914,7 +2360,7 @@ function createRunner(options) {
     await tap((search[0] + search[2]) / 2, (search[1] + search[3]) / 2)
     let card
     try {
-      card = await waitForDouyinAnswerCard(payload.timeout * 1_000)
+      card = await waitForDouyinSearchResult(payload.timeout * 1_000)
     } catch (error) {
       await fs.mkdir(directory, { recursive: true })
       const [xml, frame] = await Promise.all([source(), screenshot()])
@@ -1925,43 +2371,72 @@ function createRunner(options) {
       log(`diagnostic: 抖音搜索超时现场已保存到 ${directory}`)
       throw error
     }
-    log('stage: 已找到小荷AI医生回答卡片，正在截取搜索结果智能总结')
-    const summary = await captureDouyinSearchSummary(card.size)
-    await fs.mkdir(directory, { recursive: true })
-    const summaryPath = path.join(directory, DOUYIN_SEARCH_SUMMARY_FILENAME)
-    await fs.writeFile(summaryPath, summary.frame)
-    Object.assign(meta, {
-      douyin_search_summary_captured: true,
-      douyin_search_summary_screenshot: summaryPath,
-      douyin_question_logical_image_count: 2,
-    })
-    log(`capture: 抖音搜索结果智能总结已保存 ${summaryPath}`)
-    log('stage: 已找到小荷AI医生回答卡片，正在点击查看全文')
-    const full = await openDouyinFullAnswer(summary.viewFull, card.size)
-    log('stage: 小荷AI医生全文页已打开，开始从上到下完整截图')
+    const searchCapture = await captureDouyinSearchTarget(card.size)
+    await fs.mkdir(artifacts.deliveryDirectory, { recursive: true })
+    let leadingScreenshotPath
+    let full
+    let captureMethod
+    if (searchCapture.target.mode === 'smart_summary') {
+      log('stage: 已找到小荷AI医生回答卡片，正在截取搜索结果智能总结')
+      leadingScreenshotPath = path.join(artifacts.deliveryDirectory, DOUYIN_SEARCH_SUMMARY_FILENAME)
+      await fs.writeFile(leadingScreenshotPath, searchCapture.frame)
+      Object.assign(meta, {
+        douyin_result_mode: 'smart_summary',
+        douyin_search_summary_captured: true,
+        douyin_search_summary_screenshot: leadingScreenshotPath,
+        douyin_miniapp_entry_detected: false,
+        douyin_question_logical_image_count: 2,
+      })
+      log(`capture: 抖音搜索结果智能总结已保存 ${leadingScreenshotPath}`)
+      log('stage: 已找到小荷AI医生回答卡片，正在点击查看全文')
+      full = await openDouyinFullAnswer(searchCapture.target.viewFull, card.size)
+      captureMethod = () => captureDouyinFullAnswerFrames(full.xml, full.bounds)
+    } else {
+      log('stage: 未出现智能总结，已识别小荷AI医生小程序入口卡片')
+      leadingScreenshotPath = path.join(artifacts.deliveryDirectory, DOUYIN_MINIAPP_ENTRY_FILENAME)
+      await fs.writeFile(leadingScreenshotPath, searchCapture.frame)
+      log(`capture: 抖音小程序入口搜索页已保存 ${leadingScreenshotPath}`)
+      log('stage: 正在通过独立入口卡片打开小荷AI医生小程序')
+      full = await openDouyinMiniAppEntry(searchCapture.target, card.size)
+      Object.assign(meta, {
+        douyin_result_mode: 'miniapp_entry_card',
+        douyin_search_summary_captured: false,
+        douyin_miniapp_entry_detected: true,
+        douyin_miniapp_entry_screenshot: leadingScreenshotPath,
+        douyin_miniapp_entry_card_bounds: searchCapture.target.cardBounds,
+        douyin_miniapp_entry_tap_bounds: searchCapture.target.tapBounds,
+        douyin_miniapp_entry_activity: full.activity,
+        douyin_question_logical_image_count: 2,
+      })
+      full = await waitForDouyinMiniAppAnswer(full, payload.timeout * 1_000)
+      captureMethod = () => captureDouyinMiniAppEntryAnswerFrames(full.xml, full.bounds)
+    }
+    log('stage: 小荷AI医生全文页已打开且回答可截图，开始从上到下完整截图')
     const result = await saveArtifacts({
-      outDir: directory,
+      artifacts,
       stem: '回答',
       question,
       status: 'stable',
       xml: full.xml,
       meta,
-      captureMethod: () => captureDouyinFullAnswerFrames(full.xml, full.bounds),
+      captureMethod,
       observerBaseline,
       recoveryBaseline,
     })
-    return { summaryScreenshot: summaryPath, ...result }
+    return searchCapture.target.mode === 'smart_summary'
+      ? { summaryScreenshot: leadingScreenshotPath, ...result }
+      : { entryScreenshot: leadingScreenshotPath, ...result }
   }
 
-  async function askOnceToutiao(payload, batchDirectory, question, index) {
+  async function askOnceToutiao(payload, artifacts, question, index) {
     const observerBaseline = typeof observer.snapshot === 'function' ? observer.snapshot() : {}
     const recoveryBaseline = recoverySnapshot()
     log('stage: 正在打开头条搜索框并输入问题')
     const search = await inputToutiaoQuestion(question)
-    const directory = questionArtifactDirectory(batchDirectory, index, question)
+    const directory = artifacts.diagnosticDirectory
     const meta = {
       serial: payload.serial,
-      batch_id: path.basename(batchDirectory),
+      batch_id: path.basename(artifacts.batchDirectory),
       question_index: index,
       question_directory: directory,
       entry_id: activeEntry.id,
@@ -1979,8 +2454,8 @@ function createRunner(options) {
     const card = await waitForToutiaoAnswerCard(payload.timeout * 1_000)
     log('stage: 已找到头条小荷AI医生回答卡片，正在截取搜索结果智能总结')
     const summary = await captureToutiaoSearchSummary(card.size)
-    await fs.mkdir(directory, { recursive: true })
-    const summaryPath = path.join(directory, TOUTIAO_SEARCH_SUMMARY_FILENAME)
+    await fs.mkdir(artifacts.deliveryDirectory, { recursive: true })
+    const summaryPath = path.join(artifacts.deliveryDirectory, TOUTIAO_SEARCH_SUMMARY_FILENAME)
     await fs.writeFile(summaryPath, summary.frame)
     Object.assign(meta, {
       toutiao_search_summary_captured: true,
@@ -1992,7 +2467,7 @@ function createRunner(options) {
     const full = await openToutiaoFullAnswer(summary.viewMore, card.size)
     log('stage: 头条小荷AI医生全文页已打开，开始从上到下完整截图')
     const result = await saveArtifacts({
-      outDir: directory,
+      artifacts,
       stem: '回答',
       question,
       status: 'stable',
@@ -2005,9 +2480,9 @@ function createRunner(options) {
     return { summaryScreenshot: summaryPath, ...result }
   }
 
-  async function askOnce(payload, batchDirectory, question, index) {
-    if (activeEntry.workflow === 'douyin-search') return askOnceDouyin(payload, batchDirectory, question, index)
-    if (activeEntry.workflow === 'toutiao-search') return askOnceToutiao(payload, batchDirectory, question, index)
+  async function askOnce(payload, artifacts, question, index) {
+    if (activeEntry.workflow === 'douyin-search') return askOnceDouyin(payload, artifacts, question, index)
+    if (activeEntry.workflow === 'toutiao-search') return askOnceToutiao(payload, artifacts, question, index)
     const observerBaseline = typeof observer.snapshot === 'function' ? observer.snapshot() : {}
     const recoveryBaseline = recoverySnapshot()
     let newSessionPerformed = false
@@ -2019,10 +2494,10 @@ function createRunner(options) {
     }
     log('stage: 正在输入问题')
     await inputQuestion(question)
-    const directory = questionArtifactDirectory(batchDirectory, index, question)
+    const directory = artifacts.diagnosticDirectory
     const meta = {
       serial: payload.serial,
-      batch_id: path.basename(batchDirectory),
+      batch_id: path.basename(artifacts.batchDirectory),
       question_index: index,
       question_directory: directory,
       entry_id: activeEntry.id,
@@ -2049,7 +2524,7 @@ function createRunner(options) {
     const result = await waitForStableReply(payload.timeout * 1_000, { startedAt: replyStartedAt })
     log(`stage: 回答等待结束（${result.status}），开始截图`)
     return saveArtifacts({
-      outDir: directory,
+      artifacts,
       stem: '回答',
       question,
       status: result.status,
@@ -2080,10 +2555,16 @@ function createRunner(options) {
   return {
     async captureCurrentAnswer(payload) {
       activeSerial = payload.serial
-      resetEntryState(ENTRY_DEFINITIONS[DEFAULT_ENTRY_ID])
+      if ((payload.entries || []).length > 1) throw new Error('当前已有回答模式一次只能指定一个入口。')
+      const requestedEntry = (payload.entries || []).length
+        ? normalizeAutomationEntries(payload.entries)[0]
+        : ENTRY_DEFINITIONS[DEFAULT_ENTRY_ID]
+      resetEntryState(requestedEntry)
       payloadMaxLongImageHeight = maxLongImageHeight(payload.maxLongImageHeight)
       const outputRoot = path.resolve(payload.outputDir)
       const batchDirectory = await createBatchDirectory(outputRoot)
+      const batchArtifacts = batchArtifactDirectories(batchDirectory)
+      await initializeArtifactLogging(batchArtifacts, payload, 'capture_current_existing_reply')
       try {
         await waitForAdbDevice(options.adbPath, payload.serial)
         await ui.start(payload.serial)
@@ -2096,32 +2577,56 @@ function createRunner(options) {
         const observerBaseline = typeof observer.snapshot === 'function' ? observer.snapshot() : {}
         const recoveryBaseline = recoverySnapshot()
         let xml = await source()
-        const alreadyOpen = Boolean(boundsForResourceId(xml, 'bullet_container'))
+        const alreadyOpen = Boolean(referenceProductDrawerBounds(xml).sheet)
         if (alreadyOpen) throw new Error('当前药品抽屉已经打开，无法证明仍位于第一项；为避免漏药，本次未继续操作，也未输入或发送新问题。')
         const size = await windowSize()
-        const chatBounds = findChatScrollBounds(xml, size)
-        validateCaptureViewport(size, chatBounds)
-        let question = currentQuestionText(xml, chatBounds)
-        let unchangedAtTop = 0
-        let locateFrame = question ? null : await cropImage(await screenshot(), chatBounds)
-        while (!question && unchangedAtTop < 2) {
-          const scroll = await swipeChat(chatBounds, 'up', 0.45, { speed: 2_600, settle: 100, eventDrivenSettle: true })
-          const settled = await waitForStableReplyRegion(chatBounds, 3_000, { settleSince: scroll.activityMark })
-          xml = settled.xml || await source()
+        let question = ''
+        let captureMethod = captureFullReplyFrames
+        if (activeEntry.workflow === 'douyin-search' || activeEntry.workflow === 'toutiao-search') {
+          question = String(payload.questions?.[0] || '').trim()
+          if (!question) throw new Error('小程序当前已有回答模式需要在命令末尾提供当前问题文字，仅用于文件夹命名；不会输入或发送。')
+          const bounds = douyinMiniAppCaptureBounds(xml, size)
+          if (!bounds) throw new Error(`当前页面不是${activeEntry.label}的已打开全文页；本次未输入或发送。`)
+          if (activeEntry.workflow === 'douyin-search') {
+            const foreground = await ui.foregroundWindow()
+            if (foreground?.package !== activePackageName() || !/MiniAppHostActivity/.test(foreground?.activity || '')) {
+              throw new Error(`当前前台不是抖音小程序宿主页；本次未输入或发送（activity=${foreground?.activity || 'unknown'}）。`)
+            }
+            captureMethod = () => captureDouyinMiniAppEntryAnswerFrames(xml, bounds)
+          } else captureMethod = () => captureToutiaoFullAnswerFrames(xml, bounds)
+        } else {
+          const chatBounds = findChatScrollBounds(xml, size)
+          validateCaptureViewport(size, chatBounds)
           question = currentQuestionText(xml, chatBounds)
-          unchangedAtTop = await imagesSimilar(locateFrame, settled.frame, 3) ? unchangedAtTop + 1 : 0
-          locateFrame = settled.frame
+          let unchangedAtTop = 0
+          let locateFrame = question ? null : await cropImage(await screenshot(), chatBounds)
+          while (!question && unchangedAtTop < 2) {
+            const scroll = await swipeChat(chatBounds, 'up', 0.45, { speed: 2_600, settle: 100, eventDrivenSettle: true })
+            const settled = await waitForStableReplyRegion(chatBounds, 3_000, { settleSince: scroll.activityMark })
+            xml = settled.xml || await source()
+            question = currentQuestionText(xml, chatBounds)
+            unchangedAtTop = await imagesSimilar(locateFrame, settled.frame, 3) ? unchangedAtTop + 1 : 0
+            locateFrame = settled.frame
+          }
+          if (!question) {
+            await waitForVisualQuiet({ timeout: 900, fallbackMs: 300 })
+            xml = await source()
+            question = currentQuestionText(xml, chatBounds)
+          }
+          if (!question) throw new Error('无法从当前已有回答向上定位对应问题；本次未输入、未发送，也未新建会话。')
         }
-        if (!question) {
-          await waitForVisualQuiet({ timeout: 900, fallbackMs: 300 })
-          xml = await source()
-          question = currentQuestionText(xml, chatBounds)
-        }
-        if (!question) throw new Error('无法从当前已有回答向上定位对应问题；本次未输入、未发送，也未新建会话。')
+        const artifacts = questionArtifactDirectories(batchArtifacts, 1, question)
+        await startQuestionLogging(artifacts, {
+          batch_id: path.basename(batchDirectory),
+          serial: payload.serial,
+          entry_id: activeEntry.id,
+          entry_label: activeEntry.label,
+          question,
+          question_index: 1,
+        })
         log(`capture: 已识别当前已有问题“${question}”，开始执行正文、引用资料和完整参考药品归档；不会输入或发送内容`)
-        const directory = questionArtifactDirectory(batchDirectory, 1, question)
-        return await saveArtifacts({
-          outDir: directory,
+        const result = await saveArtifacts({
+          artifacts,
           stem: '回答',
           question,
           status: 'existing_reply',
@@ -2130,7 +2635,7 @@ function createRunner(options) {
             serial: payload.serial,
             batch_id: path.basename(batchDirectory),
             question_index: 1,
-            question_directory: directory,
+            question_directory: artifacts.diagnosticDirectory,
             entry_id: activeEntry.id,
             entry_label: activeEntry.label,
             entry_package: activePackageName(),
@@ -2141,14 +2646,54 @@ function createRunner(options) {
             ui_backend: 'python_uiautomator2_strict',
             ui_fallback_enabled: false,
           },
+          captureMethod,
           observerBaseline,
           recoveryBaseline,
         })
-      } catch (error) {
-        await fs.writeFile(path.join(batchDirectory, 'automation-failure.json'), JSON.stringify({
+        await finishQuestionLogging('question_completed', { status: 'existing_reply', screenshot: result.screenshot, metadata: result.metadata })
+        const summaryPath = path.join(batchArtifacts.diagnosticDirectory, 'batch-summary.json')
+        const summary = {
           created_at: new Date().toISOString(),
           serial: payload.serial,
           mode: 'capture_current_existing_reply',
+          question_count: 1,
+          total: 1,
+          completed: 1,
+          failed: 0,
+          status: 'completed',
+          artifact_layout_version: 2,
+          batch_directory: batchDirectory,
+          delivery_directory: batchArtifacts.deliveryDirectory,
+          diagnostic_directory: batchArtifacts.diagnosticDirectory,
+          event_log: batchEventLog.filePath,
+          summary: summaryPath,
+          results: [{
+            status: 'completed',
+            entry_id: activeEntry.id,
+            entry_label: activeEntry.label,
+            question,
+            question_index: 1,
+            delivery_directory: artifacts.deliveryDirectory,
+            diagnostic_directory: artifacts.diagnosticDirectory,
+            event_log: path.join(artifacts.diagnosticDirectory, '执行日志.jsonl'),
+            ...result,
+          }],
+        }
+        await fs.writeFile(summaryPath, JSON.stringify(summary, null, 2), 'utf8')
+        await batchEventLog.record('batch_completed', { category: 'lifecycle', details: { completed: 1, failed: 0, summary: summaryPath } })
+        return { ...result, summary: summaryPath }
+      } catch (error) {
+        await finishQuestionLogging('question_failed', { error_name: error?.name || 'Error', error_message: error?.message || String(error) }).catch(() => {})
+        await batchEventLog.record('batch_failed', { category: 'error', details: { error_name: error?.name || 'Error', error_message: error?.message || String(error) } }).catch(() => {})
+        await fs.writeFile(path.join(batchArtifacts.diagnosticDirectory, 'automation-failure.json'), JSON.stringify({
+          created_at: new Date().toISOString(),
+          serial: payload.serial,
+          mode: 'capture_current_existing_reply',
+          artifact_layout_version: 2,
+          batch_directory: batchDirectory,
+          delivery_directory: batchArtifacts.deliveryDirectory,
+          diagnostic_directory: batchArtifacts.diagnosticDirectory,
+          event_log: batchEventLog.filePath,
           input_performed: false,
           send_performed: false,
           new_session_performed: false,
@@ -2160,6 +2705,7 @@ function createRunner(options) {
       } finally {
         await observer.stop().catch(() => {})
         await ui.stop().catch(() => {})
+        await flushArtifactLogs().catch(() => {})
       }
     },
     async run(payload) {
@@ -2168,6 +2714,8 @@ function createRunner(options) {
       const entries = normalizeAutomationEntries(payload.entries)
       const outputRoot = path.resolve(payload.outputDir)
       const batchDirectory = await createBatchDirectory(outputRoot)
+      const batchArtifacts = batchArtifactDirectories(batchDirectory)
+      await initializeArtifactLogging(batchArtifacts, payload, 'batch_questions')
       try {
         await waitForAdbDevice(options.adbPath, payload.serial)
         await ui.start(payload.serial)
@@ -2179,31 +2727,62 @@ function createRunner(options) {
         log(`device=${payload.serial} entries=${entries.map(entry => entry.id).join(',')} batch=${batchDirectory}`)
         let completed = 0
         let failed = 0
+        const results = []
         const failures = []
         for (const [entryIndex, entry] of entries.entries()) {
           checkCancelled()
           log(`entry: [${entryIndex + 1}/${entries.length}] ${entry.label} package=${entry.packageName}`)
-          const entryDirectory = entries.length > 1
-            ? path.join(batchDirectory, `${String(entryIndex + 1).padStart(2, '0')}_${safeSlug(entry.label, 48)}`)
-            : batchDirectory
+          const entryArtifacts = entryArtifactDirectories(batchArtifacts, entryIndex + 1, entry.label, entries.length)
           const entryResult = await runQuestionsWithRecovery({
             questions: payload.questions,
+            beforeQuestion: async (question, index) => {
+              const artifacts = questionArtifactDirectories(entryArtifacts, index, question)
+              await startQuestionLogging(artifacts, {
+                batch_id: path.basename(batchDirectory),
+                serial: payload.serial,
+                entry_id: entry.id,
+                entry_label: entry.label,
+                question,
+                question_index: index,
+              })
+              log(`[${entryIndex + 1}/${entries.length} ${index}/${payload.questions.length}] task ready via ${entry.label}: ${question}`)
+            },
             prepare: () => prepareEntry(entry),
             execute: async (question, index) => {
+              const artifacts = questionArtifactDirectories(entryArtifacts, index, question)
               log(`[${entryIndex + 1}/${entries.length} ${index}/${payload.questions.length}] asking via ${entry.label}: ${question}`)
-              log(JSON.stringify(await askOnce(payload, entryDirectory, question, index)))
+              const result = await askOnce(payload, artifacts, question, index)
+              log(JSON.stringify(result))
+              results.push({
+                status: 'completed',
+                entry_id: entry.id,
+                entry_label: entry.label,
+                question,
+                question_index: index,
+                delivery_directory: artifacts.deliveryDirectory,
+                diagnostic_directory: artifacts.diagnosticDirectory,
+                event_log: path.join(artifacts.diagnosticDirectory, '执行日志.jsonl'),
+                ...result,
+              })
+              await finishQuestionLogging('question_completed', { screenshot: result.screenshot, metadata: result.metadata })
             },
             recordFailure: async (error, question, index) => {
-              const directory = questionArtifactDirectory(entryDirectory, index, question)
+              const artifacts = questionArtifactDirectories(entryArtifacts, index, question)
+              const directory = artifacts.diagnosticDirectory
               const failurePath = path.join(directory, '失败.json')
               const failure = {
                 created_at: new Date().toISOString(),
                 status: 'failed',
+                artifact_layout_version: 2,
                 serial: payload.serial,
                 batch_id: path.basename(batchDirectory),
                 question,
                 question_index: index,
                 question_directory: directory,
+                delivery_directory: artifacts.deliveryDirectory,
+                diagnostic_directory: artifacts.diagnosticDirectory,
+                event_log: path.join(directory, '执行日志.jsonl'),
+                batch_event_log: batchEventLog.filePath,
                 entry_id: entry.id,
                 entry_label: entry.label,
                 entry_package: entry.packageName,
@@ -2223,8 +2802,20 @@ function createRunner(options) {
                 error_name: failure.error_name,
                 error_message: failure.error_message,
               })
+              results.push({
+                status: 'failed',
+                entry_id: entry.id,
+                entry_label: entry.label,
+                question,
+                question_index: index,
+                delivery_directory: artifacts.deliveryDirectory,
+                diagnostic_directory: artifacts.diagnosticDirectory,
+                event_log: path.join(directory, '执行日志.jsonl'),
+                failure: failurePath,
+              })
               log(`failed: [${entryIndex + 1}/${entries.length} ${index}/${payload.questions.length}] ${entry.label} / ${question}: ${failure.error_message}`)
               log(`recovery: 本题已记录到 ${failurePath}；下一题将重新启动并校验当前入口`)
+              await finishQuestionLogging('question_failed', { failure: failurePath, error_name: failure.error_name, error_message: failure.error_message })
             },
             checkCancelled,
           })
@@ -2232,26 +2823,40 @@ function createRunner(options) {
           failed += entryResult.failed
         }
         const total = entries.length * payload.questions.length
-        const summaryPath = path.join(batchDirectory, 'batch-summary.json')
+        const summaryPath = path.join(batchArtifacts.diagnosticDirectory, 'batch-summary.json')
         const summary = {
           created_at: new Date().toISOString(),
           serial: payload.serial,
+          artifact_layout_version: 2,
+          batch_directory: batchDirectory,
+          delivery_directory: batchArtifacts.deliveryDirectory,
+          diagnostic_directory: batchArtifacts.diagnosticDirectory,
+          event_log: batchEventLog.filePath,
           entries: entries.map(entry => ({ id: entry.id, label: entry.label, package: entry.packageName })),
           question_count: payload.questions.length,
           total,
           completed,
           failed,
           status: failed ? 'completed_with_failures' : 'completed',
+          results,
           failures,
           summary: summaryPath,
         }
         await fs.writeFile(summaryPath, JSON.stringify(summary, null, 2), 'utf8')
         log(`执行完成：计划=${total}，成功=${completed}，失败=${failed}，批次汇总=${summaryPath}`)
+        await batchEventLog.record('batch_result_saved', { category: 'lifecycle', details: { total, completed, failed, summary: summaryPath } })
         return summary
       } catch (error) {
-        await fs.writeFile(path.join(batchDirectory, 'automation-failure.json'), JSON.stringify({
+        await finishQuestionLogging('question_failed', { error_name: error?.name || 'Error', error_message: error?.message || String(error), fatal: true }).catch(() => {})
+        await batchEventLog.record('batch_failed', { category: 'error', details: { error_name: error?.name || 'Error', error_message: error?.message || String(error) } }).catch(() => {})
+        await fs.writeFile(path.join(batchArtifacts.diagnosticDirectory, 'automation-failure.json'), JSON.stringify({
           created_at: new Date().toISOString(),
           serial: payload.serial,
+          artifact_layout_version: 2,
+          batch_directory: batchDirectory,
+          delivery_directory: batchArtifacts.deliveryDirectory,
+          diagnostic_directory: batchArtifacts.diagnosticDirectory,
+          event_log: batchEventLog.filePath,
           entry_id: activeEntry.id,
           entry_label: activeEntry.label,
           entry_package: activePackageName(),
@@ -2265,6 +2870,7 @@ function createRunner(options) {
       } finally {
         await observer.stop().catch(() => {})
         await ui.stop().catch(() => {})
+        await flushArtifactLogs().catch(() => {})
       }
     },
     async stop() {
@@ -2280,14 +2886,19 @@ module.exports = {
   CancelledError,
   DEFAULT_PACKAGE,
   DEFAULT_ENTRY_ID,
+  DOUYIN_MINIAPP_ENTRY_FILENAME,
   DOUYIN_SEARCH_SUMMARY_FILENAME,
   TOUTIAO_SEARCH_SUMMARY_FILENAME,
   ENTRY_DEFINITIONS,
   automationEntries,
   normalizeAutomationEntries,
   douyinSearchInput,
+  douyinMiniAppEntryBounds,
+  douyinSearchResultTarget,
+  douyinSearchResultsBounds,
   douyinViewFullBounds,
   douyinMiniAppCaptureBounds,
+  miniAppReferenceProductsTrigger,
   toutiaoSearchInput,
   toutiaoViewMoreBounds,
   waitForPackageHierarchy,

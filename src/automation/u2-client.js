@@ -239,6 +239,14 @@ class U2Client {
     return this.request("health", {}, { retryRead: true });
   }
 
+  currentApp() {
+    return this.request("current_app", {}, { retryRead: true });
+  }
+
+  foregroundWindow() {
+    return this.request("foreground_window", {}, { retryRead: true });
+  }
+
   click(x, y) {
     return this.request("click", { x: Math.round(x), y: Math.round(y) });
   }

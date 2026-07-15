@@ -63,6 +63,8 @@ test('uiautomator2客户端使用长驻进程获取层级', async () => {
   try {
     await client.start('SERIAL')
     assert.match(await client.dumpHierarchy(), /fixture/)
+    assert.deepEqual(await client.currentApp(), { package: 'fixture.package', activity: '.FixtureActivity', pid: 123 })
+    assert.deepEqual(await client.foregroundWindow(), { package: 'fixture.package', activity: 'fixture.package.MiniAppHostActivity0' })
   } finally {
     await client.stop()
   }

@@ -7,9 +7,10 @@ const sharp = require('sharp')
 const XLSX = require('xlsx')
 const { questionVisible, currentQuestionText, replyTailOnScreen, findChatScrollBounds, validateCaptureViewport, floatingScrollControlBounds, replyCaptureBounds, estimateVerticalScrollShift, sharedTextSeam, evidencePanelBounds, visibleLabelBounds, visibleLabelBoundsList, boundsListForNodeAttribute, referenceProductsSection, referenceProductImageBounds } = require('../../src/automation/hierarchy')
 const { stackFramesInGroups, verifyFrameOverlap, verifyProductGridOverlap, imageInfo, imageLooksLoaded, imagesSimilar, imageRegionsStable, alignCropToWhitespace, stitchFramesWithOverlaps, composeLongImages, cropFramesAtTextSeams } = require('../../src/automation/images')
-const { createBatchDirectory, questionArtifactDirectory } = require('../../src/automation/utils')
+const { createBatchDirectory, questionArtifactDirectory, batchArtifactDirectories, entryArtifactDirectories, questionArtifactDirectories } = require('../../src/automation/utils')
+const { EventLog, classifyAutomationLog } = require('../../src/automation/event-log')
 const { loadQuestionFile } = require('../../src/questions')
-const { adbConnectionLost, automationEntries, captureStableObserved, captureStableSandwich, calibratedProductFallbackOverlap, chatSwipePlan, conservativeFallbackOverlap, buildReplyImages, CancelledError, DOUYIN_SEARCH_SUMMARY_FILENAME, TOUTIAO_SEARCH_SUMMARY_FILENAME, douyinMiniAppCaptureBounds, douyinSearchInput, douyinViewFullBounds, fillQuestionInput, hierarchyBelongsToPackage, historyOnboardingVisible, maxLongImageHeight, normalizeAutomationEntries, observerResultRequiresFreshCapture, prepareEmbeddedEvidence, referenceProductDrawerBounds, referenceProductsCaptureComplete, referenceProductSheetExpanded, referenceProductsTrigger, referenceProductViewportReadiness, refreshedReferenceProductsTrigger, requireQuestionLocated, runQuestionsWithRecovery, scrollEndConfirmed, shouldRetryFullReplyCapture, toutiaoSearchInput, toutiaoViewMoreBounds, waitForPackageHierarchy } = require('../../src/automation/runner')
+const { adbConnectionLost, automationEntries, captureStableObserved, captureStableSandwich, calibratedProductFallbackOverlap, chatSwipePlan, conservativeFallbackOverlap, buildReplyImages, CancelledError, DOUYIN_MINIAPP_ENTRY_FILENAME, DOUYIN_SEARCH_SUMMARY_FILENAME, TOUTIAO_SEARCH_SUMMARY_FILENAME, douyinMiniAppCaptureBounds, douyinMiniAppEntryBounds, douyinSearchInput, douyinSearchResultTarget, douyinSearchResultsBounds, douyinViewFullBounds, fillQuestionInput, hierarchyBelongsToPackage, historyOnboardingVisible, maxLongImageHeight, miniAppReferenceProductsTrigger, normalizeAutomationEntries, observerResultRequiresFreshCapture, prepareEmbeddedEvidence, referenceProductDrawerBounds, referenceProductsCaptureComplete, referenceProductSheetExpanded, referenceProductsTrigger, referenceProductViewportReadiness, refreshedReferenceProductsTrigger, requireQuestionLocated, runQuestionsWithRecovery, scrollEndConfirmed, shouldRetryFullReplyCapture, toutiaoSearchInput, toutiaoViewMoreBounds, waitForPackageHierarchy } = require('../../src/automation/runner')
 
 const CHAT_BOUNDS = [0, 200, 1080, 1800]
 
@@ -77,14 +78,57 @@ test('抖音入口按真实搜索控件和回答卡片结构定位', () => {
   assert.deepEqual(douyinViewFullBounds(xml, { width: 1080, height: 2408 }), [414, 1348, 666, 1456])
 })
 
+test('抖音无智能总结时识别独立小程序入口卡片，并仍优先智能总结', () => {
+  const entry = `<hierarchy>
+    <node package="com.ss.android.ugc.aweme" class="android.widget.EditText" resource-id="com.ss.android.ugc.aweme:id/et_search_kw" text="测试问题" visible-to-user="true" bounds="[132,90][754,210]" />
+    <node package="com.ss.android.ugc.aweme" class="android.widget.FrameLayout" visible-to-user="true" bounds="[12,1387][534,2131]">
+      <node package="com.ss.android.ugc.aweme" class="android.view.ViewGroup" visible-to-user="true" bounds="[12,1387][534,2131]"><node package="com.ss.android.ugc.aweme" class="android.view.ViewGroup" visible-to-user="true" bounds="[36,1411][510,2107]" /></node>
+      <node package="com.ss.android.ugc.aweme" class="android.view.ViewGroup" visible-to-user="true" bounds="[36,1411][510,1579]"><node package="com.ss.android.ugc.aweme" class="android.view.ViewGroup" visible-to-user="true" bounds="[60,1435][180,1555]" /><node package="com.ss.android.ugc.aweme" class="android.view.ViewGroup" visible-to-user="true" bounds="[103,1565][137,1579]" /></node>
+      <node package="com.ss.android.ugc.aweme" class="android.view.ViewGroup" visible-to-user="true" bounds="[36,1603][510,1783]" />
+      <node package="com.ss.android.ugc.aweme" class="android.view.ViewGroup" visible-to-user="true" bounds="[36,1783][510,2095]" />
+    </node>
+  </hierarchy>`
+  assert.equal(DOUYIN_MINIAPP_ENTRY_FILENAME, '回答_小程序入口.png')
+  assert.deepEqual(douyinMiniAppEntryBounds(entry, { width: 1080, height: 2400 }), {
+    cardBounds: [12, 1387, 534, 2131],
+    tapBounds: [36, 1411, 510, 1579],
+  })
+  assert.deepEqual(douyinSearchResultsBounds(`${entry}<node package="com.ss.android.ugc.aweme" class="androidx.recyclerview.widget.RecyclerView" visible-to-user="true" bounds="[0,357][1080,2400]" />`, { width: 1080, height: 2400 }), [0, 357, 1080, 2400])
+  assert.equal(douyinSearchResultTarget(entry, { width: 1080, height: 2400 }).mode, 'miniapp_entry_card')
+  const summary = `${entry}<node package="com.ss.android.ugc.aweme" class="android.view.ViewGroup" visible-to-user="true" bounds="[414,1348][666,1456]" />`
+  assert.equal(douyinSearchResultTarget(summary, { width: 1080, height: 2400 }).mode, 'smart_summary')
+  assert.equal(douyinSearchResultTarget('<hierarchy><node package="com.ss.android.ugc.aweme" class="android.widget.EditText" resource-id="com.ss.android.ugc.aweme:id/et_search_kw" text="测试问题" visible-to-user="true" bounds="[132,90][754,210]" /></hierarchy>', { width: 1080, height: 2400 }), null)
+  assert.equal(douyinMiniAppEntryBounds(entry.replace('<node package="com.ss.android.ugc.aweme" class="android.view.ViewGroup" visible-to-user="true" bounds="[60,1435][180,1555]" />', '<node package="com.ss.android.ugc.aweme" class="android.view.ViewGroup" resource-id="other:id/card" visible-to-user="true" bounds="[60,1435][180,1555]" />'), { width: 1080, height: 2400 }), null)
+})
+
 test('抖音小荷AI全文页排除固定顶部、工具栏和输入区', () => {
   const xml = `<hierarchy>
     <node package="com.ss.android.ugc.aweme" class="android.widget.ImageView" content-desc="关闭" visible-to-user="true" bounds="[944,111][1056,207]" />
+    <node package="com.ss.android.ugc.aweme" class="android.view.ViewGroup" visible-to-user="true" bounds="[0,363][1080,1785]">
+      <node package="com.ss.android.ugc.aweme" class="android.view.ViewGroup" visible-to-user="true" bounds="[0,363][1080,1785]" />
+    </node>
     <node package="com.ss.android.ugc.aweme" class="android.widget.ScrollView" visible-to-user="true" bounds="[0,1785][1080,1940]" />
     <node package="com.ss.android.ugc.aweme" class="android.widget.HorizontalScrollView" scrollable="true" visible-to-user="true" bounds="[0,1785][1080,1940]" />
   </hierarchy>`
-  assert.deepEqual(douyinMiniAppCaptureBounds(xml, { width: 1080, height: 2408 }), [0, 236, 1080, 1785])
+  assert.deepEqual(douyinMiniAppCaptureBounds(xml, { width: 1080, height: 2408 }), [0, 363, 1080, 1785])
   assert.equal(douyinMiniAppCaptureBounds(`${xml}<node package="com.ss.android.ugc.aweme" class="android.widget.EditText" resource-id="com.ss.android.ugc.aweme:id/et_search_kw" visible-to-user="true" bounds="[1,1][2,2]" />`, { width: 1080, height: 2408 }), null)
+})
+
+test('抖音小程序回答尾部用无文字卡片结构定位参考药品箭头', () => {
+  const xml = `<hierarchy>
+    <node class="android.view.ViewGroup" bounds="[0,363][1080,2014]">
+      <node class="android.view.ViewGroup" bounds="[0,1093][1080,1486]">
+        <node class="android.view.ViewGroup" bounds="[24,1111][1056,1486]">
+          <node class="android.widget.ImageView" bounds="[972,1160][1008,1196]" />
+          <node class="android.view.ViewGroup" bounds="[72,1244][240,1412]" />
+        </node>
+      </node>
+      <node class="android.view.ViewGroup" bounds="[0,1486][1080,1774]" />
+    </node>
+  </hierarchy>`
+
+  assert.deepEqual(miniAppReferenceProductsTrigger(xml, [0, 363, 1080, 2014]), [990, 1178])
+  assert.equal(miniAppReferenceProductsTrigger(xml.replace('android.widget.ImageView', 'android.view.ViewGroup'), [0, 363, 1080, 2014]), null)
 })
 
 test('头条入口按真实搜索框和“查看更多”卡片结构定位', () => {
@@ -365,20 +409,32 @@ test('普通回答不可靠接缝会整题重采一次但不越过药品终止�
   assert.equal(shouldRetryFullReplyCapture({ fallbackReasons: ['局部内容发生变化'], products: { pages: 3 } }), false)
 })
 
-test('只将聊天区域内且可见的问题视为当前问题', () => {
-  const hidden = '<hierarchy><node text="这是一个很长的问题" visible-to-user="false" bounds="[20,300][1060,460]" /></hierarchy>'
-  const visible = '<hierarchy><node text="这是一个很长的问题" visible-to-user="true" bounds="[20,300][1060,460]" /></hierarchy>'
+test('只有完整进入聊天截图区域的问题才视为已定位', () => {
+  const bubble = (bounds, visible) => '<hierarchy><node class="android.view.View" bounds="[0,200][1080,1800]">'
+    + `<node class="android.view.View" bounds="[0,160][1080,460]"><node class="android.view.View" bounds="[690,160][1030,460]"><node class="android.widget.TextView" text="这是一个很长的问题" content-desc="这是一个很长的问题" visible-to-user="${visible}" bounds="${bounds}" />`
+    + '</node></node></node></hierarchy>'
+  const hidden = bubble('[700,260][1020,340]', 'false')
+  const clipped = bubble('[700,180][1020,260]', 'true')
+  const visible = bubble('[700,260][1020,340]', 'true')
   assert.equal(questionVisible(hidden, '这是一个很长的问题', CHAT_BOUNDS), false)
+  assert.equal(questionVisible(clipped, '这是一个很长的问题', CHAT_BOUNDS), false)
   assert.equal(questionVisible(visible, '这是一个很长的问题', CHAT_BOUNDS), true)
 })
 
+test('左侧回答标题包含完整问题文字时不能冒充用户问题气泡', () => {
+  const xml = '<hierarchy><node class="android.view.View" bounds="[0,200][1080,1800]">'
+    + '<node class="android.widget.TextView" text="心通口服液 详细科普" content-desc="心通口服液 详细科普" visible-to-user="true" bounds="[20,260][1060,420]" />'
+    + '</node></hierarchy>'
+  assert.equal(questionVisible(xml, '心通口服液', CHAT_BOUNDS), false)
+})
+
 test('兼容 class 命名的 UiAutomator 层级节点', () => {
-  const xml = '<hierarchy><android.widget.TextView text="新的问题" displayed="true" bounds="[80,900][900,980]" /></hierarchy>'
+  const xml = '<hierarchy><android.view.View bounds="[0,400][1080,1800]"><android.view.View bounds="[0,820][1080,1040]"><android.view.View bounds="[650,820][1030,1040]"><android.widget.TextView text="新的问题" content-desc="新的问题" displayed="true" bounds="[660,900][1020,980]" /></android.view.View></android.view.View></android.view.View></hierarchy>'
   assert.equal(questionVisible(xml, '新的问题', [0, 400, 1080, 1800]), true)
 })
 
 test('层级节点未写可见属性时仍按可见节点处理', () => {
-  const xml = '<hierarchy><node class="android.widget.TextView" text="系统层级问题" bounds="[80,900][900,980]" /></hierarchy>'
+  const xml = '<hierarchy><node class="android.view.View" bounds="[0,400][1080,1800]"><node class="android.view.View" bounds="[0,820][1080,1040]"><node class="android.view.View" bounds="[650,820][1030,1040]"><node class="android.widget.TextView" text="系统层级问题" content-desc="系统层级问题" bounds="[660,900][1020,980]" /></node></node></node></hierarchy>'
   assert.equal(questionVisible(xml, '系统层级问题', [0, 400, 1080, 1800]), true)
 })
 
@@ -570,12 +626,21 @@ test('药品动态接缝仅在前序滚动位移一致时采用保守重叠', ()
   assert.equal(calibratedProductFallbackOverlap([403, 391, 520]), null)
 })
 
-test('批次和问题目录保持与旧版一致，CSV 默认读取问题列', async () => {
+test('批次产物拆分为纯图片交付区和镜像调试区，CSV 默认读取问题列', async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'node-automation-test-'))
   try {
     const batch = await createBatchDirectory(directory, new Date(2026, 6, 11, 23, 59, 0))
     assert.equal(path.basename(batch), 'batch_20260711-235900')
     assert.equal(path.basename(questionArtifactDirectory(batch, 2, '儿童腹泻/脱水用什么药？')), '002_儿童腹泻_脱水用什么药？')
+    const batchArtifacts = batchArtifactDirectories(batch)
+    assert.equal(path.basename(batchArtifacts.deliveryDirectory), '交付图片')
+    assert.equal(path.basename(batchArtifacts.diagnosticDirectory), '调试产物')
+    const entryArtifacts = entryArtifactDirectories(batchArtifacts, 2, '抖音搜索框（小荷AI小程序）', 3)
+    assert.equal(path.basename(entryArtifacts.deliveryDirectory), '02_抖音搜索框（小荷AI小程序）')
+    assert.equal(path.basename(entryArtifacts.diagnosticDirectory), '02_抖音搜索框（小荷AI小程序）')
+    const artifacts = questionArtifactDirectories(entryArtifacts, 2, '儿童腹泻/脱水用什么药？')
+    assert.equal(path.basename(artifacts.deliveryDirectory), '002_儿童腹泻_脱水用什么药？')
+    assert.equal(path.basename(artifacts.diagnosticDirectory), '002_儿童腹泻_脱水用什么药？')
     const csv = path.join(directory, 'questions.csv')
     await fs.writeFile(csv, '问题,分类\n腹泻怎么办,儿科\n腹泻怎么办,儿科\n', 'utf8')
     assert.deepEqual(await loadQuestionFile(csv), ['腹泻怎么办'])
@@ -584,6 +649,43 @@ test('批次和问题目录保持与旧版一致，CSV 默认读取问题列', a
     const xlsx = path.join(directory, 'questions.xlsx')
     XLSX.writeFile(workbook, xlsx)
     assert.deepEqual(await loadQuestionFile(xlsx), ['儿童发热怎么办'])
+  } finally { await fs.rm(directory, { recursive: true, force: true }) }
+})
+
+test('结构化事件日志记录参考药品关键阶段和单题上下文', async () => {
+  assert.deepEqual(classifyAutomationLog('capture: 推荐药品 page 3'), {
+    event: 'reference_products_page_captured',
+    category: 'capture',
+    details: { page: 3, target: '推荐药品' },
+  })
+  assert.deepEqual(classifyAutomationLog('capture: 推荐药品抽屉已先展开，列表视口=2148px'), {
+    event: 'reference_products_drawer_expanded',
+    category: 'capture',
+    details: { viewport_height: 2148 },
+  })
+  assert.deepEqual(classifyAutomationLog('capture: 推荐药品抽屉初始边界 sheet=0,482,1080,2400 list=0,699,1080,2400'), {
+    event: 'reference_products_drawer_detected',
+    category: 'capture',
+    details: { drawer_bounds: [0, 482, 1080, 2400], list_bounds: [0, 699, 1080, 2400] },
+  })
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'node-event-log-test-'))
+  try {
+    const filePath = path.join(directory, '调试产物', '001_问题', '执行日志.jsonl')
+    const logger = new EventLog({
+      filePath,
+      scope: 'question',
+      context: { batch_id: 'batch_1', entry_id: 'xiaohe-app', question: '测试', question_index: 1 },
+      now: () => new Date('2026-07-15T04:00:00.000Z'),
+    })
+    logger.recordMessage('stage: 正在发送问题')
+    logger.recordMessage('capture: 推荐药品截图完成，共 4 屏，图片已全部加载')
+    await logger.flush()
+    const records = (await fs.readFile(filePath, 'utf8')).trim().split('\n').map(JSON.parse)
+    assert.deepEqual(records.map(item => item.sequence), [1, 2])
+    assert.deepEqual(records.map(item => item.event), ['stage', 'reference_products_capture_completed'])
+    assert.equal(records[1].question, '测试')
+    assert.equal(records[1].details.pages, 4)
+    assert.equal(records[1].details.images_status, '已全部加载')
   } finally { await fs.rm(directory, { recursive: true, force: true }) }
 })
 
@@ -646,6 +748,40 @@ test('不同内容区域测得不同滚动位移时拒绝拼接', async () => {
   const current = await sharp({ create: { width, height, channels: 3, background: 'white' } })
     .composite([{ input: left, left: 0, top: 0 }, { input: right, left: 120, top: 0 }]).png().toBuffer()
   await assert.rejects(() => verifyFrameOverlap(previous, current, 210), /区域.*不一致|连续性/)
+})
+
+test('精细复核粗采样附近的多个候选，识别末屏短距离滚动的真实接缝', async () => {
+  const width = 240
+  const height = 500
+  const shift = 137
+  const overlap = height - shift
+  const raw = Buffer.alloc(width * height * 3)
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const offset = (y * width + x) * 3
+      const value = 80 + ((Math.floor(y / 6) * 29 + Math.floor(x / 16) * 13) % 140)
+      raw[offset] = value
+      raw[offset + 1] = (value + 23) % 220
+      raw[offset + 2] = (value + 47) % 220
+    }
+  }
+  // Make the previous viewport's bottom resemble the next viewport's top.
+  // The coarse search sees this plausible short overlap before the exact
+  // 363px overlap, whose position falls between its 4px samples.
+  for (let y = 0; y < 48; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const source = ((shift + y) * width + x) * 3
+      const target = ((height - 48 + y) * width + x) * 3
+      for (let channel = 0; channel < 3; channel += 1) raw[target + channel] = Math.min(255, raw[source + channel] + 2)
+    }
+  }
+  const previous = await sharp(raw, { raw: { width, height, channels: 3 } }).png().toBuffer()
+  const current = await sharp(previous)
+    .extract({ left: 0, top: shift, width, height: overlap })
+    .extend({ bottom: shift, background: '#f3f4f5' })
+    .png().toBuffer()
+
+  assert.equal(await verifyFrameOverlap(previous, current, null), overlap)
 })
 
 test('长截图超过高度上限时只在视口边界拆分', async () => {
@@ -737,6 +873,22 @@ test('兼容华为弹窗窗口中的参考药品抽屉与竖向列表', () => {
   })
 })
 
+test('识别抖音小程序无资源名的参考药品 BottomSheet', () => {
+  const xml = '<hierarchy>'
+    + '<node class="android.widget.ScrollView" bounds="[0,0][1080,2400]">'
+    + '<node class="android.widget.HorizontalScrollView" bounds="[0,0][1080,2400]">'
+    + '<node class="android.view.ViewGroup" bounds="[0,480][1080,2400]">'
+    + '<node class="android.view.ViewGroup" bounds="[0,480][1080,2400]">'
+    + '<node class="androidx.recyclerview.widget.RecyclerView" bounds="[0,636][1080,2400]">'
+    + '<node class="android.view.ViewGroup" bounds="[36,660][1044,1549]" />'
+    + '</node></node></node></node></node></hierarchy>'
+
+  assert.deepEqual(referenceProductDrawerBounds(xml), {
+    sheet: [0, 480, 1080, 2400],
+    list: [0, 636, 1080, 2400],
+  })
+})
+
 test('抽屉列表兜底不会误选仍在抽屉后方的聊天滚动区', () => {
   const xml = '<hierarchy>'
     + '<node class="android.view.View" scrollable="true" bounds="[0,333][1080,2010]" />'
@@ -781,6 +933,21 @@ test('新版药品抽屉无图片节点时从卡片上半部推断药品图片�
   const result = referenceProductImageBounds(xml, list)
   assert.equal(result.mode, 'inferred_card_artwork')
   assert.deepEqual(result.bounds, [[73, 1454, 529, 1968], [619, 1454, 1075, 1968]])
+})
+
+test('药品图片只从列表子树识别，不把抽屉后的输入按钮当成商品图', () => {
+  const list = [0, 636, 1080, 2400]
+  const xml = '<hierarchy>'
+    + '<node class="android.widget.ImageView" bounds="[909,2249][981,2321]" />'
+    + '<node class="androidx.recyclerview.widget.RecyclerView" bounds="[0,636][1080,2400]">'
+    + '<node class="android.view.ViewGroup" bounds="[36,660][1044,1549]">'
+    + '<node class="android.widget.HorizontalScrollView" bounds="[36,759][1044,1549]">'
+    + '<node class="android.view.ViewGroup" bounds="[36,759][480,1549]" />'
+    + '</node></node></node></hierarchy>'
+
+  const result = referenceProductImageBounds(xml, list)
+  assert.equal(result.mode, 'inferred_card_artwork')
+  assert.deepEqual(result.bounds, [[63, 783, 453, 1194]])
 })
 
 test('药品稳定截图直接复用完成图片就绪判断', async () => {

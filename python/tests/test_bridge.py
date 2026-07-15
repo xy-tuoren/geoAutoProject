@@ -43,6 +43,14 @@ class FakeDevice:
 
     def shell(self, args):
         self.events.append(("shell", args))
+        if args == ["dumpsys", "window", "windows"]:
+            return type(
+                "ShellResult",
+                (),
+                {
+                    "output": "mObscuringWindow=Window{123 u0 example.app/example.app.MiniAppHostActivity0}"
+                },
+            )()
 
     def press(self, key):
         self.events.append(("press", key))
@@ -71,6 +79,15 @@ def test_bridge_configures_dynamic_ui_timeouts_and_dispatches_commands():
     }
 
     assert bridge.dispatch("dump_hierarchy", {}) == '<hierarchy rotation="0" />'
+    assert bridge.dispatch("current_app", {}) == {
+        "package": "example.app",
+        "activity": ".MainActivity",
+        "pid": 123,
+    }
+    assert bridge.dispatch("foreground_window", {}) == {
+        "package": "example.app",
+        "activity": "example.app.MiniAppHostActivity0",
+    }
     bridge.dispatch("click", {"x": 10, "y": 20})
     bridge.dispatch("send_keys", {"text": "腹泻怎么办", "clear": True})
     bridge.dispatch("press", {"key": "back"})

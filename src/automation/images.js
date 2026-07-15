@@ -211,16 +211,30 @@ function candidateRange(low, high, step) {
 }
 
 function bestBandOverlap(previous, current, band, low, high) {
-  let best = { overlap: low, score: Number.POSITIVE_INFINITY, contentRatio: 0 }
-  for (const overlap of candidateRange(low, high, 4)) {
-    const result = overlapScore(previous, current, overlap, band, { xStep: 8, yStep: 10 })
-    if (result.score < best.score) best = { overlap, ...result }
+  const coarse = candidateRange(low, high, 4).map(overlap => ({
+    overlap,
+    ...overlapScore(previous, current, overlap, band, { xStep: 8, yStep: 10 }),
+  }))
+  let best = coarse.reduce((winner, candidate) => candidate.score < winner.score ? candidate : winner)
+  const localMinima = coarse
+    .filter((candidate, index) => (index === 0 || candidate.score <= coarse[index - 1].score)
+      && (index === coarse.length - 1 || candidate.score <= coarse[index + 1].score))
+    .sort((a, b) => a.score - b.score)
+  const refineSeeds = []
+  for (const candidate of localMinima) {
+    if (refineSeeds.every(seed => Math.abs(seed.overlap - candidate.overlap) > 6)) refineSeeds.push(candidate)
+    if (refineSeeds.length >= 12) break
   }
-  const refineLow = Math.max(low, best.overlap - 6)
-  const refineHigh = Math.min(high, best.overlap + 6)
-  for (let overlap = refineLow; overlap <= refineHigh; overlap += 1) {
-    const result = overlapScore(previous, current, overlap, band, { xStep: 4, yStep: 4 })
-    if (result.score < best.score) best = { overlap, ...result }
+  // A one-pixel-perfect seam can sit between the 4px coarse samples while a
+  // quiet footer produces a deceptively better coarse score. Refine several
+  // independent minima so the exact content alignment still gets measured.
+  for (const seed of refineSeeds) {
+    const refineLow = Math.max(low, seed.overlap - 3)
+    const refineHigh = Math.min(high, seed.overlap + 3)
+    for (let overlap = refineLow; overlap <= refineHigh; overlap += 1) {
+      const result = overlapScore(previous, current, overlap, band, { xStep: 4, yStep: 4 })
+      if (result.score < best.score) best = { overlap, ...result }
+    }
   }
   return best
 }

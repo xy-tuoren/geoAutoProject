@@ -8,6 +8,10 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
   }
   const result = request.method === 'dump_hierarchy'
     ? '<hierarchy><node text="fixture" /></hierarchy>'
-    : { method: request.method, params: request.params }
+    : request.method === 'current_app'
+      ? { package: 'fixture.package', activity: '.FixtureActivity', pid: 123 }
+      : request.method === 'foreground_window'
+        ? { package: 'fixture.package', activity: 'fixture.package.MiniAppHostActivity0' }
+      : { method: request.method, params: request.params }
   process.stdout.write(`${JSON.stringify({ id: request.id, ok: true, result })}\n`)
 })

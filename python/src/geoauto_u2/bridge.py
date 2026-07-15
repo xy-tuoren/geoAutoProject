@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sys
 import traceback
 from collections.abc import Callable
@@ -50,6 +51,18 @@ class U2Bridge:
         device = self._require_device()
         if method == "health":
             return {"serial": self._serial, "info": device.info}
+        if method == "current_app":
+            return device.app_current()
+        if method == "foreground_window":
+            result = device.shell(["dumpsys", "window", "windows"])
+            output = str(getattr(result, "output", result) or "")
+            match = re.search(
+                r"(?:mCurrentFocus|mObscuringWindow)=.*?\s([A-Za-z0-9._]+)/([A-Za-z0-9._$]+)",
+                output,
+            )
+            if not match:
+                raise BridgeError("无法从系统窗口状态读取当前前台 Activity")
+            return {"package": match.group(1), "activity": match.group(2)}
         if method == "dump_hierarchy":
             return device.dump_hierarchy(
                 compressed=bool(params.get("compressed", False)),

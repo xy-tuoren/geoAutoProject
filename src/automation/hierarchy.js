@@ -147,19 +147,15 @@ function questionVisible(xml, question, chatBounds) {
   const needle = String(question).trim()
   if (!needle) return false
   const prefix = needle.slice(0, Math.min(24, needle.length))
-  return iterNodes(xml).some(attrs => {
-    if (!nodeIsVisible(attrs)) return false
-    const label = nodeAttr(attrs, 'text') || nodeAttr(attrs, 'content-desc')
-    const bounds = nodeAttr(attrs, 'bounds')
-    return Boolean(label && bounds && (label.includes(needle) || (prefix && label.includes(prefix))) && boundsIntersect(parseBounds(bounds), chatBounds))
+  const verticalInset = Math.max(12, Math.floor((chatBounds[3] - chatBounds[1]) * 0.02))
+  return userQuestionCandidates(xml, chatBounds).some(({ label, bounds }) => {
+    return (label.includes(needle) || (prefix && label.includes(prefix)))
+      && bounds[1] >= chatBounds[1] + verticalInset
+      && bounds[3] <= chatBounds[3] - verticalInset
   })
 }
 
-// Locate the latest visible user bubble without reading from or focusing the
-// composer.  A user message is rendered as a right-inset bubble inside a
-// substantially wider chat row; assistant paragraphs use the full-width left
-// column and therefore do not have this nested geometry.
-function currentQuestionText(xml, chatBounds) {
+function userQuestionCandidates(xml, chatBounds) {
   const chatWidth = chatBounds[2] - chatBounds[0]
   const candidates = []
   const visit = (node, ancestors) => {
@@ -167,7 +163,8 @@ function currentQuestionText(xml, chatBounds) {
     const description = nodeAttr(node.attrs, 'content-desc')
     const label = text || description
     const rawBounds = nodeAttr(node.attrs, 'bounds')
-    if (label && rawBounds && nodeIsVisible(node.attrs) && nodeAttr(node.attrs, 'class') === 'android.widget.TextView'
+    const nodeClass = nodeAttr(node.attrs, 'class') || node.tag
+    if (label && rawBounds && nodeIsVisible(node.attrs) && nodeClass === 'android.widget.TextView'
       && description === label
       && !/^\d{1,2}:\d{2}$/.test(label) && !/^\d+[.)、]?$/.test(label)) {
       const bounds = parseBounds(rawBounds)
@@ -178,7 +175,8 @@ function currentQuestionText(xml, chatBounds) {
       // bubble container. Product badges can have the same right-inset shape,
       // but only inside several additional card/carousel ancestors.
       const row = ancestors.at(-2)
-      const rowBounds = row ? parseBounds(nodeAttr(row.attrs, 'bounds')) : null
+      const rowRaw = row && nodeAttr(row.attrs, 'bounds')
+      const rowBounds = rowRaw ? parseBounds(rowRaw) : null
       if (parentBounds && rowBounds && boundsIntersect(bounds, chatBounds)
         && rowBounds[2] - rowBounds[0] >= chatWidth * 0.72
         && rowBounds[0] <= bounds[0] && rowBounds[2] >= bounds[2]
@@ -187,12 +185,21 @@ function currentQuestionText(xml, chatBounds) {
         && parentBounds[2] - parentBounds[0] <= (rowBounds[2] - rowBounds[0]) * 0.86
         && Math.abs(parentBounds[0] - bounds[0]) <= chatWidth * 0.04
         && Math.abs(parentBounds[2] - bounds[2]) <= chatWidth * 0.04) {
-        candidates.push({ label, bottom: bounds[3] })
+        candidates.push({ label, bounds, bottom: bounds[3] })
       }
     }
     for (const child of node.children) visit(child, [...ancestors, node])
   }
   visit(parseNodeTree(xml), [])
+  return candidates
+}
+
+// Locate the latest visible user bubble without reading from or focusing the
+// composer. A user message is rendered as a right-inset bubble inside a
+// substantially wider chat row; assistant paragraphs use the full-width left
+// column and therefore do not have this nested geometry.
+function currentQuestionText(xml, chatBounds) {
+  const candidates = userQuestionCandidates(xml, chatBounds)
   candidates.sort((a, b) => b.bottom - a.bottom)
   return candidates[0]?.label || null
 }
@@ -299,14 +306,15 @@ const HORIZONTAL_SCROLL_CLASS = 'android.widget.HorizontalScrollView'
 // rather than by text, which is why a real DOM tree (not a flat scan) is needed.
 function parseNodeTree(xml) {
   const tokens = String(xml).match(/<[^>]+>/g) || []
-  const root = { attrs: '', children: [] }
+  const root = { tag: '', attrs: '', children: [] }
   const stack = [root]
   for (const token of tokens) {
     if (token.startsWith('<?') || token.startsWith('<!')) continue
     if (token.startsWith('</')) { if (stack.length > 1) stack.pop(); continue }
     if (!/^<(?:node|[A-Za-z][\w.$-]*)\b/.test(token)) continue
+    const tag = token.match(/^<([^\s>/]+)/)?.[1] || ''
     const attrs = token.replace(/^<[^\s>/]+/, '').replace(/\/?>$/, '')
-    const node = { attrs, children: [] }
+    const node = { tag, attrs, children: [] }
     stack[stack.length - 1].children.push(node)
     if (!token.endsWith('/>')) stack.push(node)
   }
@@ -369,7 +377,22 @@ function referenceProductsSection(xml) {
 function referenceProductImageBounds(xml, listBounds) {
   const listWidth = listBounds[2] - listBounds[0]
   const listHeight = listBounds[3] - listBounds[1]
-  const explicit = boundsListForNodeAttribute(xml, 'class', 'android.widget.ImageView').filter(bounds => {
+  const root = parseNodeTree(xml)
+  const allNodes = collectNodes(root)
+  const listNode = allNodes.find(node => {
+    if (nodeAttr(node.attrs, 'class') !== 'androidx.recyclerview.widget.RecyclerView') return false
+    const rawBounds = nodeAttr(node.attrs, 'bounds')
+    return rawBounds && parseBounds(rawBounds).join(',') === listBounds.join(',')
+  })
+  // Bottom sheets can leave the obscured chat hierarchy attached behind them.
+  // Scope image readiness to the RecyclerView subtree so a fixed input icon or
+  // toolbar icon cannot be mistaken for loaded product artwork.
+  const scopedNodes = listNode ? collectNodes(listNode) : allNodes
+  const explicit = scopedNodes.flatMap(node => {
+    if (nodeAttr(node.attrs, 'class') !== 'android.widget.ImageView' || !nodeNotHidden(node.attrs)) return []
+    const rawBounds = nodeAttr(node.attrs, 'bounds')
+    return rawBounds ? [parseBounds(rawBounds)] : []
+  }).filter(bounds => {
     const width = bounds[2] - bounds[0]
     const height = bounds[3] - bounds[1]
     return boundsIntersect(bounds, listBounds) && width >= 60 && height >= 45
@@ -378,7 +401,8 @@ function referenceProductImageBounds(xml, listBounds) {
 
   const inferred = []
   const seen = new Set()
-  for (const attrs of iterNodes(xml)) {
+  for (const node of scopedNodes) {
+    const attrs = node.attrs
     if (nodeAttr(attrs, 'class') !== 'android.view.ViewGroup') continue
     const rawBounds = nodeAttr(attrs, 'bounds')
     if (!rawBounds) continue
