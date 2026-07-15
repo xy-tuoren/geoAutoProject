@@ -570,7 +570,10 @@ async function captureStableObserved({
 }
 
 function observerResultRequiresFreshCapture(result) {
-  return ['capture_activity', 'confirmation_timeout', 'capture_deadline'].includes(result?.reason)
+  // A deadline only means hierarchy + PNG collection consumed the observer's
+  // confirmation budget; it is not evidence that the screen changed. Reuse
+  // that read-only snapshot in the ADB sandwich path on slower devices.
+  return ['capture_activity', 'confirmation_timeout'].includes(result?.reason)
 }
 
 function shouldRetryFullReplyCapture({ fallbackReasons = [], allowFullRetry = true, products = null } = {}) {

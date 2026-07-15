@@ -353,7 +353,7 @@ test('scrcpy二次确认仍拒绝截图期间的连续活动突发', async () =>
 test('scrcpy明确发现截图窗口活动时必须重新采集而不是ADB兜底', () => {
   assert.equal(observerResultRequiresFreshCapture({ reason: 'capture_activity' }), true)
   assert.equal(observerResultRequiresFreshCapture({ reason: 'confirmation_timeout' }), true)
-  assert.equal(observerResultRequiresFreshCapture({ reason: 'capture_deadline' }), true)
+  assert.equal(observerResultRequiresFreshCapture({ reason: 'capture_deadline' }), false)
   assert.equal(observerResultRequiresFreshCapture({ reason: 'settle_timeout' }), false)
   assert.equal(observerResultRequiresFreshCapture({ reason: 'observer_timeout' }), false)
 })
