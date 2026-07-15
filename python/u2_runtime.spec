@@ -2,13 +2,14 @@ from PyInstaller.utils.hooks import collect_data_files
 
 
 u2_datas = collect_data_files("uiautomator2")
+rapidocr_datas = collect_data_files("rapidocr")
 
 a = Analysis(
     ["src/geoauto_u2/bridge.py"],
     pathex=["src"],
     binaries=[],
-    datas=u2_datas,
-    hiddenimports=[],
+    datas=u2_datas + rapidocr_datas,
+    hiddenimports=["rapidocr.inference_engine.onnxruntime"],
     noarchive=False,
 )
 pyz = PYZ(a.pure)

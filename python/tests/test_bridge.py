@@ -66,6 +66,15 @@ class FakeDevice:
         return {"package": self.current_package, "activity": ".MainActivity", "pid": 123}
 
 
+class FakeOcrService:
+    def __init__(self) -> None:
+        self.params = None
+
+    def recognize(self, params):
+        self.params = params
+        return {"engine": "fake", "results": [{"text": "小荷AI医生"}]}
+
+
 def test_bridge_configures_dynamic_ui_timeouts_and_dispatches_commands():
     device = FakeDevice()
     bridge = U2Bridge(lambda serial: device)
@@ -109,6 +118,16 @@ def test_app_start_rejects_silent_launch_failure():
 
     with pytest.raises(BridgeError, match="前台应用"):
         bridge.dispatch("app_start", {"package": "example.app"})
+
+
+def test_ocr_is_device_independent_and_uses_structured_service():
+    ocr = FakeOcrService()
+    bridge = U2Bridge(lambda serial: FakeDevice(), ocr_service=ocr)
+
+    result = bridge.dispatch("ocr_recognize", {"image_base64": "aW1hZ2U="})
+
+    assert result == {"engine": "fake", "results": [{"text": "小荷AI医生"}]}
+    assert ocr.params == {"image_base64": "aW1hZ2U="}
 
 
 def test_protocol_returns_structured_errors_instead_of_hanging():

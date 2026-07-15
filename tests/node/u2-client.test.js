@@ -1,7 +1,7 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
 const path = require('node:path')
-const { U2Client, SEND_KEYS_TIMEOUT_MS, developmentCommand, packagedCommand, utf8ProcessEnvironment } = require('../../src/automation/u2-client')
+const { U2Client, OCR_TIMEOUT_MS, SEND_KEYS_TIMEOUT_MS, developmentCommand, packagedCommand, utf8ProcessEnvironment } = require('../../src/automation/u2-client')
 
 const root = path.resolve(__dirname, '../..')
 const fixture = path.join(root, 'tests', 'fixtures', 'u2-sidecar-fixture.js')
@@ -56,6 +56,31 @@ test('首次输入允许FastInputIME安装和切换完成', async () => {
     options: { timeout: SEND_KEYS_TIMEOUT_MS },
   }])
   assert.equal(SEND_KEYS_TIMEOUT_MS, 45_000)
+})
+
+test('OCR通过通用只读请求传输图片和选项', async () => {
+  const client = new U2Client({ root, adbPath: '/bundled/adb', log: () => {} })
+  const calls = []
+  client.request = async (method, params, options) => {
+    calls.push({ method, params, options })
+    return { coordinate_space: 'image_physical_pixels', image: { width: 2, height: 3 }, region: [0, 0, 2, 3], results: [] }
+  }
+
+  await client.ocrRecognize(Buffer.from('png'), { region: [0, 1, 2, 3], minConfidence: 0.8 })
+
+  assert.deepEqual(calls, [{
+    method: 'ocr_recognize',
+    params: {
+      image_base64: Buffer.from('png').toString('base64'),
+      region: [0, 1, 2, 3],
+      min_confidence: 0.8,
+      use_detection: true,
+      use_classification: false,
+      use_recognition: true,
+    },
+    options: { timeout: OCR_TIMEOUT_MS, retryRead: true },
+  }])
+  assert.equal(OCR_TIMEOUT_MS, 60_000)
 })
 
 test('uiautomator2客户端使用长驻进程获取层级', async () => {

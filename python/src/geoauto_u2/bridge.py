@@ -11,6 +11,8 @@ from typing import Any, TextIO
 
 import uiautomator2 as u2
 
+from geoauto_u2.ocr import OcrService
+
 
 class BridgeError(RuntimeError):
     """Raised when a bridge request is invalid or the device is unavailable."""
@@ -25,8 +27,13 @@ def configure_utf8_standard_streams(*streams: TextIO | None) -> None:
 
 
 class U2Bridge:
-    def __init__(self, connector: Callable[[str], Any] = u2.connect) -> None:
+    def __init__(
+        self,
+        connector: Callable[[str], Any] = u2.connect,
+        ocr_service: OcrService | None = None,
+    ) -> None:
         self._connector = connector
+        self._ocr_service = ocr_service or OcrService()
         self._device: Any | None = None
         self._serial: str | None = None
 
@@ -36,6 +43,8 @@ class U2Bridge:
         return self._device
 
     def dispatch(self, method: str, params: dict[str, Any]) -> Any:
+        if method == "ocr_recognize":
+            return self._ocr_service.recognize(params)
         if method == "connect":
             serial = str(params.get("serial") or "").strip()
             if not serial:

@@ -274,6 +274,24 @@ function overlapTilesStable(previous, current, overlap, band) {
   return true
 }
 
+function validateOverlapCandidate(previous, current, overlap, bands) {
+  const validation = bands.map(band => overlapScore(previous, current, overlap, band, { xStep: 2, yStep: 2 }))
+  const score = Math.max(...validation.map(result => result.score))
+  const tilesStable = bands.every(band => overlapTilesStable(previous, current, overlap, band))
+  return { overlap, score, valid: score <= 8 && tilesStable, tilesStable }
+}
+
+function refineOverlapCandidate(previous, current, overlap, bands, minOverlap, maxOverlap) {
+  let best = null
+  const low = Math.max(minOverlap, overlap - 6)
+  const high = Math.min(maxOverlap, overlap + 6)
+  for (let candidate = low; candidate <= high; candidate += 1) {
+    const validation = validateOverlapCandidate(previous, current, candidate, bands)
+    if (!best || validation.score < best.score) best = validation
+  }
+  return best
+}
+
 async function findVerticalOverlapWithScore(previous, current, expected = null, {
   bands = [[0.06, 0.43], [0.57, 0.94]],
   minimumUsable = bands.length,
@@ -296,14 +314,21 @@ async function findVerticalOverlapWithScore(previous, current, expected = null, 
   if (usable.length < minimumUsable) return { overlap: expected ?? results[0].overlap, candidateOverlaps: usable.map(result => result.overlap), score: Math.max(...results.map(result => result.score)), valid: false, reason: '相邻截图缺少足够的可比内容' }
   const overlaps = usable.map(result => result.overlap)
   if (Math.max(...overlaps) - Math.min(...overlaps) > 3) {
+    // A mostly uniform side of a short final viewport can match many offsets
+    // and choose the minimum search bound, while the text-rich side finds the
+    // real near-full overlap. Recheck each distinct candidate against every
+    // band and accept it only when exactly one offset satisfies all evidence.
+    const candidates = [...new Set(overlaps)].map(overlap => refineOverlapCandidate(previousRaw, currentRaw, overlap, bands, minOverlap, maxOverlap))
+    const validCandidates = candidates.filter(candidate => candidate.valid)
+    if (validCandidates.length === 1) {
+      const candidate = validCandidates[0]
+      return { ...candidate, candidateOverlaps: overlaps, reason: null }
+    }
     return { overlap: Math.round(overlaps.reduce((sum, value) => sum + value, 0) / overlaps.length), candidateOverlaps: overlaps, score: Math.max(...usable.map(result => result.score)), valid: false, reason: `不同图像区域测得的滚动位移不一致（重叠 ${overlaps.join('/')}px）` }
   }
   const overlap = Math.round(overlaps.reduce((sum, value) => sum + value, 0) / overlaps.length)
-  const validation = bands.map(band => overlapScore(previousRaw, currentRaw, overlap, band, { xStep: 2, yStep: 2 }))
-  const score = Math.max(...validation.map(result => result.score))
-  const tilesStable = bands.every(band => overlapTilesStable(previousRaw, currentRaw, overlap, band))
-  const valid = score <= 8 && tilesStable
-  return { overlap, candidateOverlaps: overlaps, score, valid, reason: valid ? null : (tilesStable ? `差异分数 ${score.toFixed(1)}` : '局部内容发生变化') }
+  const candidate = validateOverlapCandidate(previousRaw, currentRaw, overlap, bands)
+  return { ...candidate, candidateOverlaps: overlaps, reason: candidate.valid ? null : (candidate.tilesStable ? `差异分数 ${candidate.score.toFixed(1)}` : '局部内容发生变化') }
 }
 
 async function verifyFrameOverlap(previous, current, expected) {

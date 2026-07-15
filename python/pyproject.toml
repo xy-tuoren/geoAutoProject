@@ -4,6 +4,9 @@ version = "0.1.0"
 description = "Strict Python uiautomator2 bridge for geoAutoProject"
 requires-python = ">=3.11,<3.12"
 dependencies = [
+  "onnxruntime>=1.20,<2",
+  "pillow>=11,<13",
+  "rapidocr>=3.4,<4",
   "uiautomator2>=3.4,<4",
 ]
 

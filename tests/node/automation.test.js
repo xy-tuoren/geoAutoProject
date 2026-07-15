@@ -10,7 +10,7 @@ const { stackFramesInGroups, verifyFrameOverlap, verifyProductGridOverlap, image
 const { createBatchDirectory, questionArtifactDirectory, batchArtifactDirectories, entryArtifactDirectories, questionArtifactDirectories } = require('../../src/automation/utils')
 const { EventLog, classifyAutomationLog } = require('../../src/automation/event-log')
 const { loadQuestionFile } = require('../../src/questions')
-const { adbConnectionLost, automationEntries, captureStableObserved, captureStableSandwich, calibratedProductFallbackOverlap, chatSwipePlan, conservativeFallbackOverlap, buildReplyImages, CancelledError, DouyinSearchResultNotFoundError, DOUYIN_MINIAPP_ENTRY_FILENAME, DOUYIN_SEARCH_SUMMARY_FILENAME, TOUTIAO_SEARCH_SUMMARY_FILENAME, douyinGenericAiAnswerBounds, douyinMiniAppCaptureBounds, douyinMiniAppEntryBounds, douyinSearchInput, douyinSearchResultTarget, douyinSearchResultsBounds, douyinViewFullBounds, failedRetryItems, fillQuestionInput, hierarchyBelongsToPackage, historyOnboardingVisible, maxLongImageHeight, miniAppReferenceProductsTrigger, normalizeAutomationEntries, observerRegionFallbackOptions, prepareEmbeddedEvidence, referenceProductDrawerBounds, referenceProductsCaptureComplete, referenceProductSheetExpanded, referenceProductsTrigger, referenceProductViewportReadiness, refreshedReferenceProductsTrigger, requireQuestionLocated, retryAttemptCount, runDouyinSearchResultAttempts, runQuestionsWithRecovery, scrollEndConfirmed, shouldRetryFullReplyCapture, toutiaoSearchInput, toutiaoViewMoreBounds, waitForPackageHierarchy } = require('../../src/automation/runner')
+const { adbConnectionLost, automationEntries, captureFailureDiagnostics, captureStableObserved, captureStableSandwich, calibratedProductFallbackOverlap, chatSwipePlan, conservativeFallbackOverlap, buildReplyImages, CancelledError, DouyinSearchResultNotFoundError, DOUYIN_MINIAPP_ENTRY_FILENAME, DOUYIN_SEARCH_SUMMARY_FILENAME, TOUTIAO_SEARCH_SUMMARY_FILENAME, douyinGenericAiAnswerBounds, douyinMiniAppCaptureBounds, douyinMiniAppEntryBounds, douyinSearchInput, douyinSearchResultTarget, douyinSearchResultsBounds, douyinViewFullBounds, failedRetryItems, fillQuestionInput, hierarchyBelongsToPackage, historyOnboardingVisible, maxLongImageHeight, miniAppReferenceProductsTrigger, normalizeAutomationEntries, observerRegionFallbackOptions, prepareEmbeddedEvidence, referenceProductDrawerBounds, referenceProductsCaptureComplete, referenceProductSheetExpanded, referenceProductsTrigger, referenceProductViewportReadiness, refreshedReferenceProductsTrigger, requireQuestionLocated, retryAttemptCount, runDouyinSearchResultAttempts, runQuestionsWithRecovery, scrollEndConfirmed, shouldRetryFullReplyCapture, toutiaoHomeSearchBounds, toutiaoOcrViewMoreTarget, toutiaoSearchInput, toutiaoViewMoreBounds, waitForPackageHierarchy } = require('../../src/automation/runner')
 
 const CHAT_BOUNDS = [0, 200, 1080, 1800]
 
@@ -21,11 +21,15 @@ test('只允许目标App层级进入UI操作流程', () => {
   assert.equal(hierarchyBelongsToPackage(search), false)
 })
 
-test('桌面入口默认小荷App，并按选择顺序去重执行', () => {
-  assert.equal(normalizeAutomationEntries([])[0].id, 'xiaohe-app')
+test('桌面入口默认抖音，并按选择顺序去重执行', () => {
+  assert.equal(normalizeAutomationEntries([])[0].id, 'douyin-xiaohe-miniapp')
   const entries = normalizeAutomationEntries(['douyin-xiaohe-miniapp', 'xiaohe-app', 'douyin-xiaohe-miniapp'])
   assert.deepEqual(entries.map(entry => entry.id), ['douyin-xiaohe-miniapp', 'xiaohe-app'])
-  assert.deepEqual(automationEntries().map(entry => entry.id), ['xiaohe-app', 'douyin-xiaohe-miniapp', 'toutiao-xiaohe-miniapp'])
+  assert.deepEqual(automationEntries().map(entry => [entry.id, entry.defaultSelected]), [
+    ['xiaohe-app', false],
+    ['douyin-xiaohe-miniapp', true],
+    ['toutiao-xiaohe-miniapp', false],
+  ])
   assert.throws(() => normalizeAutomationEntries(['unknown-entry']), /未知入口/)
 })
 
@@ -68,6 +72,69 @@ test('单题失败后重新准备入口并继续执行后续问题', async () =>
     'prepare',
     'execute:2:第二题',
   ])
+})
+
+test('通用失败现场同时保存物理截图、逻辑层级、设备状态和OCR候选', async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'geoauto-failure-scene-'))
+  t.after(() => fs.rm(directory, { recursive: true, force: true }))
+  const frame = await sharp({ create: { width: 1080, height: 2400, channels: 3, background: '#ffffff' } }).png().toBuffer()
+  const xml = '<hierarchy rotation="0"><node package="com.ss.android.article.news" bounds="[0,0][720,1600]"/><node package="android" bounds="[0,0][720,96]"/></hierarchy>'
+  const ocrDiagnostic = {
+    purpose: 'toutiao_answer_card',
+    recognition: { engine: 'rapidocr', image: { width: 1080, height: 2400 }, results: [{ text: '小荷AI医生', confidence: 0.96, bounds: [100, 400, 360, 460] }] },
+    target: null,
+  }
+  const result = await captureFailureDiagnostics({
+    directory,
+    serial: 'portrait-device',
+    entry: { id: 'toutiao-xiaohe-miniapp', label: '头条搜索框（小荷AI小程序）', packageName: 'com.ss.android.article.news' },
+    context: { question: '测试问题', question_index: 2 },
+    error: new Error('未找到小荷AI医生卡片'),
+    captureScreenshot: async () => frame,
+    dumpHierarchy: async () => xml,
+    currentApp: async () => ({ package: 'com.ss.android.article.news', activity: '.MainActivity' }),
+    foregroundWindow: async () => ({ package: 'com.ss.android.article.news', activity: '.MainActivity' }),
+    deviceState: async () => ({ wm_size: { status: 'captured', value: 'Physical size: 1080x2400' } }),
+    observerSnapshot: () => ({ active: true, frames: 42 }),
+    ocrDiagnostic,
+  })
+
+  const manifest = JSON.parse(await fs.readFile(result.manifest, 'utf8'))
+  assert.equal(manifest.original_error.message, '未找到小荷AI医生卡片')
+  assert.deepEqual(manifest.context, { question: '测试问题', question_index: 2 })
+  assert.deepEqual([manifest.screenshot.width, manifest.screenshot.height], [1080, 2400])
+  assert.equal(manifest.screenshot.coordinate_space, 'adb_screenshot_physical_pixels')
+  assert.deepEqual(manifest.hierarchy.logical_size, { width: 720, height: 1600 })
+  assert.deepEqual(manifest.hierarchy.packages, ['android', 'com.ss.android.article.news'])
+  assert.equal(manifest.hierarchy.coordinate_space, 'uiautomator2_logical_pixels')
+  assert.equal(manifest.current_app.value.package, 'com.ss.android.article.news')
+  assert.equal(manifest.scrcpy_observer.value.frames, 42)
+  assert.deepEqual(JSON.parse(await fs.readFile(result.ocr, 'utf8')), ocrDiagnostic)
+  await Promise.all([result.screenshot, result.hierarchy, result.ocr].map(file => fs.access(file)))
+})
+
+test('失败现场的单个诊断源失败不会吞掉其他证据或原始错误', async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'geoauto-partial-failure-scene-'))
+  t.after(() => fs.rm(directory, { recursive: true, force: true }))
+  const result = await captureFailureDiagnostics({
+    directory,
+    error: new Error('原始任务失败'),
+    captureScreenshot: async () => { throw new Error('ADB截图失败') },
+    dumpHierarchy: async () => '<hierarchy><node package="com.aurora.xiaohe.aidoctor" bounds="[0,0][1080,2400]"/></hierarchy>',
+    currentApp: async () => { throw new Error('current_app超时') },
+    foregroundWindow: async () => null,
+    deviceState: async () => ({ wm_size: { status: 'failed', error: { message: '设备断开' } } }),
+    observerSnapshot: () => ({ active: false }),
+  })
+
+  const manifest = JSON.parse(await fs.readFile(result.manifest, 'utf8'))
+  assert.equal(manifest.original_error.message, '原始任务失败')
+  assert.equal(manifest.screenshot.status, 'failed')
+  assert.match(manifest.screenshot.error.message, /ADB截图失败/)
+  assert.equal(manifest.hierarchy.status, 'captured')
+  assert.equal(manifest.current_app.status, 'failed')
+  assert.equal(manifest.ocr.status, 'not_available')
+  await fs.access(result.hierarchy)
 })
 
 test('用户停止属于致命错误，不会继续后续问题', async () => {
@@ -219,6 +286,39 @@ test('头条入口按真实搜索框和“查看更多”卡片结构定位', ()
   assert.deepEqual(toutiaoSearchInput(xml), { bounds: [245, 102, 792, 222], text: '腹泻脱水用什么药' })
   assert.deepEqual(toutiaoViewMoreBounds(xml), [72, 1323, 1008, 1464])
   assert.equal(toutiaoViewMoreBounds(xml.replace('小荷AI医生·智能总结', '普通搜索结果')), null)
+})
+
+test('头条首页搜索入口兼容不同竖屏尺寸并拒绝非搜索框节点', () => {
+  const home = (bounds, description = '搜索框，腹泻脱水用什么药') => `<hierarchy>
+    <node package="com.ss.android.article.news" class="android.widget.TextView" resource-id="com.ss.android.article.news:id/kic" content-desc="${description}" visible-to-user="true" bounds="${bounds}" />
+  </hierarchy>`
+
+  assert.deepEqual(toutiaoHomeSearchBounds(home('[291,96][805,216]')), [291, 96, 805, 216])
+  assert.deepEqual(toutiaoHomeSearchBounds(home('[194,64][537,144]')), [194, 64, 537, 144])
+  assert.equal(toutiaoHomeSearchBounds(home('[291,96][805,216]', '普通推荐词')), null)
+  assert.equal(toutiaoHomeSearchBounds(home('[291,96][805,216]').replace(':id/kic', ':id/l23')), null)
+})
+
+test('头条WebView不暴露文字时以品牌标题和查看更多的OCR几何关系定位', () => {
+  const recognition = (width, height, scale = 1) => ({
+    image: { width, height },
+    results: [
+      { text: '小荷AI医生・智能总结', normalizedText: '小荷AI医生智能总结', confidence: 0.988, bounds: [156, 433, 630, 489].map(value => value * scale) },
+      { text: '查看更多>', normalizedText: '查看更多', confidence: 0.978, bounds: [420, 1254, 656, 1313].map(value => value * scale) },
+      { text: '小荷AI医生', normalizedText: '小荷AI医生', confidence: 0.99, bounds: [68, 1681, 279, 1732].map(value => value * scale) },
+    ],
+  })
+
+  const full = toutiaoOcrViewMoreTarget(recognition(1080, 2400), { width: 1080, height: 2400 })
+  assert.deepEqual(full.bounds, [420, 1254, 656, 1313])
+  assert.equal(full.summaryConfidence, 0.988)
+
+  const scaled = toutiaoOcrViewMoreTarget(recognition(720, 1600, 2 / 3), { width: 1080, height: 2400 })
+  assert.deepEqual(scaled.bounds, [420, 1254, 656, 1313])
+
+  const generic = recognition(1080, 2400)
+  generic.results[0] = { ...generic.results[0], text: 'AI生成回答', normalizedText: 'AI生成回答' }
+  assert.equal(toutiaoOcrViewMoreTarget(generic, { width: 1080, height: 2400 }), null)
 })
 
 test('入口启动后等待目标App层级出现，避免启动过渡误判前台错误', async () => {
@@ -797,6 +897,15 @@ test('结构化事件日志记录参考药品关键阶段和单题上下文', as
     category: 'capture',
     details: { drawer_bounds: [0, 482, 1080, 2400], list_bounds: [0, 699, 1080, 2400] },
   })
+  assert.deepEqual(classifyAutomationLog('ocr: purpose=toutiao_answer_card outcome=matched engine=rapidocr elapsed=479ms lines=22 summary_confidence=0.979 view_more_confidence=0.978 physical_bounds=422,1256,655,1313 logical_bounds=422,1256,655,1313'), {
+    event: 'ocr_recognition',
+    category: 'diagnostic',
+    details: {
+      purpose: 'toutiao_answer_card', outcome: 'matched', engine: 'rapidocr', elapsed_ms: 479, recognized_lines: 22,
+      summary_confidence: 0.979, view_more_confidence: 0.978,
+      physical_bounds: [422, 1256, 655, 1313], logical_bounds: [422, 1256, 655, 1313],
+    },
+  })
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'node-event-log-test-'))
   try {
     const filePath = path.join(directory, '调试产物', '001_问题', '执行日志.jsonl')
@@ -877,6 +986,30 @@ test('不同内容区域测得不同滚动位移时拒绝拼接', async () => {
   const current = await sharp({ create: { width, height, channels: 3, background: 'white' } })
     .composite([{ input: left, left: 0, top: 0 }, { input: right, left: 120, top: 0 }]).png().toBuffer()
   await assert.rejects(() => verifyFrameOverlap(previous, current, 210), /区域.*不一致|连续性/)
+})
+
+test('末屏一侧大面积同色时以跨区域唯一候选确认短距离滚动', async () => {
+  const width = 240
+  const height = 300
+  const shift = 40
+  const overlap = height - shift
+  const raw = Buffer.alloc(width * height * 3, 238)
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < 104; x += 1) {
+      const offset = (y * width + x) * 3
+      const value = 40 + ((Math.floor(y / 5) * 31 + Math.floor(x / 8) * 17) % 170)
+      raw[offset] = value
+      raw[offset + 1] = Math.min(230, value + 11)
+      raw[offset + 2] = Math.min(230, value + 23)
+    }
+  }
+  const previous = await sharp(raw, { raw: { width, height, channels: 3 } }).png().toBuffer()
+  const current = await sharp(previous)
+    .extract({ left: 0, top: shift, width, height: overlap })
+    .extend({ bottom: shift, background: '#eeeeee' })
+    .png().toBuffer()
+
+  assert.equal(await verifyFrameOverlap(previous, current, null), overlap)
 })
 
 test('精细复核粗采样附近的多个候选，识别末屏短距离滚动的真实接缝', async () => {

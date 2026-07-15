@@ -23,6 +23,9 @@ class U2RequestTimeoutError extends U2ClientError {
 }
 
 const SEND_KEYS_TIMEOUT_MS = 45_000;
+// A frozen app may spend several seconds loading ONNX Runtime and models on
+// the first OCR request. Later calls reuse the same engine and are much faster.
+const OCR_TIMEOUT_MS = 60_000;
 
 function developmentCommand(root) {
   return {
@@ -247,6 +250,26 @@ class U2Client {
     return this.request("foreground_window", {}, { retryRead: true });
   }
 
+  ocrRecognize(image, {
+    region,
+    minConfidence = 0,
+    useDetection = true,
+    useClassification = false,
+    useRecognition = true,
+    timeout = OCR_TIMEOUT_MS
+  } = {}) {
+    if (!Buffer.isBuffer(image) || !image.length)
+      return Promise.reject(new U2ClientError("OCR需要非空的PNG或JPEG Buffer", { method: "ocr_recognize" }));
+    return this.request("ocr_recognize", {
+      image_base64: image.toString("base64"),
+      ...(region ? { region } : {}),
+      min_confidence: minConfidence,
+      use_detection: useDetection,
+      use_classification: useClassification,
+      use_recognition: useRecognition
+    }, { timeout, retryRead: true });
+  }
+
   click(x, y) {
     return this.request("click", { x: Math.round(x), y: Math.round(y) });
   }
@@ -297,6 +320,7 @@ module.exports = {
   U2ClientError,
   U2RequestTimeoutError,
   SEND_KEYS_TIMEOUT_MS,
+  OCR_TIMEOUT_MS,
   developmentCommand,
   packagedCommand,
   utf8ProcessEnvironment

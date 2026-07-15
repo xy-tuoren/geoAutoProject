@@ -21,6 +21,17 @@ function classifyAutomationLog(message) {
   if (/^capture: 推荐药品采集未完成/.test(text)) return { event: 'reference_products_capture_retry', category: 'capture', details: {} }
   if (/^capture: 推荐药品已按回答尾部顺序完整采集/.test(text)) return { event: 'reference_products_terminal_sequence_completed', category: 'capture', details: {} }
   if (/^capture: 推荐药品.*(?:确认到底|连续.*无变化)/.test(text)) return { event: 'reference_products_end_confirmed', category: 'capture', details: {} }
+  const ocr = text.match(/^ocr: purpose=([^ ]+) outcome=([^ ]+) engine=([^ ]+) elapsed=(\d+)ms lines=(\d+)(.*)$/)
+  if (ocr) {
+    const details = { purpose: ocr[1], outcome: ocr[2], engine: ocr[3], elapsed_ms: Number(ocr[4]), recognized_lines: Number(ocr[5]) }
+    for (const match of ocr[6].matchAll(/\s([a-z_]+)=([^ ]+)/g)) {
+      const value = match[2]
+      details[match[1]] = match[1].endsWith('_bounds') && /^\d+(?:,\d+){3}$/.test(value)
+        ? value.split(',').map(Number)
+        : /^\d+(?:\.\d+)?$/.test(value) ? Number(value) : value
+    }
+    return { event: 'ocr_recognition', category: 'diagnostic', details }
+  }
   if (/^capture: 引用资料/.test(text) || /^capture: 在回答截图前展开引用资料/.test(text)) return { event: 'evidence_capture', category: 'capture', details: {} }
   if (/^capture: 抖音小程序入口搜索页已保存/.test(text)) return { event: 'douyin_miniapp_entry_captured', category: 'capture', details: {} }
   const reply = text.match(/^capture: 回答截图完成，帧=(\d+)，精确接缝=(\d+)\/(\d+)，安全重复接缝=(\d+)，重采=(\d+)，模式=([^，]+)，耗时=(\d+)ms$/)

@@ -10,7 +10,7 @@
 - Git
 - Android 手机已开启 USB 调试并完成授权
 
-安装包用户不需要安装 Node.js、Python、uv、ADB 或 scrcpy。打包时会把运行所需的 ADB、Python uiautomator2 sidecar 和 scrcpy server 一起放进应用资源。
+安装包用户不需要安装 Node.js、Python、uv、ADB、RapidOCR 或 scrcpy。打包时会把运行所需的 ADB、Python uiautomator2/RapidOCR sidecar、PP-OCR 模型、ONNX Runtime 和 scrcpy server 一起放进应用资源。
 
 ## 本地开发
 
@@ -46,7 +46,7 @@ npm run dist
 
 - `npm run check`：检查 Node.js 源码语法。
 - `npm test`：运行 Node 自动化核心测试。
-- `npm run prepare:u2`：构建当前平台的 Python uiautomator2 sidecar。
+- `npm run prepare:u2`：构建当前平台的 Python uiautomator2/RapidOCR sidecar，并收集 PP-OCR 模型与 ONNX Runtime 原生库。
 - `npm run prepare:scrcpy`：下载并校验官方 scrcpy server。
 - `npm run dist`：准备运行时并用 electron-builder 打包桌面应用。
 

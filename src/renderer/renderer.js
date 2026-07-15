@@ -56,6 +56,10 @@ function appendLog(text) {
   log.scrollTop = log.scrollHeight
 }
 
+function clearLog() {
+  log.textContent = ''
+}
+
 async function refreshDevices() {
   status.textContent = '正在读取 ADB 设备…'
   try {
@@ -75,14 +79,14 @@ async function refreshEntries() {
   try {
     const entries = await window.automation.listEntries()
     entryList.replaceChildren()
-    entries.forEach((entry, index) => {
+    entries.forEach(entry => {
       const label = document.createElement('label')
       label.className = 'option entry-option'
       const input = document.createElement('input')
       input.type = 'checkbox'
       input.name = 'entry'
       input.value = entry.id
-      input.checked = index === 0
+      input.checked = Boolean(entry.defaultSelected)
       input.addEventListener('change', updatePlan)
       const text = document.createElement('span')
       text.textContent = entry.label
@@ -164,7 +168,7 @@ questionsPanel.addEventListener('drop', async event => {
 }, true)
 questions.addEventListener('input', updatePlan)
 device.addEventListener('change', updatePlan)
-$('#clear-log').addEventListener('click', () => { log.textContent = '' })
+$('#clear-log').addEventListener('click', clearLog)
 $('#copy-log').addEventListener('click', async () => {
   const text = log.textContent
   if (!text) { status.textContent = '日志为空，无内容可复制'; return }
@@ -194,6 +198,7 @@ updateAction.addEventListener('click', async () => {
 })
 
 start.addEventListener('click', async () => {
+  clearLog()
   const timeout = Number($('#timeout').value)
   if (!Number.isFinite(timeout) || timeout <= 0) { status.textContent = '请输入大于 0 的超时时间'; return }
   const maxLongImageHeight = Number($('#max-long-image-height').value)
@@ -201,6 +206,7 @@ start.addEventListener('click', async () => {
   const entries = selectedEntries()
   if (!entries.length) { status.textContent = '请至少选择一个入口'; return }
   try {
+    appendLog('$ 启动自动化任务\n')
     await window.automation.start({
       questions: uniqueQuestions(),
       entries,
@@ -210,7 +216,7 @@ start.addEventListener('click', async () => {
       newSession: $('#new-session').checked,
       maxLongImageHeight,
     })
-    start.disabled = true; stop.disabled = false; status.textContent = '任务正在执行…'; appendLog('\n$ 启动自动化任务\n')
+    start.disabled = true; stop.disabled = false; status.textContent = '任务正在执行…'
   } catch (error) { status.textContent = error.message || '无法启动任务' }
 })
 retryFailed.addEventListener('click', async () => {

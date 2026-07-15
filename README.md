@@ -1,6 +1,6 @@
 # geo数据采集
 
-这是一个通过桌面应用批量控制 Android 手机提问、截图和归档的工具。界面、任务调度和截图引擎使用 Electron/Node.js；UI 层级、点击和输入使用内置的 Python uiautomator2 sidecar，ADB 负责无损截图、长图滚动和设备连接，scrcpy server 只提供低分辨率画面活动信号以减少重复截图。
+这是一个通过桌面应用批量控制 Android 手机提问、截图和归档的工具。界面、任务调度和截图引擎使用 Electron/Node.js；UI 层级、点击和输入使用内置的 Python uiautomator2 sidecar，ADB 负责无损截图、长图滚动和设备连接，scrcpy server 只提供低分辨率画面活动信号以减少重复截图。对于画面已经显示、但 WebView/Canvas 未向 UI 层级暴露的文字，sidecar 还提供本地 RapidOCR 通用识别能力。
 
 ## Electron 操作面板（推荐）
 
@@ -91,11 +91,15 @@ captures/
           回答.json                  # 截图质量、路径和验收字段
           执行日志.jsonl             # 本题完整事件时间线
         002_失败问题/
-          失败.json
-          执行日志.jsonl
+          失败.json                 # 原始错误与所有诊断文件索引
+          失败现场.png             # ADB 原始物理像素截图
+          失败现场.xml             # 同时刻附近的 uiautomator2 逻辑层级
+          失败现场.json            # 前台应用、窗口、尺寸、旋转和 scrcpy 状态
+          失败现场_OCR.json        # 仅本题已调用 OCR 时生成，保留完整候选
+          执行日志.jsonl           # 失败前的阶段与操作时间线
 ```
 
-`交付图片/` 不写入 XML、JSON、日志或失败截图；正式图片也不会在调试区重复保存。`回答.json` 通过绝对路径关联交付图片、XML、单题日志和批次日志，并用 `artifact_layout_version=2` 标记当前结构。抖音搜索超时等失败现场 PNG 只进入 `调试产物/`，不会污染交付内容。
+`交付图片/` 不写入 XML、JSON、日志或失败截图；正式图片也不会在调试区重复保存。`回答.json` 通过绝对路径关联交付图片、XML、单题日志和批次日志，并用 `artifact_layout_version=2` 标记当前结构。所有入口共用同一套失败现场采集，诊断文件只进入 `调试产物/`，不会污染交付内容。
 
 `执行日志.jsonl` 每行是一条独立 JSON 事件，包含时间、顺序号、耗时、入口、问题及事件类别。回答翻页、接缝降级、引用资料、参考药品入口发现、抽屉展开、每页采集、末项确认、图片加载状态、重试和失败恢复都会形成可检索事件。排查时优先读取 `batch-summary.json` 定位失败题，再读取该题 `回答.json` 或 `失败.json`，最后按 `执行日志.jsonl` 的时间线结合 `回答.xml` 与失败现场复现判断。
 
@@ -104,18 +108,19 @@ captures/
 面板支持：
 
 - 自动识别已授权的 ADB 手机；可在多台设备中选择一台执行
-- 选择一个或多个执行入口：小荷AI医生APP、抖音搜索框（小荷AI小程序）、头条搜索框（小荷AI小程序）
+- 选择一个或多个执行入口：小荷AI医生APP、抖音搜索框（小荷AI小程序）、头条搜索框（小荷AI小程序）；面板默认勾选抖音搜索框入口
 - 多入口执行时按入口顺序逐个完成整批问题：先跑完第一个入口的全部问题，再切换到下一个入口
 - 直接每行填写一个问题，或导入 TXT / CSV / JSON / XLSX 文件，默认读取 `问题` 列
 - 按列表顺序逐题发送、等待回复稳定，并分别保存纯截图交付件与 UI XML、JSON、JSONL 调试产物
 - 实时查看执行日志，并在需要时停止任务
+- 开始新批次时清空桌面日志显示；重试失败项时保留原日志并继续追加
 - 可选“每题新建会话”
 
 JSON 使用数组或 `questions` / `问题` 数组；Excel 读取第一个工作表，按界面配置的列名读取，默认列名为 `问题`。
 
 多入口批次会在批次目录下按入口生成子目录，避免不同入口的同一问题产物互相覆盖。每题 JSON 会记录 `entry_id`、`entry_label` 和 `entry_package`，便于回溯产物来自哪个入口。
 
-单个入口的单道题发生搜索无结果、回答超时、输入/点击不确定或截图失败时，只停止当前题，不重放有副作用的操作。失败原因写入该题调试目录的 `失败.json`，下一题开始前重新启动并校验当前入口，然后继续剩余问题和后续入口。批次结束后由 `调试产物/batch-summary.json` 汇总成功数、失败数和失败题路径。用户主动停止、ADB 设备断开或 uiautomator2 基础进程不可用仍会立即终止整个批次。
+单个入口的单道题发生搜索无结果、回答超时、输入/点击不确定或截图失败时，只停止当前题，不重放有副作用的操作。失败原因写入该题调试目录的 `失败.json`，同时尝试保存 `失败现场.png/.xml/.json`；如果本题调用过 OCR，还会保存 `失败现场_OCR.json` 的完整文字、置信度和物理坐标。任一诊断源采集失败只会在现场清单里记录原因，不会覆盖原始任务错误或阻止后续题。下一题开始前重新启动并校验当前入口，然后继续剩余问题和后续入口。批次结束后由 `调试产物/batch-summary.json` 汇总成功数、失败数和失败题路径。用户主动停止、ADB 设备断开或 uiautomator2 基础进程不可用仍会终止整个批次，但会先尽可能留下任务级失败现场。
 
 小荷 App 在发送前会强制清空并核对输入框文本；截图前必须通过右侧用户消息的气泡结构重新定位到本题，并确认气泡完整进入首屏，不能把包含同名药品的左侧回答标题误当成问题。引用资料展开后还会再次校验，否则会明确失败，绝不把旧会话或被裁掉问题文字的回答记为成功。成功元数据会记录 `reply_question_located=true` 和 `reply_question_fully_visible=true`。推荐药品入口在点击前会等待页面稳定并从最新层级刷新坐标，避免正文重排后点击旧位置；抽屉识别兼容普通窗口和华为弹窗窗口，并使用面板和列表相对竖屏高度确认全屏状态。元数据中的 `reference_products_trigger_refreshed` 记录本题是否刷新过入口坐标。抖音搜索超时会在当前题调试目录保留 `搜索超时.png` 和 `搜索超时.xml` 供本机诊断，这些采集产物仍受忽略规则保护。
 
@@ -123,7 +128,9 @@ JSON 使用数组或 `questions` / `问题` 数组；Excel 读取第一个工作
 
 两条路径最终都会先等待小程序回答连续 3 秒静止，再从全文顶部向下滚动并保存 `回答_001.png`。正文截图使用 ADB 原始 PNG，并根据小程序真实滚动视口排除固定的咨询人选择栏、顶部工具栏和底部输入区；相邻视口执行像素接缝校验，通过后才无缝裁掉重叠内容。顶部需要连续两次滚动无变化确认；没有参考药品时，末端也需要连续两次无变化。出现无文字的“参考药品”卡片时，脚本会按右上箭头和商品图的结构识别入口，立即进入药品终止序列：打开抖音 BottomSheet、确认首项图片已加载、持续滚动到真实末项并另存 `回答_参考药品_001.png`。入口、抽屉和商品图片均使用相对竖屏尺寸及节点层级识别，不依赖 1080×2400 固定坐标。JSON 的 `douyin_result_mode` 区分 `smart_summary` 与 `miniapp_entry_card`；入口路径额外记录 `douyin_miniapp_entry_detected`、入口截图及卡片/点击范围、宿主 Activity 和 `douyin_miniapp_entry_opened`，智能总结路径继续记录 `douyin_search_summary_captured`、`douyin_search_summary_screenshot` 和 `douyin_view_full_opened`。正文和药品验收分别记录 `reply_continuity_verified`、`reference_products_detected`、`reference_products_images_ready`、`reference_products_confirmed_end` 和 `reference_products_capture_complete`。
 
-今日头条入口使用对应的独立搜索流程：通过头条搜索框输入并确认问题，等待“小荷AI医生·智能总结”和可点击的“查看更多”同时出现。先将完整搜索结果页保存为 `回答_智能总结.png`，再点击“查看更多”进入小荷 AI 全文页。全文首次打开后需等待连续 3 秒无画面活动，再从真实顶部向下采集并保存 `回答_001.png`；固定顶栏、底部工具栏和消息输入框不会进入长图。JSON 额外记录 `toutiao_search_summary_captured`、`toutiao_search_summary_screenshot`、`toutiao_view_more_opened`、`toutiao_full_page_confirmed_top` 和 `toutiao_full_page_confirmed_end`。
+今日头条入口使用对应的独立搜索流程：脚本先按头条首页顶部搜索框的语义节点打开搜索页，再通过搜索页编辑框输入并确认问题，两阶段均不使用固定坐标。随后优先从 UI 层级等待“小荷AI医生·智能总结”和可点击的“查看更多”；头条 WebView 未暴露文字时，才对稳定的 ADB 原始 PNG 启用 RapidOCR 兜底。OCR 必须同时高置信识别品牌标题和位于其下方合理距离的“查看更多”，单独识别到通用“查看更多”不会点击。OCR 返回图片物理坐标，脚本按实时 UI 层级逻辑尺寸显式映射，并在保存稳定搜索结果截图后再次识别确认，随后仍由 uiautomator2 点击且强校验全文页已经打开。完整搜索结果页保存为 `回答_智能总结.png`；全文首次打开后需等待连续 3 秒无画面活动，再从真实顶部向下采集并保存 `回答_001.png`。JSON 额外记录 `toutiao_answer_card_detection_method`、OCR 引擎/耗时/置信度及物理和逻辑坐标、`toutiao_search_summary_captured`、`toutiao_view_more_opened`、`toutiao_full_page_confirmed_top` 和 `toutiao_full_page_confirmed_end`。
+
+通用 OCR 的接口、坐标契约、调用示例、日志字段和扩展规则见 [本地 OCR 设计与使用](docs/ocr.md)。正常 UI 层级可识别时不会调用 OCR，因此不会给所有任务增加固定等待。
 
 ## 项目结构
 
@@ -131,11 +138,11 @@ JSON 使用数组或 `questions` / `问题` 数组；Excel 读取第一个工作
 src/
   main/          # Electron 主进程和 preload
   renderer/      # 桌面面板页面、样式和交互
-  automation/    # uiautomator2客户端、scrcpy观察器、ADB截图、长图拼接和UI层级解析
+  automation/    # uiautomator2/OCR客户端、scrcpy观察器、ADB截图、长图拼接和UI层级解析
   questions.js   # 问题文件导入
   runtime-paths.js
   cli.js
-python/          # uv管理的Python uiautomator2 sidecar、测试和PyInstaller配置
+python/          # uv管理的Python uiautomator2与RapidOCR sidecar、测试和PyInstaller配置
 scripts/         # 打包前准备ADB、Python sidecar和scrcpy server
 tests/node/      # Node 内置 test runner 测试
 ```
@@ -148,6 +155,6 @@ tests/node/      # Node 内置 test runner 测试
 - 正式截图始终使用ADB原始PNG，不使用uiautomator2截图接口。
 - scrcpy观察器不解码、不保存也不参与拼接，只根据官方视频包的活动情况快速判断页面是否停稳。读取层级和截取PNG期间没有活动时直接使用当前无损PNG；检测到全屏活动时不再仅凭视频包判定回答失败，而是复用已取得的回答区域PNG，升级为连续两组“ADB截图→uiautomator2层级→ADB截图”像素夹心校验。只有目标回答区域也持续变化才继续等待或超时失败，状态栏、浮动控件等区域外活动不会误伤正式截图。观察器不可用、没有明确活动证据，或较慢设备耗尽观察确认窗口时使用普通单组夹心校验，不影响UI后端选择。元数据中的 `scrcpy_observer_activity_region_checks` 和 `scrcpy_observer_question_activity_region_checks` 记录这种严格区域复核发生次数。
 - 回答完成判定使用更严格的规则：最后一个活动帧后必须连续 3 秒没有任何新活动帧，任意单帧都会重置计时；读取最终 UI 层级期间若再出现活动帧，则继续等待而不进入截图。
-- 每个普通回答接缝最多局部重采一次；若首轮仍无法通过像素连续性验证且尚未进入参考药品终止序列，会先等待最终静止并从问题顶部整题重采一次，避免把同一回答的两个文本版本拼进长图。重采后仍失败时保留下一屏完整视口并加浅色分隔，不依据不可靠的XML坐标或滚动距离裁掉文字。
+- 每个普通回答接缝最多局部重采一次；末屏短距离滚动遇到一侧大面积同色区域时，会将各区域候选位移重新交给全部内容区域进行像素校验，只有唯一候选通过才允许无缝拼接。若首轮仍无法通过像素连续性验证且尚未进入参考药品终止序列，会先等待最终静止并从问题顶部整题重采一次，避免把同一回答的两个文本版本拼进长图。重采后仍失败时保留下一屏完整视口并加浅色分隔，不依据不可靠的XML坐标或滚动距离裁掉文字。
 - `captures/` 已被 Git 忽略，因为截图、UI XML 和元数据可能包含敏感健康信息。
 - 健康问题和截图可能包含个人信息，请勿上传到公共仓库。

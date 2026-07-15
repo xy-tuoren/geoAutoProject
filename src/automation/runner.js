@@ -6,13 +6,14 @@ const { EventLog } = require('./event-log')
 const { iterNodes, nodeAttr, nodeIsVisible, hierarchyIsLoading, parseBounds, parseNodeTree, boundsIntersect, boundsCenterY, estimateVerticalScrollShift, questionVisible, currentQuestionText, findChatScrollBounds, validateCaptureViewport, replyCaptureBounds, visibleLabelBounds, visibleLabelBoundsList, boundsForNodeAttribute, evidencePanelBounds, evidenceMinimumHeight, referenceProductsSection, referenceProductImageBounds } = require('./hierarchy')
 const { imageInfo, cropImage, imagesSimilar, imageRegionsStable, imageLooksLoaded, verifyFrameOverlap, verifyProductGridOverlap, composeLongImages } = require('./images')
 const { U2Client } = require('./u2-client')
+const { OcrRecognizer, findOcrText, mapPhysicalBoundsToLogical } = require('./ocr')
 const { ScrcpyObserver, SCRCPY_VERSION } = require('./scrcpy-observer')
 const { bundledScrcpyServer } = require('../runtime-paths')
 
 const DEFAULT_PACKAGE = 'com.aurora.xiaohe.aidoctor'
 const DEFAULT_MAX_LONG_IMAGE_HEIGHT = 12_000
 const REPLY_STABLE_QUIET_MS = 3_000
-const DEFAULT_ENTRY_ID = 'xiaohe-app'
+const DEFAULT_ENTRY_ID = 'douyin-xiaohe-miniapp'
 const SEARCH_SUMMARY_FILENAME = '回答_智能总结.png'
 const DOUYIN_SEARCH_SUMMARY_FILENAME = SEARCH_SUMMARY_FILENAME
 const DOUYIN_MINIAPP_ENTRY_FILENAME = '回答_小程序入口.png'
@@ -56,7 +57,10 @@ function hierarchyBelongsToPackage(xml, packageName = DEFAULT_PACKAGE) {
 }
 
 function automationEntries() {
-  return ENTRY_LIST.map(entry => ({ ...entry }))
+  return ENTRY_LIST.map(entry => ({
+    ...entry,
+    defaultSelected: entry.id === DEFAULT_ENTRY_ID,
+  }))
 }
 
 function normalizeEntryId(value) {
@@ -108,6 +112,18 @@ function toutiaoSearchInput(xml) {
   return { bounds: parseBounds(rawBounds), text }
 }
 
+function toutiaoHomeSearchBounds(xml) {
+  const attrs = iterNodes(xml).find(item => {
+    if (!nodeIsVisible(item)
+      || nodeAttr(item, 'package') !== ENTRY_DEFINITIONS['toutiao-xiaohe-miniapp'].packageName) return false
+    const resourceId = nodeAttr(item, 'resource-id')
+    const description = nodeAttr(item, 'content-desc')
+    return resourceId.endsWith(':id/kic') && /^搜索框[，,]/.test(description)
+  })
+  const rawBounds = attrs && nodeAttr(attrs, 'bounds')
+  return rawBounds ? parseBounds(rawBounds) : null
+}
+
 function toutiaoViewMoreBounds(xml) {
   const nodes = iterNodes(xml)
   const hasXiaoheSummary = nodes.some(attrs => nodeIsVisible(attrs)
@@ -119,6 +135,53 @@ function toutiaoViewMoreBounds(xml) {
     && nodeAttr(attrs, 'clickable') === 'true')
   const rawBounds = more && nodeAttr(more, 'bounds')
   return rawBounds ? parseBounds(rawBounds) : null
+}
+
+function hierarchyLogicalSize(xml, fallback) {
+  let width = 0
+  let height = 0
+  for (const attrs of iterNodes(xml)) {
+    const rawBounds = nodeAttr(attrs, 'bounds')
+    if (!rawBounds) continue
+    const bounds = parseBounds(rawBounds)
+    width = Math.max(width, bounds[2])
+    height = Math.max(height, bounds[3])
+  }
+  const result = width > 0 && height > 0 ? { width, height } : fallback
+  if (!result || result.height <= result.width) throw new Error('头条OCR定位仅支持正常竖屏；当前UI逻辑视口异常。')
+  return result
+}
+
+function toutiaoOcrViewMoreTarget(recognition, logicalSize) {
+  const physicalSize = recognition.image
+  const summaries = findOcrText(recognition, item => /^小荷AI医生(?:AI)?智能总结$/.test(item.normalizedText), { minConfidence: 0.85 })
+  const viewMoreItems = findOcrText(recognition, item => /^查看更多$/.test(item.normalizedText), { minConfidence: 0.85 })
+  const candidates = []
+  for (const summary of summaries) {
+    for (const viewMore of viewMoreItems) {
+      const summaryCenterY = (summary.bounds[1] + summary.bounds[3]) / 2
+      const viewMoreCenterX = (viewMore.bounds[0] + viewMore.bounds[2]) / 2
+      const viewMoreWidth = viewMore.bounds[2] - viewMore.bounds[0]
+      const verticalGap = viewMore.bounds[1] - summary.bounds[3]
+      const horizontalOverlap = Math.min(summary.bounds[2], viewMore.bounds[2]) - Math.max(summary.bounds[0], viewMore.bounds[0])
+      if (summaryCenterY < physicalSize.height * 0.1 || summaryCenterY > physicalSize.height * 0.68
+        || verticalGap < 0 || verticalGap > physicalSize.height * 0.45
+        || horizontalOverlap <= 0
+        || viewMoreWidth < physicalSize.width * 0.08 || viewMoreWidth > physicalSize.width * 0.35
+        || Math.abs(viewMoreCenterX - physicalSize.width / 2) > physicalSize.width * 0.28) continue
+      candidates.push({ summary, viewMore, score: summary.confidence + viewMore.confidence })
+    }
+  }
+  candidates.sort((first, second) => second.score - first.score || first.viewMore.bounds[1] - second.viewMore.bounds[1])
+  const selected = candidates[0]
+  if (!selected) return null
+  return {
+    bounds: mapPhysicalBoundsToLogical(selected.viewMore.bounds, physicalSize, logicalSize),
+    physicalBounds: selected.viewMore.bounds,
+    summaryPhysicalBounds: selected.summary.bounds,
+    summaryConfidence: selected.summary.confidence,
+    viewMoreConfidence: selected.viewMore.confidence,
+  }
 }
 
 function douyinViewFullBounds(xml, screenSize) {
@@ -867,6 +930,121 @@ function retryAttemptCount(summary) {
   return Math.max(0, Number(summary?.retry_count) || 0) + 1
 }
 
+function hierarchyDiagnosticSummary(xml) {
+  const packages = new Set()
+  let width = 0
+  let height = 0
+  let nodeCount = 0
+  for (const attrs of iterNodes(xml)) {
+    nodeCount += 1
+    const packageName = nodeAttr(attrs, 'package')
+    if (packageName) packages.add(packageName)
+    const rawBounds = nodeAttr(attrs, 'bounds')
+    if (!rawBounds) continue
+    try {
+      const bounds = parseBounds(rawBounds)
+      width = Math.max(width, bounds[2])
+      height = Math.max(height, bounds[3])
+    } catch {}
+  }
+  const rotation = String(xml).match(/\brotation="([^"]+)"/)?.[1] ?? null
+  return {
+    node_count: nodeCount,
+    packages: [...packages].sort(),
+    logical_size: width > 0 && height > 0 ? { width, height } : null,
+    rotation,
+  }
+}
+
+function diagnosticError(error) {
+  return { name: error?.name || 'Error', message: error?.message || String(error), stack: error?.stack || null }
+}
+
+async function captureFailureDiagnostics({
+  directory,
+  stem = '失败现场',
+  serial,
+  entry,
+  context = {},
+  error,
+  captureScreenshot,
+  dumpHierarchy,
+  currentApp,
+  foregroundWindow,
+  deviceState,
+  observerSnapshot,
+  ocrDiagnostic = null,
+  inspectImage = imageInfo,
+  now = () => new Date(),
+}) {
+  const captureStartedAt = now().toISOString()
+  await fs.mkdir(directory, { recursive: true })
+  const manifestPath = path.join(directory, `${stem}.json`)
+  const screenshotPath = path.join(directory, `${stem}.png`)
+  const hierarchyPath = path.join(directory, `${stem}.xml`)
+  const ocrPath = path.join(directory, `${stem}_OCR.json`)
+  const attempt = async task => {
+    try { return { ok: true, value: await task() } } catch (captureError) { return { ok: false, error: diagnosticError(captureError) } }
+  }
+  const [frameResult, hierarchyResult, appResult, windowResult, deviceResult, observerResult] = await Promise.all([
+    attempt(captureScreenshot),
+    attempt(dumpHierarchy),
+    attempt(currentApp),
+    attempt(foregroundWindow),
+    attempt(deviceState),
+    attempt(async () => observerSnapshot()),
+  ])
+
+  let screenshot = { status: 'failed', path: null, error: frameResult.error || null }
+  if (frameResult.ok) {
+    const writeResult = await attempt(async () => {
+      await fs.writeFile(screenshotPath, frameResult.value)
+      return inspectImage(frameResult.value)
+    })
+    screenshot = writeResult.ok
+      ? { status: 'captured', path: screenshotPath, coordinate_space: 'adb_screenshot_physical_pixels', ...writeResult.value }
+      : { status: 'failed', path: null, error: writeResult.error }
+  }
+
+  let hierarchy = { status: 'failed', path: null, error: hierarchyResult.error || null }
+  if (hierarchyResult.ok) {
+    const writeResult = await attempt(async () => {
+      const xml = String(hierarchyResult.value || '')
+      await fs.writeFile(hierarchyPath, xml, 'utf8')
+      return hierarchyDiagnosticSummary(xml)
+    })
+    hierarchy = writeResult.ok
+      ? { status: 'captured', path: hierarchyPath, coordinate_space: 'uiautomator2_logical_pixels', ...writeResult.value }
+      : { status: 'failed', path: null, error: writeResult.error }
+  }
+
+  let ocr = { status: 'not_available', path: null }
+  if (ocrDiagnostic) {
+    const writeResult = await attempt(async () => fs.writeFile(ocrPath, JSON.stringify(ocrDiagnostic, null, 2), 'utf8'))
+    ocr = writeResult.ok ? { status: 'captured', path: ocrPath } : { status: 'failed', path: null, error: writeResult.error }
+  }
+  const manifest = {
+    created_at: captureStartedAt,
+    capture_finished_at: now().toISOString(),
+    failure_diagnostic_version: 1,
+    serial,
+    entry_id: entry?.id || null,
+    entry_label: entry?.label || null,
+    entry_package: entry?.packageName || null,
+    context,
+    original_error: diagnosticError(error),
+    screenshot,
+    hierarchy,
+    current_app: appResult.ok ? { status: 'captured', value: appResult.value } : { status: 'failed', error: appResult.error },
+    foreground_window: windowResult.ok ? { status: 'captured', value: windowResult.value } : { status: 'failed', error: windowResult.error },
+    device_state: deviceResult.ok ? { status: 'captured', value: deviceResult.value } : { status: 'failed', error: deviceResult.error },
+    scrcpy_observer: observerResult.ok ? { status: 'captured', value: observerResult.value } : { status: 'failed', error: observerResult.error },
+    ocr,
+  }
+  await fs.writeFile(manifestPath, JSON.stringify(manifest, null, 2), 'utf8')
+  return { manifest: manifestPath, screenshot: screenshot.path, hierarchy: hierarchy.path, ocr: ocr.path, details: manifest }
+}
+
 function createRunner(options) {
   let cancelled = false
   let activeSerial = null
@@ -884,6 +1062,8 @@ function createRunner(options) {
   let batchEventLog = null
   let activeQuestionEventLog = null
   let activeQuestionContext = {}
+  let activeQuestionArtifacts = null
+  let lastOcrDiagnostic = null
   const log = text => {
     const message = String(text)
     options.log(`${message}${message.endsWith('\n') ? '' : '\n'}`)
@@ -897,6 +1077,7 @@ function createRunner(options) {
     adbPath: options.adbPath,
     log,
   })
+  const ocr = options.ocrRecognizer || new OcrRecognizer({ transport: ui })
   const observer = options.scrcpyObserver || new ScrcpyObserver({
     adbPath: options.adbPath,
     serverPath: bundledScrcpyServer(options),
@@ -925,6 +1106,8 @@ function createRunner(options) {
   }
 
   async function startQuestionLogging(artifacts, context) {
+    activeQuestionArtifacts = artifacts
+    lastOcrDiagnostic = null
     activeQuestionContext = { ...context }
     activeQuestionEventLog = new EventLog({
       filePath: path.join(artifacts.diagnosticDirectory, '执行日志.jsonl'),
@@ -951,6 +1134,7 @@ function createRunner(options) {
     await activeQuestionEventLog.flush()
     activeQuestionEventLog = null
     activeQuestionContext = {}
+    activeQuestionArtifacts = null
   }
 
   async function flushArtifactLogs() {
@@ -1158,6 +1342,48 @@ function createRunner(options) {
     return { width, height }
   }
 
+  async function diagnosticDeviceState() {
+    const read = async args => {
+      try {
+        return { status: 'captured', value: (await adbCommand(options.adbPath, activeSerial, args)).trim() }
+      } catch (error) {
+        return { status: 'failed', error: diagnosticError(error) }
+      }
+    }
+    const [wmSize, wmDensity, orientation, autoRotation] = await Promise.all([
+      read(['shell', 'wm', 'size']),
+      read(['shell', 'wm', 'density']),
+      read(['shell', 'settings', 'get', 'system', 'user_rotation']),
+      read(['shell', 'settings', 'get', 'system', 'accelerometer_rotation']),
+    ])
+    return { wm_size: wmSize, wm_density: wmDensity, user_rotation: orientation, accelerometer_rotation: autoRotation }
+  }
+
+  async function saveFailureDiagnostics(artifacts, error, { stem = '失败现场' } = {}) {
+    try {
+      const diagnostics = await captureFailureDiagnostics({
+        directory: artifacts.diagnosticDirectory,
+        stem,
+        serial: activeSerial,
+        entry: activeEntry,
+        context: activeQuestionContext,
+        error,
+        captureScreenshot: () => adbScreenshot(options.adbPath, activeSerial),
+        dumpHierarchy: () => ui.dumpHierarchy(),
+        currentApp: () => ui.currentApp(),
+        foregroundWindow: () => ui.foregroundWindow(),
+        deviceState: diagnosticDeviceState,
+        observerSnapshot: () => typeof observer.snapshot === 'function' ? observer.snapshot() : { active: Boolean(observer.active), version: SCRCPY_VERSION },
+        ocrDiagnostic: lastOcrDiagnostic,
+      })
+      log(`diagnostic: 失败现场已保存 ${diagnostics.manifest}`)
+      return diagnostics
+    } catch (diagnosticFailure) {
+      log(`diagnostic: 失败现场采集器自身失败，但保留原始任务错误：${diagnosticFailure.message}`)
+      return { manifest: null, screenshot: null, hierarchy: null, ocr: null, capture_error: diagnosticError(diagnosticFailure) }
+    }
+  }
+
   async function waitForInput(timeout = 10_000) {
     const deadline = Date.now() + timeout
     while (Date.now() < deadline) {
@@ -1297,6 +1523,13 @@ function createRunner(options) {
         await tap((edit.bounds[0] + edit.bounds[2]) / 2, (edit.bounds[1] + edit.bounds[3]) / 2)
         await waitForVisualQuiet({ timeout: 1_200, fallbackMs: 500 })
         return toutiaoSearchInput(await source()) || edit
+      }
+      const homeSearch = toutiaoHomeSearchBounds(xml)
+      if (homeSearch) {
+        log('stage: 正在打开头条首页搜索入口')
+        await tap((homeSearch[0] + homeSearch[2]) / 2, (homeSearch[1] + homeSearch[3]) / 2)
+        await waitForVisualQuiet({ timeout: 1_500, fallbackMs: 800 })
+        continue
       }
       const search = boundsForNodeAttribute(xml, 'content-desc', '搜索') || visibleLabelBounds(xml, '搜索')
       if (search) {
@@ -1498,12 +1731,41 @@ function createRunner(options) {
     const deadline = Date.now() + timeout
     const size = await windowSize()
     let lastProgress = 0
+    let nextOcrAt = 0
     while (Date.now() < deadline) {
       const xml = await source()
       const viewMore = toutiaoViewMoreBounds(xml)
-      if (viewMore) return { xml, viewMore, size }
+      if (viewMore) return { xml, viewMore, size, detectionMethod: 'ui_hierarchy' }
+      if (Date.now() >= nextOcrAt) {
+        const frame = await screenshot()
+        const logicalSize = hierarchyLogicalSize(xml, size)
+        const recognition = await ocr.recognize(frame, {
+          region: [0, Math.floor(size.height * 0.1), size.width, Math.floor(size.height * 0.86)],
+          minConfidence: 0.5,
+        })
+        const ocrTarget = toutiaoOcrViewMoreTarget(recognition, logicalSize)
+        lastOcrDiagnostic = {
+          created_at: new Date().toISOString(),
+          purpose: 'toutiao_answer_card',
+          matcher: {
+            summary_pattern: '^小荷AI医生(?:AI)?智能总结$',
+            view_more_pattern: '^查看更多$',
+            minimum_confidence: 0.85,
+            requires_summary_above_button: true,
+            requires_horizontal_overlap: true,
+          },
+          logical_size: logicalSize,
+          recognition,
+          target: ocrTarget,
+        }
+        log(ocrTarget
+          ? `ocr: purpose=toutiao_answer_card outcome=matched engine=${recognition.engine} elapsed=${Math.round(recognition.elapsedMs)}ms lines=${recognition.results.length} summary_confidence=${ocrTarget.summaryConfidence.toFixed(3)} view_more_confidence=${ocrTarget.viewMoreConfidence.toFixed(3)} physical_bounds=${ocrTarget.physicalBounds.join(',')} logical_bounds=${ocrTarget.bounds.join(',')}`
+          : `ocr: purpose=toutiao_answer_card outcome=not_found engine=${recognition.engine} elapsed=${Math.round(recognition.elapsedMs)}ms lines=${recognition.results.length}`)
+        if (ocrTarget) return { xml, viewMore: ocrTarget.bounds, size, detectionMethod: 'rapidocr', ocrTarget, recognition }
+        nextOcrAt = Date.now() + 2_000
+      }
       if (Date.now() - lastProgress >= 5_000) {
-        log('waiting: 正在等待头条小荷AI医生搜索结果…')
+        log('waiting: 正在等待头条小荷AI医生搜索结果（UI层级或OCR）…')
         lastProgress = Date.now()
       }
       await sleep(500)
@@ -1521,9 +1783,33 @@ function createRunner(options) {
       interval: 120,
     }, 8_000)
     if (!capture.stable) throw new Error('头条搜索结果智能总结持续变化，无法取得稳定截图。')
-    const viewMore = toutiaoViewMoreBounds(capture.xml)
-    if (!viewMore) throw new Error('截取头条智能总结后未能再次确认“查看更多”卡片，已停止点击。')
-    return { ...capture, viewMore, size }
+    const hierarchyViewMore = toutiaoViewMoreBounds(capture.xml)
+    if (hierarchyViewMore) return { ...capture, viewMore: hierarchyViewMore, size, detectionMethod: 'ui_hierarchy' }
+    const logicalSize = hierarchyLogicalSize(capture.xml, size)
+    const recognition = await ocr.recognize(capture.frame, {
+      region: [0, Math.floor(size.height * 0.1), size.width, Math.floor(size.height * 0.86)],
+      minConfidence: 0.5,
+    })
+    const ocrTarget = toutiaoOcrViewMoreTarget(recognition, logicalSize)
+    lastOcrDiagnostic = {
+      created_at: new Date().toISOString(),
+      purpose: 'toutiao_summary_recapture',
+      matcher: {
+        summary_pattern: '^小荷AI医生(?:AI)?智能总结$',
+        view_more_pattern: '^查看更多$',
+        minimum_confidence: 0.85,
+        requires_summary_above_button: true,
+        requires_horizontal_overlap: true,
+      },
+      logical_size: logicalSize,
+      recognition,
+      target: ocrTarget,
+    }
+    log(ocrTarget
+      ? `ocr: purpose=toutiao_summary_recapture outcome=matched engine=${recognition.engine} elapsed=${Math.round(recognition.elapsedMs)}ms lines=${recognition.results.length} summary_confidence=${ocrTarget.summaryConfidence.toFixed(3)} view_more_confidence=${ocrTarget.viewMoreConfidence.toFixed(3)} physical_bounds=${ocrTarget.physicalBounds.join(',')} logical_bounds=${ocrTarget.bounds.join(',')}`
+      : `ocr: purpose=toutiao_summary_recapture outcome=not_found engine=${recognition.engine} elapsed=${Math.round(recognition.elapsedMs)}ms lines=${recognition.results.length}`)
+    if (!ocrTarget) throw new Error('截取头条智能总结后，UI层级和OCR均未能再次确认小荷AI医生“查看更多”卡片，已停止点击。')
+    return { ...capture, viewMore: ocrTarget.bounds, size, detectionMethod: 'rapidocr', ocrTarget, recognition }
   }
 
   async function openToutiaoFullAnswer(viewMore, size, timeout = 12_000) {
@@ -2591,6 +2877,14 @@ function createRunner(options) {
       toutiao_search_summary_captured: true,
       toutiao_search_summary_screenshot: summaryPath,
       toutiao_question_logical_image_count: 2,
+      toutiao_answer_card_detection_method: summary.detectionMethod,
+      ocr_backend: summary.recognition?.engine || null,
+      ocr_coordinate_space: summary.recognition?.coordinateSpace || null,
+      toutiao_ocr_elapsed_ms: summary.recognition?.elapsedMs || 0,
+      toutiao_ocr_summary_confidence: summary.ocrTarget?.summaryConfidence || null,
+      toutiao_ocr_view_more_confidence: summary.ocrTarget?.viewMoreConfidence || null,
+      toutiao_ocr_view_more_physical_bounds: summary.ocrTarget?.physicalBounds || null,
+      toutiao_view_more_logical_bounds: summary.viewMore,
     })
     log(`capture: 头条搜索结果智能总结已保存 ${summaryPath}`)
     log('stage: 已找到头条小荷AI医生回答卡片，正在点击查看更多')
@@ -2813,8 +3107,15 @@ function createRunner(options) {
         await batchEventLog.record('batch_completed', { category: 'lifecycle', details: { completed: 1, failed: 0, summary: summaryPath } })
         return { ...result, summary: summaryPath }
       } catch (error) {
-        await finishQuestionLogging('question_failed', { error_name: error?.name || 'Error', error_message: error?.message || String(error) }).catch(() => {})
-        await batchEventLog.record('batch_failed', { category: 'error', details: { error_name: error?.name || 'Error', error_message: error?.message || String(error) } }).catch(() => {})
+        const diagnostics = await saveFailureDiagnostics(activeQuestionArtifacts || batchArtifacts, error, {
+          stem: activeQuestionArtifacts ? '失败现场' : '自动化失败现场',
+        })
+        await finishQuestionLogging('question_failed', {
+          error_name: error?.name || 'Error',
+          error_message: error?.message || String(error),
+          failure_diagnostics: diagnostics.manifest,
+        }).catch(() => {})
+        await batchEventLog.record('batch_failed', { category: 'error', details: { error_name: error?.name || 'Error', error_message: error?.message || String(error), failure_diagnostics: diagnostics.manifest } }).catch(() => {})
         await fs.writeFile(path.join(batchArtifacts.diagnosticDirectory, 'automation-failure.json'), JSON.stringify({
           created_at: new Date().toISOString(),
           serial: payload.serial,
@@ -2830,6 +3131,7 @@ function createRunner(options) {
           error_name: error?.name || 'Error',
           error_message: error?.message || String(error),
           stack: error?.stack || null,
+          failure_diagnostics: diagnostics,
         }, null, 2), 'utf8').catch(() => {})
         throw error
       } finally {
@@ -2900,6 +3202,7 @@ function createRunner(options) {
               const artifacts = questionArtifactDirectories(entryArtifacts, index, question)
               const directory = artifacts.diagnosticDirectory
               const failurePath = path.join(directory, '失败.json')
+              const diagnostics = await saveFailureDiagnostics(artifacts, error)
               const failure = {
                 created_at: new Date().toISOString(),
                 status: 'failed',
@@ -2920,6 +3223,7 @@ function createRunner(options) {
                 error_name: error?.name || 'Error',
                 error_message: error?.message || String(error),
                 stack: error?.stack || null,
+                failure_diagnostics: diagnostics,
               }
               await fs.mkdir(directory, { recursive: true })
               await fs.writeFile(failurePath, JSON.stringify(failure, null, 2), 'utf8')
@@ -2931,6 +3235,7 @@ function createRunner(options) {
                 failure: failurePath,
                 error_name: failure.error_name,
                 error_message: failure.error_message,
+                failure_diagnostics: diagnostics.manifest,
               })
               results.push({
                 status: 'failed',
@@ -2942,10 +3247,11 @@ function createRunner(options) {
                 diagnostic_directory: artifacts.diagnosticDirectory,
                 event_log: path.join(directory, '执行日志.jsonl'),
                 failure: failurePath,
+                failure_diagnostics: diagnostics.manifest,
               })
               log(`failed: [${entryIndex + 1}/${entries.length} ${index}/${payload.questions.length}] ${entry.label} / ${question}: ${failure.error_message}`)
               log(`recovery: 本题已记录到 ${failurePath}；下一题将重新启动并校验当前入口`)
-              await finishQuestionLogging('question_failed', { failure: failurePath, error_name: failure.error_name, error_message: failure.error_message })
+              await finishQuestionLogging('question_failed', { failure: failurePath, failure_diagnostics: diagnostics.manifest, error_name: failure.error_name, error_message: failure.error_message })
             },
             checkCancelled,
           })
@@ -2977,8 +3283,11 @@ function createRunner(options) {
         await batchEventLog.record('batch_result_saved', { category: 'lifecycle', details: { total, completed, failed, summary: summaryPath } })
         return summary
       } catch (error) {
-        await finishQuestionLogging('question_failed', { error_name: error?.name || 'Error', error_message: error?.message || String(error), fatal: true }).catch(() => {})
-        await batchEventLog.record('batch_failed', { category: 'error', details: { error_name: error?.name || 'Error', error_message: error?.message || String(error) } }).catch(() => {})
+        const diagnostics = await saveFailureDiagnostics(activeQuestionArtifacts || batchArtifacts, error, {
+          stem: activeQuestionArtifacts ? '失败现场_致命' : '自动化失败现场',
+        })
+        await finishQuestionLogging('question_failed', { error_name: error?.name || 'Error', error_message: error?.message || String(error), fatal: true, failure_diagnostics: diagnostics.manifest }).catch(() => {})
+        await batchEventLog.record('batch_failed', { category: 'error', details: { error_name: error?.name || 'Error', error_message: error?.message || String(error), failure_diagnostics: diagnostics.manifest } }).catch(() => {})
         await fs.writeFile(path.join(batchArtifacts.diagnosticDirectory, 'automation-failure.json'), JSON.stringify({
           created_at: new Date().toISOString(),
           serial: payload.serial,
@@ -2995,6 +3304,7 @@ function createRunner(options) {
           error_name: error?.name || 'Error',
           error_message: error?.message || String(error),
           stack: error?.stack || null,
+          failure_diagnostics: diagnostics,
         }, null, 2), 'utf8').catch(() => {})
         throw error
       } finally {
@@ -3085,6 +3395,7 @@ function createRunner(options) {
           } catch (error) {
             if (fatalBatchError(error)) throw error
             failed += 1
+            const diagnostics = await saveFailureDiagnostics(artifacts, error, { stem: `失败现场_重试_${retryAttempt}` })
             const failure = {
               created_at: new Date().toISOString(),
               status: 'failed',
@@ -3105,6 +3416,7 @@ function createRunner(options) {
               error_name: error?.name || 'Error',
               error_message: error?.message || String(error),
               stack: error?.stack || null,
+              failure_diagnostics: diagnostics,
             }
             await fs.mkdir(artifacts.diagnosticDirectory, { recursive: true })
             await fs.writeFile(failurePath, JSON.stringify(failure, null, 2), 'utf8')
@@ -3114,10 +3426,11 @@ function createRunner(options) {
               delivery_directory: artifacts.deliveryDirectory, diagnostic_directory: artifacts.diagnosticDirectory,
               event_log: path.join(artifacts.diagnosticDirectory, '执行日志.jsonl'), failure: failurePath,
               retry_attempt: retryAttempt,
+              failure_diagnostics: diagnostics.manifest,
             }
-            retryFailures.push({ entry_id: entry.id, entry_label: entry.label, question: item.question, question_index: item.question_index, failure: failurePath, error_name: failure.error_name, error_message: failure.error_message })
+            retryFailures.push({ entry_id: entry.id, entry_label: entry.label, question: item.question, question_index: item.question_index, failure: failurePath, failure_diagnostics: diagnostics.manifest, error_name: failure.error_name, error_message: failure.error_message })
             log(`retry failed: [${item.question_index}] ${entry.label} / ${item.question}: ${failure.error_message}`)
-            await finishQuestionLogging('question_failed', { retry_attempt: retryAttempt, failure: failurePath, error_name: failure.error_name, error_message: failure.error_message })
+            await finishQuestionLogging('question_failed', { retry_attempt: retryAttempt, failure: failurePath, failure_diagnostics: diagnostics.manifest, error_name: failure.error_name, error_message: failure.error_message })
           }
         }
         const remainingFailures = results.filter(result => result.status === 'failed')
@@ -3145,8 +3458,25 @@ function createRunner(options) {
         await batchEventLog.record('batch_result_saved', { category: 'lifecycle', details: { retry_attempt: retryAttempt, total: summary.total, completed: summary.completed, failed: summary.failed, summary: summaryPath } })
         return summary
       } catch (error) {
-        await finishQuestionLogging('question_failed', { retry_attempt: retryAttempt, error_name: error?.name || 'Error', error_message: error?.message || String(error), fatal: true }).catch(() => {})
-        await batchEventLog.record('batch_retry_failed', { category: 'error', details: { retry_attempt: retryAttempt, error_name: error?.name || 'Error', error_message: error?.message || String(error) } }).catch(() => {})
+        const diagnostics = await saveFailureDiagnostics(activeQuestionArtifacts || batchArtifacts, error, {
+          stem: activeQuestionArtifacts ? `失败现场_重试_${retryAttempt}_致命` : `自动化失败现场_重试_${retryAttempt}`,
+        })
+        await finishQuestionLogging('question_failed', { retry_attempt: retryAttempt, error_name: error?.name || 'Error', error_message: error?.message || String(error), fatal: true, failure_diagnostics: diagnostics.manifest }).catch(() => {})
+        await batchEventLog.record('batch_retry_failed', { category: 'error', details: { retry_attempt: retryAttempt, error_name: error?.name || 'Error', error_message: error?.message || String(error), failure_diagnostics: diagnostics.manifest } }).catch(() => {})
+        await fs.writeFile(path.join(batchArtifacts.diagnosticDirectory, `retry-automation-failure-${retryAttempt}.json`), JSON.stringify({
+          created_at: new Date().toISOString(),
+          serial: payload.serial,
+          mode: 'retry_failed_questions',
+          retry_attempt: retryAttempt,
+          artifact_layout_version: 2,
+          batch_directory: batchDirectory,
+          diagnostic_directory: batchArtifacts.diagnosticDirectory,
+          event_log: batchEventLog.filePath,
+          error_name: error?.name || 'Error',
+          error_message: error?.message || String(error),
+          stack: error?.stack || null,
+          failure_diagnostics: diagnostics,
+        }, null, 2), 'utf8').catch(() => {})
         throw error
       } finally {
         await observer.stop().catch(() => {})
@@ -3182,8 +3512,10 @@ module.exports = {
   douyinViewFullBounds,
   douyinMiniAppCaptureBounds,
   miniAppReferenceProductsTrigger,
+  toutiaoHomeSearchBounds,
   toutiaoSearchInput,
   toutiaoViewMoreBounds,
+  toutiaoOcrViewMoreTarget,
   waitForPackageHierarchy,
   runDouyinSearchResultAttempts,
   buildReplyImages,
@@ -3209,6 +3541,7 @@ module.exports = {
   retryAttemptCount,
   fatalBatchError,
   runQuestionsWithRecovery,
+  captureFailureDiagnostics,
   adbConnectionLost,
   historyOnboardingVisible,
   maxLongImageHeight,
