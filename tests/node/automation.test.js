@@ -10,7 +10,7 @@ const { stackFramesInGroups, verifyFrameOverlap, verifyProductGridOverlap, image
 const { createBatchDirectory, questionArtifactDirectory, batchArtifactDirectories, entryArtifactDirectories, questionArtifactDirectories } = require('../../src/automation/utils')
 const { EventLog, classifyAutomationLog } = require('../../src/automation/event-log')
 const { loadQuestionFile } = require('../../src/questions')
-const { adbConnectionLost, automationEntries, captureStableObserved, captureStableSandwich, calibratedProductFallbackOverlap, chatSwipePlan, conservativeFallbackOverlap, buildReplyImages, CancelledError, DOUYIN_MINIAPP_ENTRY_FILENAME, DOUYIN_SEARCH_SUMMARY_FILENAME, TOUTIAO_SEARCH_SUMMARY_FILENAME, douyinMiniAppCaptureBounds, douyinMiniAppEntryBounds, douyinSearchInput, douyinSearchResultTarget, douyinSearchResultsBounds, douyinViewFullBounds, fillQuestionInput, hierarchyBelongsToPackage, historyOnboardingVisible, maxLongImageHeight, miniAppReferenceProductsTrigger, normalizeAutomationEntries, observerResultRequiresFreshCapture, prepareEmbeddedEvidence, referenceProductDrawerBounds, referenceProductsCaptureComplete, referenceProductSheetExpanded, referenceProductsTrigger, referenceProductViewportReadiness, refreshedReferenceProductsTrigger, requireQuestionLocated, runQuestionsWithRecovery, scrollEndConfirmed, shouldRetryFullReplyCapture, toutiaoSearchInput, toutiaoViewMoreBounds, waitForPackageHierarchy } = require('../../src/automation/runner')
+const { adbConnectionLost, automationEntries, captureStableObserved, captureStableSandwich, calibratedProductFallbackOverlap, chatSwipePlan, conservativeFallbackOverlap, buildReplyImages, CancelledError, DouyinSearchResultNotFoundError, DOUYIN_MINIAPP_ENTRY_FILENAME, DOUYIN_SEARCH_SUMMARY_FILENAME, TOUTIAO_SEARCH_SUMMARY_FILENAME, douyinGenericAiAnswerBounds, douyinMiniAppCaptureBounds, douyinMiniAppEntryBounds, douyinSearchInput, douyinSearchResultTarget, douyinSearchResultsBounds, douyinViewFullBounds, fillQuestionInput, hierarchyBelongsToPackage, historyOnboardingVisible, maxLongImageHeight, miniAppReferenceProductsTrigger, normalizeAutomationEntries, observerRegionFallbackOptions, prepareEmbeddedEvidence, referenceProductDrawerBounds, referenceProductsCaptureComplete, referenceProductSheetExpanded, referenceProductsTrigger, referenceProductViewportReadiness, refreshedReferenceProductsTrigger, requireQuestionLocated, runDouyinSearchResultAttempts, runQuestionsWithRecovery, scrollEndConfirmed, shouldRetryFullReplyCapture, toutiaoSearchInput, toutiaoViewMoreBounds, waitForPackageHierarchy } = require('../../src/automation/runner')
 
 const CHAT_BOUNDS = [0, 200, 1080, 1800]
 
@@ -71,6 +71,7 @@ test('抖音入口按真实搜索控件和回答卡片结构定位', () => {
   assert.equal(DOUYIN_SEARCH_SUMMARY_FILENAME, '回答_智能总结.png')
   const xml = `<hierarchy>
     <node package="com.ss.android.ugc.aweme" class="android.widget.EditText" resource-id="com.ss.android.ugc.aweme:id/et_search_kw" text="腹泻脱水用什么药" visible-to-user="true" bounds="[144,96][868,204]" />
+    <node package="com.ss.android.ugc.aweme" class="android.widget.TextView" text="小荷AI医生" visible-to-user="true" bounds="[164,430][420,510]" />
     <node package="com.ss.android.ugc.aweme" class="android.view.ViewGroup" text="" content-desc="" visible-to-user="true" bounds="[414,1348][666,1456]" />
     <node package="com.ss.android.ugc.aweme" class="android.view.ViewGroup" text="" content-desc="" visible-to-user="true" bounds="[60,1648][224,1756]" />
   </hierarchy>`
@@ -78,7 +79,7 @@ test('抖音入口按真实搜索控件和回答卡片结构定位', () => {
   assert.deepEqual(douyinViewFullBounds(xml, { width: 1080, height: 2408 }), [414, 1348, 666, 1456])
 })
 
-test('抖音无智能总结时识别独立小程序入口卡片，并仍优先智能总结', () => {
+test('抖音无智能总结时识别独立小程序入口卡片，混合页面优先独立入口', () => {
   const entry = `<hierarchy>
     <node package="com.ss.android.ugc.aweme" class="android.widget.EditText" resource-id="com.ss.android.ugc.aweme:id/et_search_kw" text="测试问题" visible-to-user="true" bounds="[132,90][754,210]" />
     <node package="com.ss.android.ugc.aweme" class="android.widget.FrameLayout" visible-to-user="true" bounds="[12,1387][534,2131]">
@@ -95,10 +96,69 @@ test('抖音无智能总结时识别独立小程序入口卡片，并仍优先�
   })
   assert.deepEqual(douyinSearchResultsBounds(`${entry}<node package="com.ss.android.ugc.aweme" class="androidx.recyclerview.widget.RecyclerView" visible-to-user="true" bounds="[0,357][1080,2400]" />`, { width: 1080, height: 2400 }), [0, 357, 1080, 2400])
   assert.equal(douyinSearchResultTarget(entry, { width: 1080, height: 2400 }).mode, 'miniapp_entry_card')
-  const summary = `${entry}<node package="com.ss.android.ugc.aweme" class="android.view.ViewGroup" visible-to-user="true" bounds="[414,1348][666,1456]" />`
-  assert.equal(douyinSearchResultTarget(summary, { width: 1080, height: 2400 }).mode, 'smart_summary')
+  const summary = `${entry}<node package="com.ss.android.ugc.aweme" class="android.widget.TextView" text="小荷AI医生" visible-to-user="true" bounds="[164,430][420,510]" /><node package="com.ss.android.ugc.aweme" class="android.view.ViewGroup" visible-to-user="true" bounds="[414,1348][666,1456]" />`
+  assert.equal(douyinSearchResultTarget(summary, { width: 1080, height: 2400 }).mode, 'miniapp_entry_card')
+  assert.equal(douyinSearchResultTarget(summary.replace(entry, '<hierarchy>'), { width: 1080, height: 2400 }).mode, 'smart_summary')
   assert.equal(douyinSearchResultTarget('<hierarchy><node package="com.ss.android.ugc.aweme" class="android.widget.EditText" resource-id="com.ss.android.ugc.aweme:id/et_search_kw" text="测试问题" visible-to-user="true" bounds="[132,90][754,210]" /></hierarchy>', { width: 1080, height: 2400 }), null)
   assert.equal(douyinMiniAppEntryBounds(entry.replace('<node package="com.ss.android.ugc.aweme" class="android.view.ViewGroup" visible-to-user="true" bounds="[60,1435][180,1555]" />', '<node package="com.ss.android.ugc.aweme" class="android.view.ViewGroup" resource-id="other:id/card" visible-to-user="true" bounds="[60,1435][180,1555]" />'), { width: 1080, height: 2400 }), null)
+})
+
+test('抖音通用AI回答不得冒充小荷智能总结', () => {
+  const genericAnswer = `<hierarchy>
+    <node package="com.ss.android.ugc.aweme" class="android.widget.EditText" resource-id="com.ss.android.ugc.aweme:id/et_search_kw" text="拉肚子脱水怎么办" visible-to-user="true" bounds="[132,90][754,210]" />
+    <node package="com.ss.android.ugc.aweme" class="android.widget.TextView" text="AI 生成回答" visible-to-user="true" bounds="[48,390][330,460]" />
+    <node package="com.ss.android.ugc.aweme" class="android.view.ViewGroup" visible-to-user="true" bounds="[358,1210][722,1320]">
+      <node package="com.ss.android.ugc.aweme" class="android.widget.TextView" text="展开更多" visible-to-user="true" bounds="[430,1225][650,1305]" />
+    </node>
+  </hierarchy>`
+  const entryCard = `<node package="com.ss.android.ugc.aweme" class="android.widget.FrameLayout" visible-to-user="true" bounds="[12,1387][534,2131]">
+    <node package="com.ss.android.ugc.aweme" class="android.view.ViewGroup" visible-to-user="true" bounds="[12,1387][534,2131]"><node package="com.ss.android.ugc.aweme" class="android.view.ViewGroup" visible-to-user="true" bounds="[36,1411][510,2107]" /></node>
+    <node package="com.ss.android.ugc.aweme" class="android.view.ViewGroup" visible-to-user="true" bounds="[36,1411][510,1579]"><node package="com.ss.android.ugc.aweme" class="android.view.ViewGroup" visible-to-user="true" bounds="[60,1435][180,1555]" /><node package="com.ss.android.ugc.aweme" class="android.view.ViewGroup" visible-to-user="true" bounds="[103,1565][137,1579]" /></node>
+    <node package="com.ss.android.ugc.aweme" class="android.view.ViewGroup" visible-to-user="true" bounds="[36,1603][510,1783]" />
+    <node package="com.ss.android.ugc.aweme" class="android.view.ViewGroup" visible-to-user="true" bounds="[36,1783][510,2095]" />
+  </node>`
+  const mixed = genericAnswer.replace('</hierarchy>', `${entryCard}</hierarchy>`)
+
+  assert.deepEqual(douyinGenericAiAnswerBounds(genericAnswer, { width: 1080, height: 2400 }), [430, 1225, 650, 1305])
+  assert.equal(douyinSearchResultTarget(genericAnswer, { width: 1080, height: 2400 }), null)
+  assert.equal(douyinSearchResultTarget(mixed, { width: 1080, height: 2400 }).mode, 'miniapp_entry_card')
+})
+
+test('抖音首轮没有结果时只刷新一次并执行第二轮识别', async () => {
+  const calls = []
+  const result = await runDouyinSearchResultAttempts({
+    waitForResult: async attempt => {
+      calls.push(`wait:${attempt}`)
+      if (attempt === 1) throw new DouyinSearchResultNotFoundError('首轮未找到')
+      return { target: { mode: 'smart_summary' } }
+    },
+    refreshResults: async () => calls.push('refresh'),
+  })
+
+  assert.equal(result.attempt, 2)
+  assert.equal(result.refreshed, true)
+  assert.deepEqual(calls, ['wait:1', 'refresh', 'wait:2'])
+})
+
+test('抖音刷新后仍没有入口时明确失败且不进行第三轮', async () => {
+  const calls = []
+  await assert.rejects(() => runDouyinSearchResultAttempts({
+    waitForResult: async attempt => {
+      calls.push(`wait:${attempt}`)
+      throw new DouyinSearchResultNotFoundError(`第${attempt}轮未找到`)
+    },
+    refreshResults: async () => calls.push('refresh'),
+  }), /刷新后再次扫描.*仍未出现/)
+  assert.deepEqual(calls, ['wait:1', 'refresh', 'wait:2'])
+})
+
+test('抖音搜索读取异常不会被刷新重试掩盖', async () => {
+  let refreshes = 0
+  await assert.rejects(() => runDouyinSearchResultAttempts({
+    waitForResult: async () => { throw new Error('uiautomator2读取失败') },
+    refreshResults: async () => { refreshes += 1 },
+  }), /uiautomator2读取失败/)
+  assert.equal(refreshes, 0)
 })
 
 test('抖音小荷AI全文页排除固定顶部、工具栏和输入区', () => {
@@ -258,6 +318,47 @@ test('从scrcpy路径切换夹心校验时复用已有PNG', async () => {
   assert.deepEqual(events, ['delay:80', 'hierarchy', 'capture'])
 })
 
+test('scrcpy明确报告活动时要求目标区域连续两组像素稳定', async () => {
+  let now = 0
+  const events = []
+  const initialFrame = Buffer.from('same')
+  const result = await captureStableSandwich({
+    capture: async () => { events.push('capture'); return Buffer.from('same') },
+    hierarchy: async () => { events.push('hierarchy'); return '<hierarchy />' },
+    framesStable: async (before, after) => before.equals(after),
+    hierarchyLoading: () => false,
+    delay: async milliseconds => { events.push(`delay:${milliseconds}`); now += milliseconds },
+    now: () => now,
+    interval: 80,
+    initialFrame,
+    requiredStablePairs: 2,
+  }, 1_000)
+
+  assert.equal(result.stable, true)
+  assert.equal(result.attempts, 2)
+  assert.deepEqual(events, ['delay:80', 'hierarchy', 'capture', 'delay:80', 'hierarchy', 'capture'])
+})
+
+test('严格区域校验遇到中途变化会重新累计连续稳定证据', async () => {
+  let now = 0
+  const frames = [Buffer.from('first'), Buffer.from('moving'), Buffer.from('moving'), Buffer.from('moving')]
+  const result = await captureStableSandwich({
+    capture: async () => frames.shift(),
+    hierarchy: async () => '<hierarchy />',
+    framesStable: async (before, after) => before.equals(after),
+    hierarchyLoading: () => false,
+    delay: async milliseconds => { now += milliseconds },
+    now: () => now,
+    interval: 80,
+    initialFrame: Buffer.from('first'),
+    requiredStablePairs: 2,
+  }, 1_000)
+
+  assert.equal(result.stable, true)
+  assert.equal(result.attempts, 4)
+  assert.ok(result.frame.equals(Buffer.from('moving')))
+})
+
 test('scrcpy确认静止后只截取一张无损PNG，并校验层级读取期间无重排', async () => {
   const events = []
   const observer = {
@@ -394,12 +495,23 @@ test('scrcpy二次确认仍拒绝截图期间的连续活动突发', async () =>
   assert.equal(result.reason, 'capture_activity')
 })
 
-test('scrcpy明确发现截图窗口活动时必须重新采集而不是ADB兜底', () => {
-  assert.equal(observerResultRequiresFreshCapture({ reason: 'capture_activity' }), true)
-  assert.equal(observerResultRequiresFreshCapture({ reason: 'confirmation_timeout' }), true)
-  assert.equal(observerResultRequiresFreshCapture({ reason: 'capture_deadline' }), false)
-  assert.equal(observerResultRequiresFreshCapture({ reason: 'settle_timeout' }), false)
-  assert.equal(observerResultRequiresFreshCapture({ reason: 'observer_timeout' }), false)
+test('scrcpy全屏活动升级为严格区域校验，其他不确定结果使用普通夹心校验', () => {
+  const frame = Buffer.from('observed')
+  assert.deepEqual(observerRegionFallbackOptions({ reason: 'capture_activity', frame }), {
+    initialFrame: frame,
+    requiredStablePairs: 2,
+    activityObserved: true,
+  })
+  assert.deepEqual(observerRegionFallbackOptions({ reason: 'confirmation_timeout', frame }), {
+    initialFrame: frame,
+    requiredStablePairs: 1,
+    activityObserved: false,
+  })
+  assert.deepEqual(observerRegionFallbackOptions({ reason: 'settle_timeout', frame: null }), {
+    initialFrame: null,
+    requiredStablePairs: 1,
+    activityObserved: false,
+  })
 })
 
 test('普通回答不可靠接缝会整题重采一次但不越过药品终止序列', () => {

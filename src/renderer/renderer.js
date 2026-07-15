@@ -6,6 +6,32 @@ const log = $('#log')
 const start = $('#start')
 const stop = $('#stop')
 const entryList = $('#entry-list')
+const updateAction = $('#update-action')
+let updateState = null
+
+function renderUpdateState(next) {
+  updateState = next
+  if (!next?.supported) {
+    updateAction.hidden = true
+    return
+  }
+  updateAction.hidden = false
+  updateAction.classList.toggle('has-update', ['available', 'downloaded'].includes(next.status))
+  updateAction.classList.toggle('has-error', next.status === 'error')
+  updateAction.disabled = ['checking', 'downloading'].includes(next.status)
+    || (next.status === 'downloaded' && !next.canInstall)
+  updateAction.title = next.message || ''
+
+  const version = next.version || next.currentVersion
+  if (next.status === 'checking') updateAction.textContent = `v${next.currentVersion} · 正在检查…`
+  else if (next.status === 'available') updateAction.textContent = `发现 v${version} · 点击下载`
+  else if (next.status === 'downloading') updateAction.textContent = `正在下载 v${version} · ${Math.round(next.percent || 0)}%`
+  else if (next.status === 'downloaded' && next.taskActive) updateAction.textContent = `v${version} 已下载 · 等待任务结束`
+  else if (next.status === 'downloaded') updateAction.textContent = `重启并安装 v${version}`
+  else if (next.status === 'not-available') updateAction.textContent = `v${next.currentVersion} · 已是最新`
+  else if (next.status === 'error') updateAction.textContent = '更新检查失败 · 点击重试'
+  else updateAction.textContent = `v${next.currentVersion} · 检查更新`
+}
 
 function uniqueQuestions() {
   return [...new Set(questions.value.split('\n').map(line => line.trim()).filter(Boolean))]
@@ -154,6 +180,17 @@ $('#export-log').addEventListener('click', async () => {
   } catch (error) { status.textContent = error.message || '导出失败' }
 })
 
+updateAction.addEventListener('click', async () => {
+  if (!updateState?.supported) return
+  try {
+    if (updateState.status === 'available') await window.automation.downloadUpdate()
+    else if (updateState.status === 'downloaded') await window.automation.installUpdate()
+    else await window.automation.checkForUpdate()
+  } catch (error) {
+    status.textContent = error.message || '更新操作失败'
+  }
+})
+
 start.addEventListener('click', async () => {
   const timeout = Number($('#timeout').value)
   if (!Number.isFinite(timeout) || timeout <= 0) { status.textContent = '请输入大于 0 的超时时间'; return }
@@ -183,7 +220,9 @@ window.automation.onFinished(({ code, summary }) => {
   else if (summary?.failed) status.textContent = `执行完成：成功 ${summary.completed}，失败 ${summary.failed}`
   else status.textContent = `执行完成：成功 ${summary?.completed ?? 0}`
 })
+window.automation.onUpdateState(renderUpdateState)
 
 window.automation.defaultOutputDirectory().then(directory => { $('#output-dir').value = directory })
+window.automation.getUpdateState().then(renderUpdateState)
 refreshEntries()
 refreshDevices()

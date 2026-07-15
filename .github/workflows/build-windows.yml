@@ -48,8 +48,25 @@ jobs:
           npm run check
           npm test
 
+      - name: Validate release tag matches application version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $packageVersion = node -p "require('./package.json').version"
+          $expectedTag = "v$packageVersion"
+          if ($env:GITHUB_REF_NAME -ne $expectedTag) {
+            throw "Release tag '$env:GITHUB_REF_NAME' must match package version '$expectedTag'."
+          }
+
       - name: Build NSIS installer
         run: npm run dist -- --win nsis --x64 --publish never
+
+      - name: Validate auto-update metadata
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "dist/latest.yml")) {
+            throw "dist/latest.yml was not generated; Windows auto-update would be unavailable."
+          }
 
       - name: Upload Windows installer
         uses: actions/upload-artifact@v4
@@ -58,6 +75,7 @@ jobs:
           path: |
             dist/*.exe
             dist/*.blockmap
+            dist/latest.yml
           if-no-files-found: error
           retention-days: 14
 
@@ -80,9 +98,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          mapfile -d '' files < <(find release-assets -type f \( -name '*.exe' -o -name '*.blockmap' \) -print0)
+          mapfile -d '' files < <(find release-assets -type f \( -name '*.exe' -o -name '*.blockmap' -o -name 'latest.yml' \) -print0)
           if (( ${#files[@]} == 0 )); then
             echo "No Windows release assets were downloaded." >&2
+            exit 1
+          fi
+          if [[ ! -f release-assets/latest.yml ]]; then
+            echo "latest.yml is missing from the Windows release assets." >&2
             exit 1
           fi
           if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then

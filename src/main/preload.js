@@ -12,6 +12,11 @@ contextBridge.exposeInMainWorld('automation', {
   stop: () => ipcRenderer.invoke('automation:stop'),
   copyText: text => ipcRenderer.invoke('clipboard:write', text),
   exportLog: text => ipcRenderer.invoke('log:export', text),
+  getUpdateState: () => ipcRenderer.invoke('update:state'),
+  checkForUpdate: () => ipcRenderer.invoke('update:check'),
+  downloadUpdate: () => ipcRenderer.invoke('update:download'),
+  installUpdate: () => ipcRenderer.invoke('update:install'),
   onLog: callback => ipcRenderer.on('automation:log', (_event, text) => callback(text)),
   onFinished: callback => ipcRenderer.on('automation:finished', (_event, result) => callback(result)),
+  onUpdateState: callback => ipcRenderer.on('update:state', (_event, value) => callback(value)),
 })

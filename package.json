@@ -1,12 +1,16 @@
 {
   "name": "question-automation-electron",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Cross-platform Electron operator panel for ADB question automation.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/xy-tuoren/geoAutoProject.git"
+  },
   "main": "src/main/index.js",
   "scripts": {
     "start": "electron .",
-    "check": "node --check src/main/index.js && node --check src/main/preload.js && node --check src/renderer/renderer.js && node --check src/questions.js && node --check src/runtime-paths.js && node --check src/cli.js && node --check src/automation/*.js && node --check scripts/*.js",
+    "check": "node --check src/main/index.js && node --check src/main/preload.js && node --check src/main/updater.js && node --check src/renderer/renderer.js && node --check src/questions.js && node --check src/runtime-paths.js && node --check src/cli.js && node --check src/automation/*.js && node --check scripts/*.js",
     "test": "node --test tests/node/**/*.test.js",
     "run:android": "node src/cli.js",
     "setup": "npm install && npm run prepare:runtime",
@@ -21,6 +25,7 @@
   },
   "dependencies": {
     "adm-zip": "^0.5.18",
+    "electron-updater": "^6.8.9",
     "sharp": "^0.35.3",
     "xlsx": "^0.18.5"
   },
@@ -33,12 +38,41 @@
       "package.json"
     ],
     "extraResources": [
-      { "from": "vendor/platform-tools/darwin", "to": "vendor/platform-tools/darwin" },
-      { "from": "vendor/platform-tools/win32", "to": "vendor/platform-tools/win32" },
-      { "from": "vendor/u2-runtime", "to": "vendor/u2-runtime" },
-      { "from": "vendor/scrcpy", "to": "vendor/scrcpy" }
+      {
+        "from": "vendor/platform-tools/darwin",
+        "to": "vendor/platform-tools/darwin"
+      },
+      {
+        "from": "vendor/platform-tools/win32",
+        "to": "vendor/platform-tools/win32"
+      },
+      {
+        "from": "vendor/u2-runtime",
+        "to": "vendor/u2-runtime"
+      },
+      {
+        "from": "vendor/scrcpy",
+        "to": "vendor/scrcpy"
+      }
     ],
-    "mac": { "target": ["dmg"], "category": "public.app-category.productivity" },
-    "win": { "target": ["nsis"] }
+    "mac": {
+      "target": [
+        "dmg"
+      ],
+      "category": "public.app-category.productivity"
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "artifactName": "${name}-setup-${version}.${ext}"
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "xy-tuoren",
+        "repo": "geoAutoProject"
+      }
+    ]
   }
 }

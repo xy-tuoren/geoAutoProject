@@ -1,13 +1,16 @@
 const { app, BrowserWindow, dialog, ipcMain, clipboard } = require('electron')
+const { autoUpdater } = require('electron-updater')
 const { execFile } = require('node:child_process')
 const fs = require('node:fs/promises')
 const path = require('node:path')
 const { createRunner, CancelledError, automationEntries, normalizeAutomationEntries } = require('../automation/runner')
 const { loadQuestionFile } = require('../questions')
 const { projectRoot, resolveAdbPath } = require('../runtime-paths')
+const { createUpdateManager } = require('./updater')
 
 const root = projectRoot()
 let activeTask = null
+let updateManager = null
 
 function stamp() {
   return new Date().toISOString().replace('T', ' ').replace('Z', '')
@@ -140,6 +143,7 @@ ipcMain.handle('automation:start', async (event, payload) => {
     },
   })
   activeTask = runner
+  updateManager?.notify()
   void runner.run(payload)
     .then(summary => {
       log('执行完成')
@@ -150,7 +154,10 @@ ipcMain.handle('automation:start', async (event, payload) => {
       event.sender.send('automation:log', `${error.stack || error.message}\n`)
       event.sender.send('automation:finished', { code: error instanceof CancelledError ? 130 : 1 })
     })
-    .finally(() => { activeTask = null })
+    .finally(() => {
+      activeTask = null
+      updateManager?.notify()
+    })
   return true
 })
 
@@ -185,6 +192,17 @@ ipcMain.handle('log:export', async (_event, text) => {
   return target
 })
 
+ipcMain.handle('update:state', () => updateManager?.snapshot() || {
+  status: 'unsupported',
+  currentVersion: app.getVersion(),
+  supported: false,
+  taskActive: Boolean(activeTask),
+  canInstall: false,
+})
+ipcMain.handle('update:check', () => updateManager.check())
+ipcMain.handle('update:download', () => updateManager.download())
+ipcMain.handle('update:install', () => updateManager.install())
+
 process.on('uncaughtException', error => {
   logError('未捕获异常:', error.stack || error.message)
 })
@@ -195,7 +213,16 @@ process.on('unhandledRejection', reason => {
 app.whenReady().then(() => {
   log('应用就绪', `v${app.getVersion()}`, app.isPackaged ? '(packaged)' : '(dev)')
   log('ADB:', adbCommand())
+  updateManager = createUpdateManager({
+    app,
+    autoUpdater,
+    BrowserWindow,
+    isTaskActive: () => Boolean(activeTask),
+    log,
+    logError,
+  })
   createWindow()
+  updateManager.start()
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow() })
 })
 
@@ -204,4 +231,7 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
 })
 
-app.on('will-quit', () => { log('应用即将退出') })
+app.on('will-quit', () => {
+  updateManager?.stop()
+  log('应用即将退出')
+})

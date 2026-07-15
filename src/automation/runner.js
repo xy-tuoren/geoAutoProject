@@ -19,6 +19,8 @@ const DOUYIN_MINIAPP_ENTRY_FILENAME = '回答_小程序入口.png'
 const TOUTIAO_SEARCH_SUMMARY_FILENAME = SEARCH_SUMMARY_FILENAME
 const DOUYIN_SUMMARY_PREFERENCE_MS = 3_000
 const DOUYIN_INITIAL_RESULT_WAIT_MS = 12_000
+const DOUYIN_SEARCH_SCAN_LIMIT = 3
+const DOUYIN_POST_SCAN_WAIT_MS = 5_000
 const ENTRY_DEFINITIONS = Object.freeze({
   'xiaohe-app': Object.freeze({
     id: 'xiaohe-app',
@@ -145,6 +147,27 @@ function douyinViewFullBounds(xml, screenSize) {
   return candidates[0] || null
 }
 
+function douyinGenericAiAnswerBounds(xml, screenSize) {
+  const nodes = iterNodes(xml)
+  const hasGenericAnswer = nodes.some(attrs => nodeIsVisible(attrs)
+    && nodeAttr(attrs, 'package') === ENTRY_DEFINITIONS['douyin-xiaohe-miniapp'].packageName
+    && /^AI生成回答$/.test(`${nodeAttr(attrs, 'text')} ${nodeAttr(attrs, 'content-desc')}`.replace(/\s+/g, '')))
+  if (!hasGenericAnswer) return null
+  const more = nodes.find(attrs => {
+    if (!nodeIsVisible(attrs)
+      || nodeAttr(attrs, 'package') !== ENTRY_DEFINITIONS['douyin-xiaohe-miniapp'].packageName
+      || !/^展开更多$/.test(`${nodeAttr(attrs, 'text')} ${nodeAttr(attrs, 'content-desc')}`.replace(/\s+/g, ''))) return false
+    const rawBounds = nodeAttr(attrs, 'bounds')
+    if (!rawBounds) return false
+    const bounds = parseBounds(rawBounds)
+    const centerX = (bounds[0] + bounds[2]) / 2
+    return Math.abs(centerX - screenSize.width / 2) <= screenSize.width * 0.18
+      && bounds[1] >= screenSize.height * 0.35
+      && bounds[3] <= screenSize.height * 0.78
+  })
+  return more ? parseBounds(nodeAttr(more, 'bounds')) : null
+}
+
 function treeNodes(root, result = []) {
   for (const child of root.children || []) {
     result.push(child)
@@ -203,8 +226,13 @@ function douyinMiniAppEntryBounds(xml, screenSize) {
 
 function douyinSearchResultTarget(xml, screenSize) {
   const viewFull = douyinViewFullBounds(xml, screenSize)
-  if (viewFull) return { mode: 'smart_summary', viewFull }
   const entry = douyinMiniAppEntryBounds(xml, screenSize)
+  const genericAiAnswer = douyinGenericAiAnswerBounds(xml, screenSize)
+  if (entry && (viewFull || genericAiAnswer)) {
+    return { mode: 'miniapp_entry_card', ...entry, ignoredExpandableAnswer: true }
+  }
+  if (genericAiAnswer) return entry ? { mode: 'miniapp_entry_card', ...entry } : null
+  if (viewFull) return { mode: 'smart_summary', viewFull }
   return entry ? { mode: 'miniapp_entry_card', ...entry } : null
 }
 
@@ -406,6 +434,32 @@ async function adbCommandWithReconnect(adbPath, serial, args) {
 }
 
 class CancelledError extends Error { constructor() { super('任务已停止。'); this.name = 'CancelledError' } }
+
+class DouyinSearchResultNotFoundError extends Error {
+  constructor(message, { cause, scanScrolls = 0 } = {}) {
+    super(message, { cause })
+    this.name = 'DouyinSearchResultNotFoundError'
+    this.scanScrolls = scanScrolls
+  }
+}
+
+async function runDouyinSearchResultAttempts({ waitForResult, refreshResults }) {
+  try {
+    return { ...(await waitForResult(1)), attempt: 1, refreshed: false }
+  } catch (error) {
+    if (!(error instanceof DouyinSearchResultNotFoundError)) throw error
+    await refreshResults(error)
+  }
+  try {
+    return { ...(await waitForResult(2)), attempt: 2, refreshed: true }
+  } catch (error) {
+    if (!(error instanceof DouyinSearchResultNotFoundError)) throw error
+    throw new DouyinSearchResultNotFoundError(
+      '抖音当前搜索结果刷新后再次扫描，仍未出现小荷AI医生智能总结或可验证的小程序入口卡片。',
+      { cause: error, scanScrolls: error.scanScrolls },
+    )
+  }
+}
 
 function fatalBatchError(error) {
   if (error instanceof CancelledError || error?.name === 'CancelledError') return true
@@ -680,22 +734,26 @@ async function captureStableSandwich({
   interval = 80,
   initialFrame = null,
   initialXml = '',
+  requiredStablePairs = 1,
 }, timeout = 8_000) {
+  if (!Number.isInteger(requiredStablePairs) || requiredStablePairs < 1) throw new Error('稳定帧组数必须是正整数。')
   let before = initialFrame || await capture()
   let lastXml = initialXml
   let attempts = 0
+  let stablePairs = 0
   const deadline = now() + timeout
   while (now() < deadline) {
     await delay(interval)
     // The first frame is taken before hierarchy collection and the second
-    // immediately after it. This preserves the screenshot→XML→screenshot
-    // reflow guard while avoiding a third ADB screenshot on stable pages.
+    // immediately after it. The default path needs one stable pair; strict
+    // activity fallback asks for consecutive pairs without changing this loop.
     lastXml = await hierarchy()
     const after = await capture()
     attempts += 1
     if (!hierarchyLoading(lastXml) && await framesStable(before, after)) {
-      return { frame: after, xml: lastXml, stable: true, attempts }
-    }
+      stablePairs += 1
+      if (stablePairs >= requiredStablePairs) return { frame: after, xml: lastXml, stable: true, attempts }
+    } else stablePairs = 0
     before = after
   }
   return { frame: before, xml: lastXml || await hierarchy(), stable: false, attempts }
@@ -779,11 +837,13 @@ async function captureStableObserved({
   return { frame, xml, stable: false, attempts: 1, observer: true, reason }
 }
 
-function observerResultRequiresFreshCapture(result) {
-  // A deadline only means hierarchy + PNG collection consumed the observer's
-  // confirmation budget; it is not evidence that the screen changed. Reuse
-  // that read-only snapshot in the ADB sandwich path on slower devices.
-  return ['capture_activity', 'confirmation_timeout'].includes(result?.reason)
+function observerRegionFallbackOptions(result) {
+  const activityObserved = result?.reason === 'capture_activity'
+  return {
+    initialFrame: result?.frame || null,
+    requiredStablePairs: activityObserved ? 2 : 1,
+    activityObserved,
+  }
 }
 
 function shouldRetryFullReplyCapture({ fallbackReasons = [], allowFullRetry = true, products = null } = {}) {
@@ -802,6 +862,7 @@ function createRunner(options) {
   let observerRecoverySuccesses = 0
   let observerRecoveryFailures = 0
   let observerRegionFallbacks = 0
+  let observerActivityRegionChecks = 0
   let adbPngCaptures = 0
   let batchEventLog = null
   let activeQuestionEventLog = null
@@ -926,6 +987,7 @@ function createRunner(options) {
       successes: observerRecoverySuccesses,
       failures: observerRecoveryFailures,
       regionFallbacks: observerRegionFallbacks,
+      activityRegionChecks: observerActivityRegionChecks,
       adbPngCaptures,
     }
   }
@@ -967,6 +1029,7 @@ function createRunner(options) {
       scrcpy_observer_recovery_successes: observerRecoverySuccesses,
       scrcpy_observer_recovery_failures: observerRecoveryFailures,
       scrcpy_observer_region_fallbacks: observerRegionFallbacks,
+      scrcpy_observer_activity_region_checks: observerActivityRegionChecks,
       adb_png_captures: adbPngCaptures,
       ...(observerFallbackReason ? { scrcpy_observer_fallback_reason: observerFallbackReason } : {}),
     }
@@ -980,6 +1043,7 @@ function createRunner(options) {
       metadata.scrcpy_observer_question_recovery_successes = observerRecoverySuccesses - recoveryBaseline.successes
       metadata.scrcpy_observer_question_recovery_failures = observerRecoveryFailures - recoveryBaseline.failures
       metadata.scrcpy_observer_question_region_fallbacks = observerRegionFallbacks - recoveryBaseline.regionFallbacks
+      metadata.scrcpy_observer_question_activity_region_checks = observerActivityRegionChecks - recoveryBaseline.activityRegionChecks
       metadata.adb_png_captures_question = adbPngCaptures - recoveryBaseline.adbPngCaptures
     }
     return metadata
@@ -1238,20 +1302,29 @@ function createRunner(options) {
     return search
   }
 
-  async function waitForDouyinSearchResult(timeout) {
+  async function waitForDouyinSearchResult(timeout, { attempt = 1 } = {}) {
     const startedAt = Date.now()
     const initialScanDelay = Math.min(DOUYIN_INITIAL_RESULT_WAIT_MS, Math.max(5_000, Math.floor(timeout * 0.25)))
     const deadline = Date.now() + timeout
     const size = await windowSize()
+    const roundLabel = attempt === 1 ? '第一轮' : '刷新后第二轮'
     let lastProgress = 0
     let stableEntrySignature = ''
     let stableEntryReads = 0
     let entryFirstSeenAt = 0
     let searchScrolls = 0
     let lastSearchScrollAt = 0
+    let genericAnswerLogged = false
     while (Date.now() < deadline) {
       const xml = await source()
       const target = douyinSearchResultTarget(xml, size)
+      const genericAnswer = douyinGenericAiAnswerBounds(xml, size)
+      if ((genericAnswer || target?.ignoredExpandableAnswer) && !genericAnswerLogged) {
+        log(target?.mode === 'miniapp_entry_card'
+          ? 'stage: 已识别抖音通用AI回答，忽略“展开更多”并改走下方小荷AI医生独立小程序入口卡片'
+          : 'stage: 已识别抖音通用AI回答，已忽略“展开更多”并继续查找小荷AI医生入口')
+        genericAnswerLogged = true
+      }
       if (target?.mode === 'smart_summary') return { xml, target, size }
       if (target?.mode === 'miniapp_entry_card') {
         const signature = `${target.cardBounds.join(',')}|${target.tapBounds.join(',')}`
@@ -1269,14 +1342,21 @@ function createRunner(options) {
         stableEntryReads = 0
         entryFirstSeenAt = 0
       }
-      if (!target && searchScrolls < 3
+      if (!target && searchScrolls >= DOUYIN_SEARCH_SCAN_LIMIT
+        && Date.now() - lastSearchScrollAt >= DOUYIN_POST_SCAN_WAIT_MS) {
+        throw new DouyinSearchResultNotFoundError(
+          `${roundLabel}抖音搜索结果已完成${DOUYIN_SEARCH_SCAN_LIMIT}次向下扫描，仍未找到智能总结或小程序入口卡片。`,
+          { scanScrolls: searchScrolls },
+        )
+      }
+      if (!target && searchScrolls < DOUYIN_SEARCH_SCAN_LIMIT
         && Date.now() - startedAt >= initialScanDelay
         && Date.now() - lastSearchScrollAt >= 3_500) {
         const resultsBounds = douyinSearchResultsBounds(xml, size)
         if (resultsBounds) {
           searchScrolls += 1
           lastSearchScrollAt = Date.now()
-          log(`stage: 首屏未发现智能总结或入口卡片，向下扫描抖音搜索结果（${searchScrolls}/3）`)
+          log(`stage: ${roundLabel}首屏未发现智能总结或入口卡片，向下扫描抖音搜索结果（${searchScrolls}/${DOUYIN_SEARCH_SCAN_LIMIT}）`)
           await swipeChat(resultsBounds, 'down', 0.34, { maxFraction: 0.42, speed: 1_700, eventDrivenSettle: true })
           await waitForVisualQuiet({ timeout: 1_200, fallbackMs: 300 })
           continue
@@ -1288,7 +1368,34 @@ function createRunner(options) {
       }
       await sleep(500)
     }
-    throw new Error('抖音搜索结果中既未出现小荷AI医生智能总结，也未出现可验证的小程序入口卡片。')
+    throw new DouyinSearchResultNotFoundError(
+      `${roundLabel}抖音搜索结果中既未出现小荷AI医生智能总结，也未出现可验证的小程序入口卡片。`,
+      { scanScrolls: searchScrolls },
+    )
+  }
+
+  async function refreshDouyinSearchResults(question, scanScrolls = DOUYIN_SEARCH_SCAN_LIMIT) {
+    let xml = await source()
+    const size = await windowSize()
+    let resultsBounds = douyinSearchResultsBounds(xml, size)
+    if (!resultsBounds) throw new Error('抖音第一轮扫描无结果，但刷新前无法定位当前搜索结果列表。')
+    const returnSwipes = Math.max(1, Math.ceil(Math.max(1, scanScrolls) * 0.34 / 0.55))
+    log(`stage: 第一轮未找到入口，正在返回抖音搜索结果顶部（回滚=${returnSwipes}次）`)
+    for (let index = 0; index < returnSwipes; index += 1) {
+      await swipeChat(resultsBounds, 'up', 0.55, { maxFraction: 0.62, speed: 2_500, eventDrivenSettle: true })
+      await waitForVisualQuiet({ timeout: 1_200, fallbackMs: 300 })
+      xml = await source()
+      resultsBounds = douyinSearchResultsBounds(xml, size) || resultsBounds
+    }
+    const edit = douyinSearchInput(xml)
+    if (!edit || edit.text !== question) {
+      throw new Error('抖音搜索结果回到顶部后未能确认当前搜索关键词；为避免刷新错误问题已停止本题。')
+    }
+    log('stage: 已回到顶部，正在下拉刷新当前抖音搜索结果')
+    await swipeChat(resultsBounds, 'up', 0.5, { maxFraction: 0.58, speed: 700, eventDrivenSettle: true })
+    await waitForVisualQuiet({ timeout: 2_500, fallbackMs: 1_200 })
+    await sleep(700)
+    log('stage: 当前搜索结果已刷新，开始第二轮入口识别与向下扫描')
   }
 
   async function captureDouyinSearchTarget(size) {
@@ -1575,6 +1682,7 @@ function createRunner(options) {
 
   async function waitForStableReplyRegion(bounds, timeout = 8_000, { settleSince = null } = {}) {
     let observed = null
+    let regionFallback = observerRegionFallbackOptions(null)
     const deadline = Date.now() + timeout
     if (observer.active) {
       while (observer.active && Date.now() < deadline) {
@@ -1589,18 +1697,15 @@ function createRunner(options) {
           }, Math.min(Math.max(1, deadline - Date.now()), 3_500))
           if (observed.stable) return observed
           const elapsed = Date.now() - started
-          if (observerResultRequiresFreshCapture(observed)) {
-            const remaining = deadline - Date.now()
-            if (remaining >= 900) {
-              log(`capture: scrcpy检测到截图窗口仍有活动（${observed.reason || 'unknown'}，${elapsed}ms），重新等待并重截`)
-              settleSince = observer.mark()
-              continue
-            }
-            throw new Error(`scrcpy连续检测到截图窗口活动，无法确认稳定视口（${observed.reason || 'unknown'}）`)
-          }
           observerRegionFallbacks += 1
-          const reuse = observed.frame ? '，复用已取得的PNG' : ''
-          log(`capture: scrcpy快速静止判断未通过（${observed.reason || 'unknown'}，${elapsed}ms）${reuse}，转ADB夹心复核`)
+          regionFallback = observerRegionFallbackOptions(observed)
+          const reuse = regionFallback.initialFrame ? '，复用已取得的PNG' : ''
+          if (regionFallback.activityObserved) {
+            observerActivityRegionChecks += 1
+            log(`capture: scrcpy检测到全屏活动（${elapsed}ms）${reuse}，转回答区域连续两组ADB像素校验`)
+          } else {
+            log(`capture: scrcpy快速静止判断未通过（${observed.reason || 'unknown'}，${elapsed}ms）${reuse}，转ADB夹心复核`)
+          }
           break
         } catch (error) {
           const recovered = await recoverObserver(error)
@@ -1619,8 +1724,9 @@ function createRunner(options) {
       framesStable: imageRegionsStable,
       hierarchyLoading: hierarchyIsLoading,
       interval: 80,
-      initialFrame: observed?.frame || null,
+      initialFrame: regionFallback.initialFrame,
       initialXml: observed?.xml || '',
+      requiredStablePairs: regionFallback.requiredStablePairs,
     }, timeout)
   }
 
@@ -2360,7 +2466,14 @@ function createRunner(options) {
     await tap((search[0] + search[2]) / 2, (search[1] + search[3]) / 2)
     let card
     try {
-      card = await waitForDouyinSearchResult(payload.timeout * 1_000)
+      card = await runDouyinSearchResultAttempts({
+        waitForResult: attempt => waitForDouyinSearchResult(payload.timeout * 1_000, { attempt }),
+        refreshResults: error => refreshDouyinSearchResults(question, error.scanScrolls),
+      })
+      Object.assign(meta, {
+        douyin_search_attempts: card.attempt,
+        douyin_search_refreshed: card.refreshed,
+      })
     } catch (error) {
       await fs.mkdir(directory, { recursive: true })
       const [xml, frame] = await Promise.all([source(), screenshot()])
@@ -2884,6 +2997,7 @@ function createRunner(options) {
 module.exports = {
   createRunner,
   CancelledError,
+  DouyinSearchResultNotFoundError,
   DEFAULT_PACKAGE,
   DEFAULT_ENTRY_ID,
   DOUYIN_MINIAPP_ENTRY_FILENAME,
@@ -2893,6 +3007,7 @@ module.exports = {
   automationEntries,
   normalizeAutomationEntries,
   douyinSearchInput,
+  douyinGenericAiAnswerBounds,
   douyinMiniAppEntryBounds,
   douyinSearchResultTarget,
   douyinSearchResultsBounds,
@@ -2902,6 +3017,7 @@ module.exports = {
   toutiaoSearchInput,
   toutiaoViewMoreBounds,
   waitForPackageHierarchy,
+  runDouyinSearchResultAttempts,
   buildReplyImages,
   conservativeFallbackOverlap,
   chatSwipePlan,
@@ -2919,7 +3035,7 @@ module.exports = {
   fillQuestionInput,
   captureStableSandwich,
   captureStableObserved,
-  observerResultRequiresFreshCapture,
+  observerRegionFallbackOptions,
   shouldRetryFullReplyCapture,
   fatalBatchError,
   runQuestionsWithRecovery,
