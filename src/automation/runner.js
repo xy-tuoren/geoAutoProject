@@ -339,6 +339,38 @@ function referenceProductsTrigger(xml, chatBounds) {
   return null
 }
 
+function refreshedReferenceProductsTrigger(xml, chatBounds, previousTrigger) {
+  const trigger = referenceProductsTrigger(xml, chatBounds)
+  if (!trigger) throw new Error('推荐药品入口在点击前已离开当前视口；为避免点击错误位置已停止操作')
+  const moved = Array.isArray(previousTrigger)
+    && Math.hypot(trigger[0] - previousTrigger[0], trigger[1] - previousTrigger[1]) > 12
+  return { trigger, moved }
+}
+
+function referenceProductDrawerBounds(xml) {
+  const sheet = boundsForResourceSuffix(xml, ':id/bullet_container')
+    || boundsForResourceSuffix(xml, ':id/bullet_popup_bottom_sheet')
+  if (!sheet) return { sheet: null, list: null }
+  let list = boundsForNodeAttribute(xml, 'class', 'androidx.recyclerview.widget.RecyclerView')
+  if (!list) {
+    const candidate = iterNodes(xml).find(attrs => {
+      if (nodeAttr(attrs, 'scrollable') !== 'true'
+        || nodeAttr(attrs, 'class') === 'android.widget.HorizontalScrollView') return false
+      const rawBounds = nodeAttr(attrs, 'bounds')
+      if (!rawBounds) return false
+      const bounds = parseBounds(rawBounds)
+      return bounds[0] >= sheet[0] - 8
+        && bounds[1] >= sheet[1] - 8
+        && bounds[2] <= sheet[2] + 8
+        && bounds[3] <= sheet[3] + 8
+        && bounds[3] - bounds[1] >= 100
+    })
+    const rawBounds = candidate && nodeAttr(candidate, 'bounds')
+    if (rawBounds) list = parseBounds(rawBounds)
+  }
+  return { sheet, list }
+}
+
 function referenceProductsCaptureComplete({ detected, products }) {
   return !detected || Boolean(products?.firstViewportIncluded && products?.imagesReady && products?.confirmedEnd && products?.continuityVerified)
 }
@@ -1290,7 +1322,7 @@ function createRunner(options) {
         for (let attempt = 0; attempt < 2 && !products; attempt += 1) {
           productCaptureAttempts += 1
           try {
-            const candidate = await captureReferenceProductsAtTrigger(trigger)
+            const candidate = await captureReferenceProductsAtTrigger(trigger, { chatBounds: bounds })
             if (!candidate.firstViewportIncluded) throw new Error('推荐药品首项所在视口未纳入截图')
             if (!candidate.imagesReady) throw new Error(`推荐药品图片仍有 ${candidate.unloaded} 处未确认加载`)
             if (!candidate.confirmedEnd) throw new Error('推荐药品列表未确认到底')
@@ -1602,6 +1634,7 @@ function createRunner(options) {
     if (!initial) throw new Error('推荐药品首屏未能完成稳定截图')
     readiness.push(initial.readiness)
     const frames = [initial.frame]
+    log('capture: 推荐药品 page 1')
     let confirmedEnd = false
     const transitions = []
     let unchangedCount = 0
@@ -1629,8 +1662,10 @@ function createRunner(options) {
         const requiredUnchanged = frames.length === 1 ? 3 : 2
         if (unchangedCount >= requiredUnchanged) {
           confirmedEnd = true
+          log(`capture: 推荐药品连续 ${requiredUnchanged} 次滚动无变化，已确认真实末项`)
           break
         }
+        log(`waiting: 推荐药品末端确认 ${unchangedCount}/${requiredUnchanged}`)
         continue
       } else {
         unchangedCount = 0
@@ -1672,6 +1707,7 @@ function createRunner(options) {
         }
         transitions.push(transition || { verified: true, overlap })
         frames.push(frame)
+        log(`capture: 推荐药品 page ${frames.length}`)
       }
     }
     const calibratedSeams = transitions.filter(item => item.calibrated).length
@@ -1683,37 +1719,45 @@ function createRunner(options) {
   async function closeReferenceProductsDrawer() {
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const xml = await source()
-      const sheet = boundsForResourceId(xml, 'bullet_container')
+      const { sheet, list } = referenceProductDrawerBounds(xml)
       if (!sheet) return true
-      const list = boundsForNodeAttribute(xml, 'class', 'androidx.recyclerview.widget.RecyclerView')
       const [left, top, right, bottom] = sheet
       const closeY = list ? Math.floor((top + list[1]) / 2) : top + Math.max(24, Math.floor((bottom - top) / 10))
       await tap(right - Math.max(24, Math.floor((right - left) / 16)), closeY)
       await waitForVisualQuiet({ timeout: 900, fallbackMs: 600 })
-      if (!boundsForResourceId(await source(), 'bullet_container')) return true
+      if (!referenceProductDrawerBounds(await source()).sheet) return true
       await ui.press('back')
       await waitForVisualQuiet({ timeout: 900, fallbackMs: 600 })
     }
-    return !boundsForResourceId(await source(), 'bullet_container')
+    return !referenceProductDrawerBounds(await source()).sheet
   }
 
-  async function captureReferenceProductsAtTrigger(trigger, { restoreDrawer = true } = {}) {
+  async function captureReferenceProductsAtTrigger(trigger, { restoreDrawer = true, chatBounds = null } = {}) {
     log('capture: 回答滚动中发现推荐药品入口，正在从首项开始采集完整列表')
+    await waitForVisualQuiet({ timeout: 1_200, fallbackMs: 350 })
+    let triggerRefreshed = false
+    if (chatBounds) {
+      const refreshed = refreshedReferenceProductsTrigger(await source(), chatBounds, trigger)
+      trigger = refreshed.trigger
+      triggerRefreshed = refreshed.moved
+      if (triggerRefreshed) log(`capture: 推荐药品入口在页面稳定后发生位移，已刷新点击坐标为 ${trigger.join(',')}`)
+    }
     await tap(trigger[0], trigger[1])
     await waitForVisualQuiet({ timeout: 1_200, fallbackMs: 800 })
     let result = null
     try {
-      const deadline = Date.now() + 3_500
+      const deadline = Date.now() + 6_000
       let list = null
       let sheet = null
       while (Date.now() < deadline && (!list || !sheet)) {
         const xml = await source()
-        list = boundsForNodeAttribute(xml, 'class', 'androidx.recyclerview.widget.RecyclerView')
-        sheet = boundsForResourceId(xml, 'bullet_container')
+        const drawer = referenceProductDrawerBounds(xml)
+        list = drawer.list
+        sheet = drawer.sheet
         if (!list || !sheet) await sleep(100)
       }
       if (!list || !sheet || list[3] - list[1] < 100) {
-        throw new Error('推荐药品入口已点击，但未识别到药品列表抽屉')
+        throw new Error(`推荐药品入口已点击，但未识别到药品列表抽屉（sheet=${sheet ? sheet.join(',') : 'none'} list=${list ? list.join(',') : 'none'}）`)
       }
       log(`capture: 推荐药品抽屉初始边界 sheet=${sheet.join(',')} list=${list.join(',')}`)
       for (let attempt = 0; attempt < 3 && !referenceProductSheetExpanded(sheet, list); attempt += 1) {
@@ -1731,8 +1775,7 @@ function createRunner(options) {
         while (Date.now() < expandDeadline) {
           await sleep(100)
           const expandedXml = await source()
-          const expandedList = boundsForNodeAttribute(expandedXml, 'class', 'androidx.recyclerview.widget.RecyclerView')
-          const expandedSheet = boundsForResourceId(expandedXml, 'bullet_container')
+          const { list: expandedList, sheet: expandedSheet } = referenceProductDrawerBounds(expandedXml)
           if (expandedList && expandedSheet && expandedList[1] < previousTop - 40) {
             list = expandedList
             sheet = expandedSheet
@@ -1757,7 +1800,7 @@ function createRunner(options) {
       const unloaded = capture.readiness.reduce((sum, item) => sum + item.unloaded, 0)
       const imagesReady = capture.readiness.every(item => item.ready)
       log(`capture: 推荐药品截图完成，共 ${capture.frames.length} 屏，图片${imagesReady ? '已全部加载' : `仍有 ${unloaded} 处未确认加载`}`)
-      result = { images: chunks, pages: capture.frames.length, firstViewportIncluded: true, firstViewportStandalone: false, imagesReady, unloaded, confirmedEnd: capture.confirmedEnd, continuityVerified: capture.continuityVerified, calibratedSeams: capture.calibratedSeams, seamRecaptures: capture.seamRecaptures, fullRangeSearches: capture.fullRangeSearches, readinessModes: [...new Set(capture.readiness.map(item => item.mode))] }
+      result = { images: chunks, pages: capture.frames.length, firstViewportIncluded: true, firstViewportStandalone: false, imagesReady, unloaded, confirmedEnd: capture.confirmedEnd, continuityVerified: capture.continuityVerified, calibratedSeams: capture.calibratedSeams, seamRecaptures: capture.seamRecaptures, fullRangeSearches: capture.fullRangeSearches, readinessModes: [...new Set(capture.readiness.map(item => item.mode))], triggerRefreshed }
     } finally {
       if (restoreDrawer && !(await closeReferenceProductsDrawer())) throw new Error('推荐药品截图完成后无法关闭药品列表抽屉')
     }
@@ -1833,6 +1876,7 @@ function createRunner(options) {
           reference_products_first_viewport_included: products.firstViewportIncluded,
           reference_products_capture_complete: products.firstViewportIncluded && products.imagesReady && products.confirmedEnd && products.continuityVerified,
           reference_products_calibrated_seams: products.calibratedSeams,
+          reference_products_trigger_refreshed: products.triggerRefreshed,
         })
       }
     } else await fs.writeFile(screenshotPath, await screenshot())
@@ -2250,6 +2294,8 @@ module.exports = {
   hierarchyBelongsToPackage,
   scrollEndConfirmed,
   referenceProductsTrigger,
+  refreshedReferenceProductsTrigger,
+  referenceProductDrawerBounds,
   referenceProductsCaptureComplete,
   referenceProductSheetExpanded,
   requireQuestionLocated,

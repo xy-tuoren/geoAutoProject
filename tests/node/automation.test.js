@@ -9,7 +9,7 @@ const { questionVisible, currentQuestionText, replyTailOnScreen, findChatScrollB
 const { stackFramesInGroups, verifyFrameOverlap, verifyProductGridOverlap, imageInfo, imageLooksLoaded, imagesSimilar, imageRegionsStable, alignCropToWhitespace, stitchFramesWithOverlaps, composeLongImages, cropFramesAtTextSeams } = require('../../src/automation/images')
 const { createBatchDirectory, questionArtifactDirectory } = require('../../src/automation/utils')
 const { loadQuestionFile } = require('../../src/questions')
-const { adbConnectionLost, automationEntries, captureStableObserved, captureStableSandwich, calibratedProductFallbackOverlap, chatSwipePlan, conservativeFallbackOverlap, buildReplyImages, CancelledError, DOUYIN_SEARCH_SUMMARY_FILENAME, TOUTIAO_SEARCH_SUMMARY_FILENAME, douyinMiniAppCaptureBounds, douyinSearchInput, douyinViewFullBounds, fillQuestionInput, hierarchyBelongsToPackage, historyOnboardingVisible, maxLongImageHeight, normalizeAutomationEntries, observerResultRequiresFreshCapture, prepareEmbeddedEvidence, referenceProductsCaptureComplete, referenceProductSheetExpanded, referenceProductsTrigger, referenceProductViewportReadiness, requireQuestionLocated, runQuestionsWithRecovery, scrollEndConfirmed, shouldRetryFullReplyCapture, toutiaoSearchInput, toutiaoViewMoreBounds, waitForPackageHierarchy } = require('../../src/automation/runner')
+const { adbConnectionLost, automationEntries, captureStableObserved, captureStableSandwich, calibratedProductFallbackOverlap, chatSwipePlan, conservativeFallbackOverlap, buildReplyImages, CancelledError, DOUYIN_SEARCH_SUMMARY_FILENAME, TOUTIAO_SEARCH_SUMMARY_FILENAME, douyinMiniAppCaptureBounds, douyinSearchInput, douyinViewFullBounds, fillQuestionInput, hierarchyBelongsToPackage, historyOnboardingVisible, maxLongImageHeight, normalizeAutomationEntries, observerResultRequiresFreshCapture, prepareEmbeddedEvidence, referenceProductDrawerBounds, referenceProductsCaptureComplete, referenceProductSheetExpanded, referenceProductsTrigger, referenceProductViewportReadiness, refreshedReferenceProductsTrigger, requireQuestionLocated, runQuestionsWithRecovery, scrollEndConfirmed, shouldRetryFullReplyCapture, toutiaoSearchInput, toutiaoViewMoreBounds, waitForPackageHierarchy } = require('../../src/automation/runner')
 
 const CHAT_BOUNDS = [0, 200, 1080, 1800]
 
@@ -716,6 +716,39 @@ test('参考药品标题旁存在真实可点击按钮时使用按钮中心而�
   assert.deepEqual(referenceProductsTrigger(xml, [0, 200, 1272, 2300]), [1174, 1438])
 })
 
+test('点击药品入口前使用最新层级刷新发生位移的按钮坐标', () => {
+  const xml = '<hierarchy>'
+    + '<node text="参考药品" bounds="[64,1600][918,1686]" />'
+    + '<node class="android.view.View" clickable="true" bounds="[918,1577][1050,1687]" />'
+    + '</hierarchy>'
+  const result = refreshedReferenceProductsTrigger(xml, [0, 333, 1080, 2001], [984, 1955])
+  assert.deepEqual(result, { trigger: [984, 1632], moved: true })
+})
+
+test('兼容华为弹窗窗口中的参考药品抽屉与竖向列表', () => {
+  const xml = '<hierarchy>'
+    + '<node class="android.widget.FrameLayout" resource-id="com.aurora.xiaohe.aidoctor:id/bullet_popup_bottom_sheet" bounds="[0,960][984,2304]">'
+    + '<node class="android.widget.FrameLayout" resource-id="com.aurora.xiaohe.aidoctor:id/bullet_container" bounds="[0,960][984,2304]">'
+    + '<node class="androidx.recyclerview.widget.RecyclerView" scrollable="true" bounds="[0,1116][984,2304]" />'
+    + '</node></node></hierarchy>'
+  assert.deepEqual(referenceProductDrawerBounds(xml), {
+    sheet: [0, 960, 984, 2304],
+    list: [0, 1116, 984, 2304],
+  })
+})
+
+test('抽屉列表兜底不会误选仍在抽屉后方的聊天滚动区', () => {
+  const xml = '<hierarchy>'
+    + '<node class="android.view.View" scrollable="true" bounds="[0,333][1080,2010]" />'
+    + '<node class="android.widget.FrameLayout" resource-id="com.aurora.xiaohe.aidoctor:id/bullet_container" bounds="[0,960][1080,2400]">'
+    + '<node class="android.widget.ScrollView" scrollable="true" bounds="[0,1116][1080,2400]" />'
+    + '</node></hierarchy>'
+  assert.deepEqual(referenceProductDrawerBounds(xml), {
+    sheet: [0, 960, 1080, 2400],
+    list: [0, 1116, 1080, 2400],
+  })
+})
+
 test('检测到回答尾部药品入口后只要求完整采集药品，不依赖正文锚点恢复', () => {
   const complete = { firstViewportIncluded: true, imagesReady: true, confirmedEnd: true, continuityVerified: true }
 
@@ -733,6 +766,8 @@ test('药品抽屉按竖屏可视比例确认展开而不依赖固定列表顶�
   assert.equal(referenceProductSheetExpanded([0, 56, 720, 1512], [0, 362, 720, 1512]), true)
   assert.equal(referenceProductSheetExpanded([0, 900, 1080, 2282], [0, 1180, 1080, 2282]), false)
   assert.equal(referenceProductSheetExpanded([0, 600, 720, 1512], [0, 840, 720, 1512]), false)
+  assert.equal(referenceProductSheetExpanded([0, 960, 984, 2304], [0, 1116, 984, 2304]), false)
+  assert.equal(referenceProductSheetExpanded([0, 240, 984, 2304], [0, 396, 984, 2304]), true)
 })
 
 test('新版药品抽屉无图片节点时从卡片上半部推断药品图片区域', () => {
