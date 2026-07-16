@@ -68,6 +68,8 @@ npm run run:android -- \
 
 Windows 安装包由 GitHub Actions 在 `windows-latest` 上构建。手动运行 `Build Windows` 工作流只生成可下载的 Artifact；推送 `v*` 版本标签会在测试和打包成功后自动创建或更新 GitHub Release，并上传 `.exe`、`.blockmap` 与自动更新所需的 `latest.yml`。当前 macOS 工作流仅保留手动构建，不会随版本标签执行：
 
+Windows 安装包内置的自动更新源为 `http://43.138.254.94/geo-updates/win/`。版本标签构建会在保留 GitHub Release 备份的同时，将 `.exe`、`.blockmap` 和 `latest.yml` 上传到该服务器；`latest.yml` 始终最后发布，避免客户端读取到尚未完整上传的版本。GitHub 仓库需配置 `UPDATE_SERVER_HOST`、`UPDATE_SERVER_USER` 和 `UPDATE_SERVER_SSH_PASSWORD` 三个 Actions Secrets。待域名 HTTPS 证书可用后，应将该地址统一切换为 HTTPS 域名，避免使用裸 IP 的明文更新通道。
+
 ```bash
 git tag v0.2.0
 git push origin v0.2.0

@@ -1,6 +1,6 @@
 {
   "name": "question-automation-electron",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "private": true,
   "description": "Cross-platform Electron operator panel for ADB question automation.",
   "repository": {
@@ -10,7 +10,7 @@
   "main": "src/main/index.js",
   "scripts": {
     "start": "electron .",
-    "check": "node --check src/main/index.js && node --check src/main/preload.js && node --check src/main/updater.js && node --check src/renderer/retry-state.js && node --check src/renderer/entry-progress.js && node --check src/renderer/renderer.js && node --check src/questions.js && node --check src/runtime-paths.js && node --check src/cli.js && node --check src/automation/*.js && node --check scripts/*.js",
+    "check": "node scripts/check-syntax.js",
     "test": "node --test tests/node/**/*.test.js",
     "run:android": "node src/cli.js",
     "clean": "node scripts/clean-generated.js",
@@ -77,9 +77,8 @@
     },
     "publish": [
       {
-        "provider": "github",
-        "owner": "xy-tuoren",
-        "repo": "geoAutoProject"
+        "provider": "generic",
+        "url": "http://43.138.254.94/geo-updates/win/"
       }
     ]
   }

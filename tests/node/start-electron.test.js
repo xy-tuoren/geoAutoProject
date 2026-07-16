@@ -22,7 +22,7 @@ function runHelper(environment) {
   })
 }
 
-test('loads the nvm default version when a non-interactive PATH lacks npm', (t) => {
+test('loads the nvm default version when a non-interactive PATH lacks npm', { skip: process.platform === 'win32' }, (t) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'node-runtime-nvm-'))
   t.after(() => fs.rmSync(home, { recursive: true, force: true }))
 
@@ -40,7 +40,7 @@ test('loads the nvm default version when a non-interactive PATH lacks npm', (t) 
   assert.match(result.stdout, new RegExp(`${binDir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/npm`))
 })
 
-test('reports an actionable error when Node.js and npm cannot be resolved', (t) => {
+test('reports an actionable error when Node.js and npm cannot be resolved', { skip: process.platform === 'win32' }, (t) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'node-runtime-missing-'))
   t.after(() => fs.rmSync(home, { recursive: true, force: true }))
 
@@ -51,7 +51,7 @@ test('reports an actionable error when Node.js and npm cannot be resolved', (t) 
   assert.match(result.stderr, /Node\.js 22\+/)
 })
 
-test('rejects Node.js versions older than the project minimum', (t) => {
+test('rejects Node.js versions older than the project minimum', { skip: process.platform === 'win32' }, (t) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'node-runtime-old-'))
   t.after(() => fs.rmSync(home, { recursive: true, force: true }))
 

@@ -121,3 +121,45 @@ jobs:
               "${release_flags[@]}" \
               --repo "$GITHUB_REPOSITORY"
           fi
+
+  deploy-windows-update:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build-windows
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      UPDATE_SERVER_HOST: ${{ secrets.UPDATE_SERVER_HOST }}
+      UPDATE_SERVER_USER: ${{ secrets.UPDATE_SERVER_USER }}
+      UPDATE_SERVER_SSH_PASSWORD: ${{ secrets.UPDATE_SERVER_SSH_PASSWORD }}
+
+    steps:
+      - name: Download Windows installer
+        uses: actions/download-artifact@v4
+        with:
+          name: question-automation-windows-x64
+          path: release-assets
+
+      - name: Validate update deployment configuration
+        shell: bash
+        run: |
+          test -n "$UPDATE_SERVER_HOST"
+          test -n "$UPDATE_SERVER_USER"
+          test -n "$UPDATE_SERVER_SSH_PASSWORD"
+          test -f release-assets/latest.yml
+          compgen -G 'release-assets/*.exe' > /dev/null
+          compgen -G 'release-assets/*.blockmap' > /dev/null
+
+      - name: Publish Windows auto-update files to server
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq sshpass
+          export SSHPASS="$UPDATE_SERVER_SSH_PASSWORD"
+          remote="$UPDATE_SERVER_USER@$UPDATE_SERVER_HOST"
+          release_dir='/var/www/geo-updates/win'
+          staging_dir="$release_dir/.incoming-${GITHUB_RUN_ID}"
+          sshpass -e ssh -o StrictHostKeyChecking=accept-new "$remote" "mkdir -p '$staging_dir'"
+          sshpass -e scp -o StrictHostKeyChecking=accept-new release-assets/*.exe release-assets/*.blockmap release-assets/latest.yml "$remote:$staging_dir/"
+          sshpass -e ssh -o StrictHostKeyChecking=accept-new "$remote" "set -eu; test -f '$staging_dir/latest.yml'; cp '$staging_dir'/*.exe '$release_dir/'; cp '$staging_dir'/*.blockmap '$release_dir/'; cp '$staging_dir/latest.yml' '$release_dir/latest.yml.next'; mv '$release_dir/latest.yml.next' '$release_dir/latest.yml'; rm -rf '$staging_dir'"
