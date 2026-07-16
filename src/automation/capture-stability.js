@@ -1,5 +1,6 @@
 const { sleep } = require('./utils')
-const { hierarchyIsLoading } = require('./hierarchy')
+const { hierarchyIsLoading, findChatScrollBounds, validateCaptureViewport } = require('./hierarchy')
+const { hierarchyLogicalSize } = require('./miniapp-locators')
 const { cropImage, imagesSimilar, imageRegionsStable } = require('./images')
 const {
   captureStableSandwich,
@@ -13,6 +14,7 @@ const REPLY_STABLE_QUIET_MS = 3_000
 function createCaptureStability({
   source,
   screenshot,
+  windowSize,
   checkCancelled,
   log,
   observer,
@@ -25,17 +27,50 @@ function createCaptureStability({
     return (await source()).replace(/focused="(?:true|false)"/g, 'focused=""').replace(/selected="(?:true|false)"/g, 'selected=""')
   }
   
-  async function waitForStableReplyPixels(timeout, { minWait = 12_000 } = {}) {
+  function logicalBoundsToPhysical(bounds, logicalSize, physicalSize) {
+    const scaleX = physicalSize.width / logicalSize.width
+    const scaleY = physicalSize.height / logicalSize.height
+    return [
+      Math.max(0, Math.round(bounds[0] * scaleX)),
+      Math.max(0, Math.round(bounds[1] * scaleY)),
+      Math.min(physicalSize.width, Math.round(bounds[2] * scaleX)),
+      Math.min(physicalSize.height, Math.round(bounds[3] * scaleY)),
+    ]
+  }
+
+  async function waitForReplyPoll(milliseconds) {
+    if (!observer.active) {
+      await sleep(milliseconds)
+      return
+    }
+    try {
+      await observer.waitForNoActivity({
+        timeout: milliseconds,
+        quietMs: Math.min(650, milliseconds),
+        minWaitMs: milliseconds,
+      })
+    } catch (error) {
+      if (!await recoverObserver(error)) await sleep(milliseconds)
+    }
+  }
+
+  async function waitForStableReplyPixels(timeout, { minWait = 0 } = {}) {
     const stableMilliseconds = REPLY_STABLE_QUIET_MS
-    const pollInterval = 1_500
+    const pollInterval = 750
     const start = Date.now()
     let lastChange = start
-    let lastXml = ''
+    let lastXml = await normalizedHierarchy()
+    const physicalSize = await windowSize()
+    const logicalSize = hierarchyLogicalSize(lastXml, physicalSize)
+    const logicalBounds = findChatScrollBounds(lastXml, logicalSize)
+    const bounds = logicalBoundsToPhysical(logicalBounds, logicalSize, physicalSize)
+    validateCaptureViewport(physicalSize, bounds)
+    log(`waiting: 仅检测聊天内容区域 ${bounds.join(',')}，已排除顶部状态栏和底部输入区`)
     let lastFrame = null
     let lastProgress = 0
     while (Date.now() - start < timeout) {
       checkCancelled()
-      const frame = await screenshot()
+      const frame = await cropImage(await screenshot(), bounds)
       const now = Date.now()
       const pixelsStable = lastFrame && await imageRegionsStable(lastFrame, frame)
       lastFrame = frame
@@ -46,65 +81,23 @@ function createCaptureStability({
         // stable for long enough, then confirm that the UI did not reflow while
         // the hierarchy was being read.
         const xml = await normalizedHierarchy()
-        const confirmedFrame = await screenshot()
+        const confirmedFrame = await cropImage(await screenshot(), bounds)
         lastXml = xml
         lastFrame = confirmedFrame
-        if (!hierarchyIsLoading(xml) && await imageRegionsStable(frame, confirmedFrame)) return { status: 'stable', xml }
+        if (!hierarchyIsLoading(xml) && await imageRegionsStable(frame, confirmedFrame)) {
+          log(`waiting: 聊天内容区域已连续${Math.round(stableMilliseconds / 1000)}秒无变化，回答稳定`)
+          return { status: 'stable', xml }
+        }
         lastChange = Date.now()
       }
-      await sleep(pollInterval)
+      await waitForReplyPoll(pollInterval)
     }
-    if (!lastXml) lastXml = await normalizedHierarchy()
     return { status: hierarchyIsLoading(lastXml) ? 'loading_timeout' : 'timeout', xml: lastXml }
   }
   
   async function waitForStableReply(timeout, { startedAt = Date.now() } = {}) {
-    const minWait = 12_000
     const initialElapsed = Math.max(0, Date.now() - startedAt)
-    if (!observer.active) {
-      return waitForStableReplyPixels(
-        Math.max(1_000, timeout - initialElapsed),
-        { minWait: Math.max(0, minWait - initialElapsed) },
-      )
-    }
-    const started = startedAt
-    let lastProgress = 0
-    while (Date.now() - started < timeout) {
-      checkCancelled()
-      const elapsed = Date.now() - started
-      if (Date.now() - lastProgress >= 5_000) {
-        log('waiting: reply still generating…')
-        lastProgress = Date.now()
-      }
-      if (elapsed < minWait) {
-        await sleep(Math.min(1_000, minWait - elapsed))
-        continue
-      }
-      try {
-        const remaining = timeout - elapsed
-        const quiet = await observer.waitForNoActivity({
-          timeout: Math.max(100, Math.min(6_000, remaining)),
-          quietMs: REPLY_STABLE_QUIET_MS,
-        })
-        if (!quiet.quiet) continue
-        const mark = observer.mark()
-        const xml = await normalizedHierarchy()
-        const confirmed = await observer.waitForNoActivity({ timeout: 1_200, quietMs: 300, minWaitMs: 120 })
-        const currentMark = observer.mark()
-        const activityFramesDuringHierarchy = (currentMark.activityFrameCount ?? currentMark.frameCount)
-          - (mark.activityFrameCount ?? mark.frameCount)
-        if (!hierarchyIsLoading(xml) && confirmed.quiet && activityFramesDuringHierarchy === 0) {
-          log(`waiting: scrcpy已确认回答画面连续${Math.round(REPLY_STABLE_QUIET_MS / 1000)}秒无活动帧，读取最终UI层级完成`)
-          return { status: 'stable', xml }
-        }
-      } catch (error) {
-        if (await recoverObserver(error)) continue
-        const remaining = Math.max(1_000, timeout - (Date.now() - started))
-        return waitForStableReplyPixels(remaining, { minWait: 0 })
-      }
-    }
-    const xml = await normalizedHierarchy()
-    return { status: hierarchyIsLoading(xml) ? 'loading_timeout' : 'timeout', xml }
+    return waitForStableReplyPixels(Math.max(1_000, timeout - initialElapsed))
   }
   
   async function waitForFinalVisualQuiet({ quietMs = REPLY_STABLE_QUIET_MS, timeout = quietMs + 2_000 } = {}) {
@@ -243,4 +236,3 @@ function createCaptureStability({
 }
 
 module.exports = { createCaptureStability, REPLY_STABLE_QUIET_MS }
-

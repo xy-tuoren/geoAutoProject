@@ -15,16 +15,12 @@ const {
 } = require('./images')
 const {
   requireQuestionLocated,
-  scrollSingleQuestionSessionToTop,
   prepareEmbeddedEvidence,
   scrollEndConfirmed,
-  shouldRetryFullReplyCapture,
   captureStableSandwich,
 } = require('./capture-primitives')
 const { referenceProductsTrigger, miniAppReferenceProductsTrigger } = require('./reference-products')
 const { douyinMiniAppCaptureBounds } = require('./miniapp-locators')
-
-const REPLY_STABLE_QUIET_MS = 3_000
 
 function createReplyCapture({
   source,
@@ -45,10 +41,9 @@ function createReplyCapture({
     }
     return questionVisible(await source(), question, bounds)
   }
-  
-  async function captureFullReplyFrames(question, maxPages = 30, {
+
+  async function captureFullReplyFrames(question, _maxPages = 30, {
     scrollFraction = 0.45,
-    allowFullRetry = true,
     singleQuestionSession = false,
   } = {}) {
     const size = await windowSize()
@@ -56,18 +51,22 @@ function createReplyCapture({
     const navigationBounds = findChatScrollBounds(initialXml, size)
     validateCaptureViewport(size, navigationBounds)
     const topNavigationStarted = Date.now()
-    let topBoundary = null
+    let topNavigationMethod = 'question_bubble'
+    let topConfirmationSwipes = 0
     if (singleQuestionSession) {
-      topBoundary = await scrollSingleQuestionSessionToTop({
-        capture: () => waitForStableReplyRegion(navigationBounds),
-        swipeUp: () => swipeChat(navigationBounds, 'up', 0.65, { speed: 3_200, settle: 80, eventDrivenSettle: true }),
-        settle: scroll => waitForStableReplyRegion(navigationBounds, 8_000, { settleSince: scroll.activityMark }),
-      })
-    } else requireQuestionLocated(await scrollQuestionIntoView(question, navigationBounds), question)
+      topNavigationMethod = 'new_session_initial_viewport'
+    } else {
+      let questionLocated = questionVisible(initialXml, question, navigationBounds)
+      if (!questionLocated) {
+        questionLocated = await scrollQuestionIntoView(question, navigationBounds)
+        topNavigationMethod = 'question_bubble_scroll'
+      }
+      requireQuestionLocated(questionLocated, question)
+    }
     const topNavigationMs = Date.now() - topNavigationStarted
     log(singleQuestionSession
-      ? `capture: 新会话已连续两次滚动无变化，确认位于会话顶部（回滚尝试=${topBoundary.swipes}，耗时=${topNavigationMs}ms）`
-      : `capture: 快速定位当前问题顶部耗时=${topNavigationMs}ms`)
+      ? `capture: 新会话发送后即位于顶部，直接从当前视口开始采集（向上滚动=0，耗时=${topNavigationMs}ms）`
+      : `capture: 当前已有回答已定位问题顶部（耗时=${topNavigationMs}ms）`)
     const evidence = await prepareEmbeddedEvidence({
       source,
       tap,
@@ -139,19 +138,25 @@ function createReplyCapture({
     }
     let capture = initialCapture
     let frame = capture.frame
-    for (let page = 0; page < maxPages; page += 1) {
+    const captureDeadline = Date.now() + 5 * 60_000
+    for (let page = 0; ; page += 1) {
+      if (Date.now() >= captureDeadline) throw new Error('回答已连续采集5分钟但仍未到达末端，为避免静默截断已停止本题')
       let xml = capture.xml || await source()
-      if (!frames.length || !(await imagesSimilar(frames.at(-1), frame, 3))) { frames.push(frame); log(`capture: page ${frames.length}`) }
+      if (!frames.length || !(await imageRegionsStable(frames.at(-1), frame))) { frames.push(frame); log(`capture: page ${frames.length}`) }
       if (await captureProductsIfVisible(xml)) break
       const before = frame
       const scroll = await swipeChat(bounds, 'down', scrollFraction, { eventDrivenSettle: true })
       const shift = scroll.distance
       let afterCapture = await waitForStableReplyRegion(bounds, 8_000, { settleSince: scroll.activityMark })
       let after = afterCapture.frame
-      if (await imagesSimilar(before, after, 3)) {
+      if (await imageRegionsStable(before, after)) {
         noProgress += 1
+        const afterXml = afterCapture.xml || await source()
+        capture = afterCapture
+        frame = after
+        if (await captureProductsIfVisible(afterXml)) break
         if (scrollEndConfirmed(scroll.canScrollMore, noProgress)) {
-          log(`capture: scroll ended（${scroll.canScrollMore === false ? '设备确认已到底' : '连续两次画面无变化'}）`)
+          log(`capture: scroll ended（${scroll.canScrollMore === false ? '设备确认已到底' : '向下滚动后内容未继续变化'}）`)
           break
         }
       } else {
@@ -189,7 +194,7 @@ function createReplyCapture({
             log(`capture: 接缝无法精确校验，保留下一屏完整视口、重复内容和浅色留白：${reason}`)
           }
         }
-        if (!(await imagesSimilar(frames.at(-1), after, 3))) {
+        if (!(await imageRegionsStable(frames.at(-1), after))) {
           frames.push(after)
           transitions.push(transition)
           log(`capture: page ${frames.length}`)
@@ -220,25 +225,12 @@ function createReplyCapture({
       productCaptureMs,
       captureMetadata: {
         reply_top_confirmed: true,
-        reply_top_navigation_method: singleQuestionSession ? 'new_session_scroll_boundary' : 'question_bubble',
+        reply_top_navigation_method: topNavigationMethod,
         reply_question_structure_validation_required: !singleQuestionSession,
-        ...(singleQuestionSession ? { reply_top_confirmation_swipes: topBoundary.swipes } : {}),
+        reply_top_confirmation_swipes: topConfirmationSwipes,
       },
     }
-    if (shouldRetryFullReplyCapture({ fallbackReasons, allowFullRetry, products })) {
-      log(`capture: 首轮存在不可靠接缝，等待${Math.round(REPLY_STABLE_QUIET_MS / 1000)}秒最终静止后从问题顶部整题重采一次`)
-      await waitForFinalVisualQuiet()
-      const retry = await captureFullReplyFrames(question, maxPages, {
-        scrollFraction: 0.3,
-        allowFullRetry: false,
-        singleQuestionSession,
-      })
-      retry.recaptureCount += recaptureCount
-      retry.fullRetryCount = 1
-      retry.topNavigationMs += topNavigationMs
-      return retry
-    }
-    if (fallbackReasons.length) log('capture: 不可靠接缝已局部重采并安全分隔，因已进入终止序列或重试后仍失败而保留安全降级')
+    if (fallbackReasons.length) log('capture: 不可靠接缝只做本屏局部重采；仍无法校验时保留完整下一视口并明确分隔，不再整题回滚')
     return result
   }
   

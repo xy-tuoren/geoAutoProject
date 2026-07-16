@@ -248,6 +248,7 @@ function createQuestionWorkflows({
     if (payload.newSession && getActiveEntry().supportsNewSession) {
       log('stage: 正在切换到新会话')
       newSessionPerformed = await tapNewSession()
+      if (!newSessionPerformed) throw new Error('本题要求新建会话，但未找到可确认的新会话入口；为避免混入旧对话，已在输入前停止本题')
     } else if (payload.newSession && !getActiveEntry().supportsNewSession) {
       log(`stage: ${getActiveEntry().label}不支持自动新建会话，已跳过该步骤`)
     }

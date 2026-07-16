@@ -1,6 +1,6 @@
 const { sleep } = require('./utils')
 const { evidencePanelBounds, evidenceMinimumHeight } = require('./hierarchy')
-const { imagesSimilar, composeLongImages } = require('./images')
+const { composeLongImages } = require('./images')
 
 const DEFAULT_MAX_LONG_IMAGE_HEIGHT = 12_000
 
@@ -42,35 +42,11 @@ function chatSwipePlan(bounds, fraction = 0.6, { maxFraction = 0.7, speed = 1400
 }
 
 function scrollEndConfirmed(canScrollMore, unchangedCount) {
-  return canScrollMore === false || unchangedCount >= 2
+  return canScrollMore === false || unchangedCount >= 1
 }
 
 function requireQuestionLocated(found, question) {
   if (!found) throw new Error(`未能在当前会话中定位刚发送的问题“${question}”，为避免截取旧回答已停止本题`)
-}
-
-async function scrollSingleQuestionSessionToTop({
-  capture,
-  swipeUp,
-  settle,
-  framesSimilar = imagesSimilar,
-  timeout = 120_000,
-  now = () => Date.now(),
-}) {
-  const startedAt = now()
-  let current = await capture()
-  let unchangedCount = 0
-  let swipes = 0
-  while (now() - startedAt < timeout) {
-    const scroll = await swipeUp()
-    const next = await settle(scroll)
-    swipes += 1
-    if (await framesSimilar(current.frame, next.frame, 3)) unchangedCount += 1
-    else unchangedCount = 0
-    current = next
-    if (unchangedCount >= 2) return { capture: current, swipes, confirmed: true }
-  }
-  throw new Error(`新会话已创建，但${Math.round(timeout / 1000)}秒内未能通过连续两次无变化确认到达会话顶部。`)
 }
 
 async function buildReplyImages(frames, { transitions = [], maxHeight = DEFAULT_MAX_LONG_IMAGE_HEIGHT } = {}) {
@@ -241,10 +217,6 @@ function observerRegionFallbackOptions(result) {
   }
 }
 
-function shouldRetryFullReplyCapture({ fallbackReasons = [], allowFullRetry = true, products = null } = {}) {
-  return Boolean(allowFullRetry && !products && fallbackReasons.length)
-}
-
 module.exports = {
   DEFAULT_MAX_LONG_IMAGE_HEIGHT,
   maxLongImageHeight,
@@ -253,12 +225,10 @@ module.exports = {
   chatSwipePlan,
   scrollEndConfirmed,
   requireQuestionLocated,
-  scrollSingleQuestionSessionToTop,
   buildReplyImages,
   prepareEmbeddedEvidence,
   fillQuestionInput,
   captureStableSandwich,
   captureStableObserved,
   observerRegionFallbackOptions,
-  shouldRetryFullReplyCapture,
 }

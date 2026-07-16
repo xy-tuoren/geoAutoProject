@@ -17,7 +17,7 @@ const {
   entryHierarchyStartupTimeout,
 } = require('./entry-catalog')
 const { bundledScrcpyServer } = require('../runtime-paths')
-const { adbConnectionLost, waitForAdbDevice, adbScreenshot, adbCommandWithReconnect } = require('./device-bridge')
+const { adbCommand, adbConnectionLost, waitForAdbDevice, adbScreenshot, adbCommandWithReconnect } = require('./device-bridge')
 const { CancelledError, fatalBatchError, runQuestionsWithRecovery, failedRetryItems, retryAttemptCount } = require('./batch-recovery')
 const { captureFailureDiagnostics, diagnosticError } = require('./failure-diagnostics')
 const {
@@ -55,14 +55,12 @@ const {
   chatSwipePlan,
   scrollEndConfirmed,
   requireQuestionLocated,
-  scrollSingleQuestionSessionToTop,
   buildReplyImages,
   prepareEmbeddedEvidence,
   fillQuestionInput,
   captureStableSandwich,
   captureStableObserved,
   observerRegionFallbackOptions,
-  shouldRetryFullReplyCapture,
 } = require('./capture-primitives')
 const { createCaptureStability } = require('./capture-stability')
 const { createReferenceProductCapture } = require('./reference-product-capture')
@@ -474,6 +472,7 @@ function createRunner(options) {
   } = createCaptureStability({
     source,
     screenshot,
+    windowSize,
     checkCancelled,
     log,
     observer,
@@ -635,7 +634,7 @@ function createRunner(options) {
       if ((payload.entries || []).length > 1) throw new Error('当前已有回答模式一次只能指定一个入口。')
       const requestedEntry = (payload.entries || []).length
         ? normalizeAutomationEntries(payload.entries)[0]
-        : ENTRY_DEFINITIONS[DEFAULT_ENTRY_ID]
+        : ENTRY_DEFINITIONS['xiaohe-app']
       resetEntryState(requestedEntry)
       payloadMaxLongImageHeight = maxLongImageHeight(payload.maxLongImageHeight)
       const outputRoot = path.resolve(payload.outputDir)
@@ -674,21 +673,26 @@ function createRunner(options) {
         } else {
           const chatBounds = findChatScrollBounds(xml, size)
           validateCaptureViewport(size, chatBounds)
-          question = currentQuestionText(xml, chatBounds)
-          let unchangedAtTop = 0
-          let locateFrame = question ? null : await cropImage(await screenshot(), chatBounds)
-          while (!question && unchangedAtTop < 2) {
-            const scroll = await swipeChat(chatBounds, 'up', 0.45, { speed: 2_600, settle: 100, eventDrivenSettle: true })
-            const settled = await waitForStableReplyRegion(chatBounds, 3_000, { settleSince: scroll.activityMark })
-            xml = settled.xml || await source()
+          question = String(payload.questions?.[0] || '').trim()
+          if (question) {
+            captureMethod = currentQuestion => captureFullReplyFrames(currentQuestion, 30, { singleQuestionSession: true })
+          } else {
             question = currentQuestionText(xml, chatBounds)
-            unchangedAtTop = await imagesSimilar(locateFrame, settled.frame, 3) ? unchangedAtTop + 1 : 0
-            locateFrame = settled.frame
-          }
-          if (!question) {
-            await waitForVisualQuiet({ timeout: 900, fallbackMs: 300 })
-            xml = await source()
-            question = currentQuestionText(xml, chatBounds)
+            let unchangedAtTop = 0
+            let locateFrame = question ? null : await cropImage(await screenshot(), chatBounds)
+            while (!question && unchangedAtTop < 2) {
+              const scroll = await swipeChat(chatBounds, 'up', 0.45, { speed: 2_600, settle: 100, eventDrivenSettle: true })
+              const settled = await waitForStableReplyRegion(chatBounds, 3_000, { settleSince: scroll.activityMark })
+              xml = settled.xml || await source()
+              question = currentQuestionText(xml, chatBounds)
+              unchangedAtTop = await imagesSimilar(locateFrame, settled.frame, 3) ? unchangedAtTop + 1 : 0
+              locateFrame = settled.frame
+            }
+            if (!question) {
+              await waitForVisualQuiet({ timeout: 900, fallbackMs: 300 })
+              xml = await source()
+              question = currentQuestionText(xml, chatBounds)
+            }
           }
           if (!question) throw new Error('无法从当前已有回答向上定位对应问题；本次未输入、未发送，也未新建会话。')
         }
@@ -701,7 +705,9 @@ function createRunner(options) {
           question,
           question_index: 1,
         })
-        log(`capture: 已识别当前已有问题“${question}”，开始执行正文、引用资料和完整参考药品归档；不会输入或发送内容`)
+        log(`${payload.questions?.[0]
+          ? `capture: 使用调用方提供的已知问题文字“${question}”`
+          : `capture: 已从当前已有回答识别问题“${question}”`}，开始执行正文、引用资料和完整参考药品归档；不会输入或发送内容`)
         const result = await saveArtifacts({
           artifacts,
           stem: '回答',
@@ -1181,7 +1187,6 @@ module.exports = {
   referenceProductsCaptureComplete,
   referenceProductSheetExpanded,
   requireQuestionLocated,
-  scrollSingleQuestionSessionToTop,
   calibratedProductFallbackOverlap,
   referenceProductViewportReadiness,
   prepareEmbeddedEvidence,
@@ -1189,7 +1194,6 @@ module.exports = {
   captureStableSandwich,
   captureStableObserved,
   observerRegionFallbackOptions,
-  shouldRetryFullReplyCapture,
   failedRetryItems,
   retryAttemptCount,
   fatalBatchError,

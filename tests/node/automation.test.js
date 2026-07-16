@@ -10,7 +10,7 @@ const { stackFramesInGroups, verifyFrameOverlap, verifyProductGridOverlap, image
 const { createBatchDirectory, questionArtifactDirectory, batchArtifactDirectories, entryArtifactDirectories, questionArtifactDirectories } = require('../../src/automation/utils')
 const { EventLog, classifyAutomationLog } = require('../../src/automation/event-log')
 const { loadQuestionFile } = require('../../src/questions')
-const { adbConnectionLost, captureFailureDiagnostics, captureStableObserved, captureStableSandwich, calibratedProductFallbackOverlap, chatSwipePlan, conservativeFallbackOverlap, buildReplyImages, CancelledError, DOUYIN_MINIAPP_ENTRY_FILENAME, DOUYIN_SEARCH_SUMMARY_FILENAME, TOUTIAO_SEARCH_SUMMARY_FILENAME, douyinGenericAiAnswerBounds, douyinMiniAppCaptureBounds, douyinMiniAppEntryBounds, douyinOcrViewFullTarget, douyinSearchInput, douyinSearchResultTarget, douyinSearchResultsBounds, douyinViewFullBounds, failedRetryItems, fillQuestionInput, historyOnboardingVisible, maxLongImageHeight, miniAppReferenceProductsTrigger, observerRegionFallbackOptions, prepareEmbeddedEvidence, referenceProductDrawerBounds, referenceProductsCaptureComplete, referenceProductSheetExpanded, referenceProductsTrigger, referenceProductViewportReadiness, refreshedReferenceProductsTrigger, requireQuestionLocated, retryAttemptCount, runQuestionsWithRecovery, scrollEndConfirmed, scrollSingleQuestionSessionToTop, shouldRetryFullReplyCapture, toutiaoGenericConsultationPage, toutiaoHomeSearchBounds, toutiaoOcrViewMoreTarget, toutiaoSearchInput, toutiaoSearchResultBelongsToQuestion, toutiaoViewMoreBounds, waitForPackageHierarchy } = require('../../src/automation/runner')
+const { adbConnectionLost, captureFailureDiagnostics, captureStableObserved, captureStableSandwich, calibratedProductFallbackOverlap, chatSwipePlan, conservativeFallbackOverlap, buildReplyImages, CancelledError, DOUYIN_MINIAPP_ENTRY_FILENAME, DOUYIN_SEARCH_SUMMARY_FILENAME, TOUTIAO_SEARCH_SUMMARY_FILENAME, douyinGenericAiAnswerBounds, douyinMiniAppCaptureBounds, douyinMiniAppEntryBounds, douyinOcrViewFullTarget, douyinSearchInput, douyinSearchResultTarget, douyinSearchResultsBounds, douyinViewFullBounds, failedRetryItems, fillQuestionInput, historyOnboardingVisible, maxLongImageHeight, miniAppReferenceProductsTrigger, observerRegionFallbackOptions, prepareEmbeddedEvidence, referenceProductDrawerBounds, referenceProductsCaptureComplete, referenceProductSheetExpanded, referenceProductsTrigger, referenceProductViewportReadiness, refreshedReferenceProductsTrigger, requireQuestionLocated, retryAttemptCount, runQuestionsWithRecovery, scrollEndConfirmed, toutiaoGenericConsultationPage, toutiaoHomeSearchBounds, toutiaoOcrViewMoreTarget, toutiaoSearchInput, toutiaoSearchResultBelongsToQuestion, toutiaoViewMoreBounds, waitForPackageHierarchy } = require('../../src/automation/runner')
 const { automationEntries, ENTRY_DEFINITIONS, entryHierarchyStartupTimeout, hierarchyBelongsToPackage, normalizeAutomationEntries } = require('../../src/automation/entry-catalog')
 const { DouyinSearchResultNotFoundError, ToutiaoAnswerCardNotFoundError, ToutiaoFullAnswerNotOpenedError, runDouyinSearchResultAttempts, runToutiaoAnswerCardAttempts, runToutiaoFullAnswerAttempts } = require('../../src/automation/search-recovery')
 const { createQuestionWorkflows } = require('../../src/automation/question-workflows')
@@ -571,33 +571,6 @@ test('定位不到刚发送的问题时拒绝截取旧回答', () => {
   assert.throws(() => requireQuestionLocated(false, '新问题'), /避免截取旧回答/)
 })
 
-test('新会话不依赖问题气泡结构，连续两次稳定画面无变化即确认到顶', async () => {
-  const settledFrames = ['中部1', '顶部', '顶部', '顶部']
-  let swipeCount = 0
-  const result = await scrollSingleQuestionSessionToTop({
-    capture: async () => ({ frame: '底部' }),
-    swipeUp: async () => ({ attempt: ++swipeCount }),
-    settle: async () => ({ frame: settledFrames.shift() }),
-    framesSimilar: async (first, second) => first === second,
-  })
-  assert.equal(result.confirmed, true)
-  assert.equal(result.swipes, 4)
-  assert.equal(result.capture.frame, '顶部')
-})
-
-test('新会话持续可滚动且超时时明确失败，不把未到顶当成成功', async () => {
-  let elapsed = 0
-  let frame = 0
-  await assert.rejects(() => scrollSingleQuestionSessionToTop({
-    capture: async () => ({ frame: frame++ }),
-    swipeUp: async () => { elapsed += 60; return {} },
-    settle: async () => ({ frame: frame++ }),
-    framesSimilar: async () => false,
-    timeout: 100,
-    now: () => elapsed,
-  }), /未能.*确认到达会话顶部/)
-})
-
 test('稳定帧夹心校验首轮只需要两次截图', async () => {
   let now = 0
   const events = []
@@ -852,13 +825,6 @@ test('scrcpy全屏活动升级为严格区域校验，其他不确定结果使�
   })
 })
 
-test('普通回答不可靠接缝会整题重采一次但不越过药品终止序列', () => {
-  assert.equal(shouldRetryFullReplyCapture({ fallbackReasons: ['局部内容发生变化'] }), true)
-  assert.equal(shouldRetryFullReplyCapture({ fallbackReasons: [] }), false)
-  assert.equal(shouldRetryFullReplyCapture({ fallbackReasons: ['局部内容发生变化'], allowFullRetry: false }), false)
-  assert.equal(shouldRetryFullReplyCapture({ fallbackReasons: ['局部内容发生变化'], products: { pages: 3 } }), false)
-})
-
 test('只有完整进入聊天截图区域的问题才视为已定位', () => {
   const bubble = (bounds, visible) => '<hierarchy><node class="android.view.View" bounds="[0,200][1080,1800]">'
     + `<node class="android.view.View" bounds="[0,160][1080,460]"><node class="android.view.View" bounds="[690,160][1030,460]"><node class="android.widget.TextView" text="这是一个很长的问题" content-desc="这是一个很长的问题" visible-to-user="${visible}" bounds="${bounds}" />`
@@ -949,11 +915,10 @@ test('兼容新版回答操作栏和免责声明文案', () => {
   assert.equal(replyTailOnScreen(xml, CHAT_BOUNDS), true)
 })
 
-test('设备明确到达滚动边界时立即结束，否则两次无进展兜底', () => {
+test('设备明确到达滚动边界或一次向下滚动无新内容时立即结束', () => {
   assert.equal(scrollEndConfirmed(false, 0), true)
-  assert.equal(scrollEndConfirmed(null, 1), false)
-  assert.equal(scrollEndConfirmed(null, 2), true)
-  assert.equal(scrollEndConfirmed(true, 1), false)
+  assert.equal(scrollEndConfirmed(null, 1), true)
+  assert.equal(scrollEndConfirmed(true, 1), true)
 })
 
 test('聊天区域会避开底部输入框，并拒绝横屏', () => {
