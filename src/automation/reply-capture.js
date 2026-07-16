@@ -15,12 +15,36 @@ const {
 } = require('./images')
 const {
   requireQuestionLocated,
+  scrollSingleQuestionSessionToTop,
   prepareEmbeddedEvidence,
   scrollEndConfirmed,
   captureStableSandwich,
 } = require('./capture-primitives')
 const { referenceProductsTrigger, miniAppReferenceProductsTrigger } = require('./reference-products')
 const { douyinMiniAppCaptureBounds } = require('./miniapp-locators')
+const { REPLY_STABLE_QUIET_MS } = require('./capture-stability')
+
+async function replyBoundaryFramesStable(first, second) {
+  const firstInfo = await imageInfo(first)
+  const secondInfo = await imageInfo(second)
+  if (firstInfo.width !== secondInfo.width || firstInfo.height !== secondInfo.height) return false
+  const width = firstInfo.width
+  const height = firstInfo.height
+  const top = Math.floor(height * 0.28)
+  const bottom = Math.max(top + 1, Math.floor(height * 0.96))
+  const bands = [
+    [Math.floor(width * 0.05), Math.floor(width * 0.43)],
+    [Math.floor(width * 0.57), Math.floor(width * 0.95)],
+  ]
+  const comparisons = await Promise.all(bands.map(async ([left, right]) => {
+    const [before, after] = await Promise.all([
+      cropImage(first, [left, top, right, bottom]),
+      cropImage(second, [left, top, right, bottom]),
+    ])
+    return imageRegionsStable(before, after)
+  }))
+  return comparisons.every(Boolean)
+}
 
 function createReplyCapture({
   source,
@@ -33,6 +57,8 @@ function createReplyCapture({
   screenshot,
   waitForFinalVisualQuiet,
   waitForVisualQuiet,
+  ocr,
+  setLastOcrDiagnostic,
 }) {
   async function scrollQuestionIntoView(question, bounds, maxSwipes = 25) {
     for (let index = 0; index < maxSwipes; index += 1) {
@@ -54,7 +80,19 @@ function createReplyCapture({
     let topNavigationMethod = 'question_bubble'
     let topConfirmationSwipes = 0
     if (singleQuestionSession) {
-      topNavigationMethod = 'new_session_initial_viewport'
+      const topBoundary = await scrollSingleQuestionSessionToTop({
+        capture: () => waitForStableReplyRegion(navigationBounds),
+        swipeUp: attempt => swipeChat(navigationBounds, 'up', 0.65, {
+          speed: 3_200,
+          settle: 80,
+          eventDrivenSettle: true,
+          xFraction: attempt % 2 ? 0.68 : 0.84,
+        }),
+        settle: scroll => waitForStableReplyRegion(navigationBounds, 8_000, { settleSince: scroll.activityMark }),
+        framesStable: replyBoundaryFramesStable,
+      })
+      topConfirmationSwipes = topBoundary.swipes
+      topNavigationMethod = 'new_session_scroll_boundary'
     } else {
       let questionLocated = questionVisible(initialXml, question, navigationBounds)
       if (!questionLocated) {
@@ -65,10 +103,13 @@ function createReplyCapture({
     }
     const topNavigationMs = Date.now() - topNavigationStarted
     log(singleQuestionSession
-      ? `capture: 新会话发送后即位于顶部，直接从当前视口开始采集（向上滚动=0，耗时=${topNavigationMs}ms）`
+      ? `capture: 已连续两次向上滚动无变化，确认到达本题顶部（向上滚动=${topConfirmationSwipes}，耗时=${topNavigationMs}ms）`
       : `capture: 当前已有回答已定位问题顶部（耗时=${topNavigationMs}ms）`)
     const evidence = await prepareEmbeddedEvidence({
-      source,
+      screenshot,
+      ocr,
+      windowSize,
+      setLastOcrDiagnostic,
       tap,
       delay: sleep,
       waitForStable: waitForStableReplyRegion,
@@ -79,7 +120,9 @@ function createReplyCapture({
       evidence.capture = await waitForStableReplyRegion(navigationBounds)
       log('capture: 引用资料展开后已重新确认问题气泡完整位于首屏')
     }
-    const { bounds, floatingControl } = replyCaptureBounds(evidence.capture.xml || await source(), size)
+    const topXml = await source()
+    evidence.capture.xml = topXml
+    const { bounds, floatingControl } = replyCaptureBounds(topXml, size)
     validateCaptureViewport(size, bounds)
     log(`capture: chat bounds=${bounds.join(',')}${floatingControl ? '（已在顶部稳定后避开固定向下按钮）' : ''}`)
     const contained = bounds[0] >= navigationBounds[0] && bounds[1] >= navigationBounds[1]
@@ -145,21 +188,26 @@ function createReplyCapture({
       if (!frames.length || !(await imageRegionsStable(frames.at(-1), frame))) { frames.push(frame); log(`capture: page ${frames.length}`) }
       if (await captureProductsIfVisible(xml)) break
       const before = frame
-      const scroll = await swipeChat(bounds, 'down', scrollFraction, { eventDrivenSettle: true })
+      const scroll = await swipeChat(bounds, 'down', scrollFraction, {
+        eventDrivenSettle: true,
+        xFraction: noProgress > 0 ? 0.68 : 0.84,
+      })
       const shift = scroll.distance
       let afterCapture = await waitForStableReplyRegion(bounds, 8_000, { settleSince: scroll.activityMark })
       let after = afterCapture.frame
-      if (await imageRegionsStable(before, after)) {
+      if (await replyBoundaryFramesStable(before, after)) {
         noProgress += 1
         const afterXml = afterCapture.xml || await source()
         capture = afterCapture
         frame = after
         if (await captureProductsIfVisible(afterXml)) break
         if (scrollEndConfirmed(scroll.canScrollMore, noProgress)) {
-          log(`capture: scroll ended（${scroll.canScrollMore === false ? '设备确认已到底' : '向下滚动后内容未继续变化'}）`)
+          log('capture: 已连续两次向下滚动无变化，确认到达回答底部')
           break
         }
+        log('capture: 第一次向下滚动无变化，切换触点再次确认底部')
       } else {
+        noProgress = 0
         let afterXml = afterCapture.xml || await source()
         const frameHeight = (await imageInfo(before)).height
         let measuredShift = estimateVerticalScrollShift(xml, afterXml, bounds)
@@ -198,12 +246,10 @@ function createReplyCapture({
           frames.push(after)
           transitions.push(transition)
           log(`capture: page ${frames.length}`)
-          noProgress = 0
-        } else noProgress += 1
+        }
         frame = after
         capture = afterCapture
         if (await captureProductsIfVisible(afterXml)) break
-        if (scroll.canScrollMore === false) { log('capture: reached device-reported scroll boundary'); break }
       }
     }
     if (!productDetected) log('capture: 回答滚动过程中未发现参考/推荐药品入口，无需完成后重复扫描')
@@ -428,4 +474,4 @@ function createReplyCapture({
   }
 }
 
-module.exports = { createReplyCapture }
+module.exports = { createReplyCapture, replyBoundaryFramesStable }

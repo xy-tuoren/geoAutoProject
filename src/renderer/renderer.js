@@ -8,8 +8,44 @@ const retryFailed = $('#retry-failed')
 const stop = $('#stop')
 const entryList = $('#entry-list')
 const updateAction = $('#update-action')
+const { retryableBatchDirectory } = window.retryState
+const { initializeEntryProgress, applyEntryProgress } = window.entryProgress
 let updateState = null
 let retryBatchDirectory = null
+let entryProgressState = initializeEntryProgress()
+
+function renderEntryProgress() {
+  const container = $('#entry-progress')
+  const totalLabel = $('#entry-progress-total')
+  if (!entryProgressState.entries.length) {
+    totalLabel.textContent = '尚未开始'
+    const empty = document.createElement('p')
+    empty.className = 'entry-progress-empty'
+    empty.textContent = '开始任务后显示各入口成功与失败数量'
+    container.replaceChildren(empty)
+    return
+  }
+  const succeeded = entryProgressState.entries.reduce((sum, entry) => sum + entry.succeeded, 0)
+  const failed = entryProgressState.entries.reduce((sum, entry) => sum + entry.failed, 0)
+  totalLabel.textContent = `成功 ${succeeded} · 失败 ${failed}`
+  const rows = entryProgressState.entries.map(entry => {
+    const row = document.createElement('article')
+    row.className = 'entry-progress-item'
+    const label = document.createElement('strong')
+    label.textContent = entry.label
+    const stats = document.createElement('div')
+    stats.className = 'entry-progress-stats'
+    stats.innerHTML = `<span class="success">成功 ${entry.succeeded}</span><span class="failure">失败 ${entry.failed}</span>`
+    row.append(label, stats)
+    return row
+  })
+  container.replaceChildren(...rows)
+}
+
+function updateRetryFailedAvailability(result = {}) {
+  retryBatchDirectory = retryableBatchDirectory(result)
+  retryFailed.disabled = !retryBatchDirectory
+}
 
 function renderUpdateState(next) {
   updateState = next
@@ -216,6 +252,7 @@ start.addEventListener('click', async () => {
       newSession: $('#new-session').checked,
       maxLongImageHeight,
     })
+    updateRetryFailedAvailability()
     start.disabled = true; stop.disabled = false; status.textContent = '任务正在执行…'
   } catch (error) { status.textContent = error.message || '无法启动任务' }
 })
@@ -241,11 +278,18 @@ retryFailed.addEventListener('click', async () => {
 })
 stop.addEventListener('click', () => window.automation.stop())
 window.automation.onLog(appendLog)
+window.automation.onProgress(value => {
+  entryProgressState = applyEntryProgress(entryProgressState, value)
+  renderEntryProgress()
+})
 window.automation.onFinished(({ code, summary, retried }) => {
   start.disabled = false
   stop.disabled = true
-  retryBatchDirectory = summary?.failed ? summary.batch_directory : null
-  retryFailed.disabled = !retryBatchDirectory
+  updateRetryFailedAvailability({ code, summary })
+  if (summary?.entries && summary?.results) {
+    entryProgressState = initializeEntryProgress({ entries: summary.entries, question_count: summary.question_count, results: summary.results })
+    renderEntryProgress()
+  }
   if (code !== 0) status.textContent = `${retried ? '重试' : '任务'}结束，退出码 ${code}`
   else if (summary?.failed) status.textContent = `${retried ? '重试完成' : '执行完成'}：成功 ${summary.completed}，失败 ${summary.failed}；可点击“重试失败项”`
   else status.textContent = `${retried ? '失败项已全部重试成功' : '执行完成'}：成功 ${summary?.completed ?? 0}`
@@ -256,3 +300,4 @@ window.automation.defaultOutputDirectory().then(directory => { $('#output-dir').
 window.automation.getUpdateState().then(renderUpdateState)
 refreshEntries()
 refreshDevices()
+renderEntryProgress()

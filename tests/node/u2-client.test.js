@@ -1,5 +1,7 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
+const fs = require('node:fs/promises')
+const os = require('node:os')
 const path = require('node:path')
 const { U2Client, OCR_TIMEOUT_MS, SEND_KEYS_TIMEOUT_MS, developmentCommand, packagedCommand, utf8ProcessEnvironment } = require('../../src/automation/u2-client')
 
@@ -13,6 +15,7 @@ function fixtureClient(environment = {}) {
     command: { command: process.execPath, args: [fixture], cwd: root },
     requestTimeout: 1_000,
     startTimeout: 1_000,
+    readRetryDelay: 0,
     log: () => {},
     environment,
   })
@@ -109,6 +112,35 @@ test('uiautomator2客户端使用长驻进程获取层级', async () => {
     assert.deepEqual(await client.foregroundWindow(), { package: 'fixture.package', activity: 'fixture.package.MiniAppHostActivity0' })
   } finally {
     await client.stop()
+  }
+})
+
+test('只读层级连续遇到瞬时服务断开时有限重启并恢复', async () => {
+  const temporaryDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'u2-read-retry-'))
+  const stateFile = path.join(temporaryDirectory, 'attempts.txt')
+  const names = [
+    'U2_FIXTURE_COUNTED_FAIL_METHOD',
+    'U2_FIXTURE_COUNTED_FAIL_STATE_FILE',
+    'U2_FIXTURE_COUNTED_FAIL_LIMIT',
+    'U2_FIXTURE_COUNTED_FAIL_MESSAGE',
+  ]
+  const previous = Object.fromEntries(names.map(name => [name, process.env[name]]))
+  process.env.U2_FIXTURE_COUNTED_FAIL_METHOD = 'dump_hierarchy'
+  process.env.U2_FIXTURE_COUNTED_FAIL_STATE_FILE = stateFile
+  process.env.U2_FIXTURE_COUNTED_FAIL_LIMIT = '2'
+  process.env.U2_FIXTURE_COUNTED_FAIL_MESSAGE = 'Remote end closed connection without response'
+  const client = fixtureClient()
+  try {
+    await client.start('SERIAL')
+    assert.match(await client.dumpHierarchy(), /fixture/)
+    assert.equal(await fs.readFile(stateFile, 'utf8'), '2')
+  } finally {
+    await client.stop()
+    await fs.rm(temporaryDirectory, { recursive: true, force: true })
+    for (const name of names) {
+      if (previous[name] === undefined) delete process.env[name]
+      else process.env[name] = previous[name]
+    }
   }
 })
 

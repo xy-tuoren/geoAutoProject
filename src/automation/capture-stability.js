@@ -125,12 +125,13 @@ function createCaptureStability({
     settle = 60,
     fallbackDuration = 900,
     eventDrivenSettle = false,
+    xFraction = 0.84,
   } = {}) {
     const [left, top, right, bottom] = bounds
     const height = bottom - top
     const { distance, percent } = chatSwipePlan(bounds, fraction, { maxFraction, speed })
     const canScrollMore = null
-    const x = left + (right - left) * 0.84
+    const x = left + (right - left) * Math.max(0.15, Math.min(0.9, xFraction))
     const center = Math.floor((top + bottom) / 2)
     const duration = Math.max(120, Math.round(distance / speed * 1_000))
     const activityMark = eventDrivenSettle && observer.active ? observer.mark() : null

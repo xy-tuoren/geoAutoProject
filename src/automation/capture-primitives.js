@@ -1,6 +1,7 @@
 const { sleep } = require('./utils')
 const { evidencePanelBounds, evidenceMinimumHeight } = require('./hierarchy')
-const { composeLongImages } = require('./images')
+const { imageRegionsStable, composeLongImages } = require('./images')
+const { findOcrText, mapPhysicalBoundsToLogical } = require('./ocr')
 
 const DEFAULT_MAX_LONG_IMAGE_HEIGHT = 12_000
 
@@ -41,35 +42,148 @@ function chatSwipePlan(bounds, fraction = 0.6, { maxFraction = 0.7, speed = 1400
   return { distance, percent: distance / height, speed, durationMs: distance / speed * 1_000 }
 }
 
-function scrollEndConfirmed(canScrollMore, unchangedCount) {
-  return canScrollMore === false || unchangedCount >= 1
+function scrollEndConfirmed(_canScrollMore, unchangedCount) {
+  return unchangedCount >= 2
 }
 
 function requireQuestionLocated(found, question) {
   if (!found) throw new Error(`未能在当前会话中定位刚发送的问题“${question}”，为避免截取旧回答已停止本题`)
 }
 
+async function scrollSingleQuestionSessionToTop({
+  capture,
+  swipeUp,
+  settle,
+  framesStable = imageRegionsStable,
+  timeout = 120_000,
+  now = Date.now,
+}) {
+  const deadline = now() + timeout
+  let current = await capture()
+  let unchangedCount = 0
+  let swipes = 0
+  while (now() < deadline) {
+    const scroll = await swipeUp(swipes)
+    const next = await settle(scroll)
+    swipes += 1
+    if (await framesStable(current.frame, next.frame)) unchangedCount += 1
+    else unchangedCount = 0
+    current = next
+    if (unchangedCount >= 2) return { capture: current, swipes, confirmed: true }
+  }
+  throw new Error(`新会话已创建，但${Math.round(timeout / 1000)}秒内未能通过连续两次无变化确认到达会话顶部。`)
+}
+
 async function buildReplyImages(frames, { transitions = [], maxHeight = DEFAULT_MAX_LONG_IMAGE_HEIGHT } = {}) {
   return composeLongImages(frames, { transitions, maxHeight, separatorHeight: 24 })
 }
 
-async function prepareEmbeddedEvidence({ source, tap, delay, waitForStable, log }, bounds) {
+function evidenceSummaryOcrTarget(recognition, logicalSize, chatBounds) {
+  const maximumY = chatBounds[1] + (chatBounds[3] - chatBounds[1]) * 0.55
+  return findOcrText(
+    recognition,
+    item => /^根据.{1,6}篇资料为(?:你|您)总结$/.test(item.normalizedText),
+    { minConfidence: 0.8 },
+  ).map(item => {
+    const logicalBounds = mapPhysicalBoundsToLogical(item.bounds, recognition.image, logicalSize)
+    return { ...item, physicalBounds: item.bounds, logicalBounds }
+  }).filter(item => {
+    const [left, top, right, bottom] = item.logicalBounds
+    const centerX = (left + right) / 2
+    const centerY = (top + bottom) / 2
+    return centerX >= chatBounds[0] && centerX <= chatBounds[2]
+      && centerY >= chatBounds[1] && centerY <= maximumY
+  }).sort((first, second) => first.logicalBounds[1] - second.logicalBounds[1] || second.confidence - first.confidence)[0] || null
+}
+
+function evidenceSummaryExpandedByOcr(recognition, target) {
+  if (!target) return false
+  const maximumY = Math.min(
+    recognition.image.height,
+    target.physicalBounds[3] + recognition.image.height * 0.25,
+  )
+  return findOcrText(recognition, /^医学文献$/, { minConfidence: 0.8 })
+    .some(item => item.bounds[1] >= target.physicalBounds[3] && item.bounds[1] <= maximumY)
+}
+
+function evidenceSummaryTextCenter(target) {
+  const [left, top, right, bottom] = target.logicalBounds
+  return [(left + right) / 2, (top + bottom) / 2]
+}
+
+async function prepareEmbeddedEvidence({
+  screenshot,
+  ocr,
+  windowSize,
+  setLastOcrDiagnostic = () => {},
+  tap,
+  delay,
+  waitForStable,
+  log,
+}, bounds) {
   const minimum = evidenceMinimumHeight(bounds)
-  const xml = await source()
-  const panel = evidencePanelBounds(xml, minimum)
-  if (!panel) return { found: false, expanded: false, capture: await waitForStable(bounds) }
-  const viewportHeight = bounds[3] - bounds[1]
-  const collapsed = panel[3] - panel[1] <= viewportHeight * 0.16
-  if (collapsed) {
-    log('capture: 在回答截图前展开引用资料，使其直接进入回答长图')
-    await tap((panel[0] + panel[2]) / 2, (panel[1] + panel[3]) / 2)
-    await delay(800)
+  const [frame, logicalSize] = await Promise.all([screenshot(), windowSize()])
+  const recognition = await ocr.recognize(frame, { minConfidence: 0.5 })
+  const target = evidenceSummaryOcrTarget(recognition, logicalSize, bounds)
+  const alreadyExpanded = evidenceSummaryExpandedByOcr(recognition, target)
+  const diagnostic = {
+    created_at: new Date().toISOString(),
+    purpose: 'xiaohe_embedded_evidence',
+    matcher: {
+      pattern: '^根据.{1,6}篇资料为(?:你|您)总结$',
+      minimum_confidence: 0.8,
+      top_chat_fraction: 0.55,
+    },
+    logical_size: logicalSize,
+    recognition,
+    target: target ? { ...target, alreadyExpanded, textCenter: evidenceSummaryTextCenter(target) } : null,
+    confirmations: [],
   }
-  const capture = await waitForStable(bounds)
-  const finalPanel = evidencePanelBounds(capture.xml || '', minimum)
-  const expanded = Boolean(finalPanel && finalPanel[3] - finalPanel[1] > viewportHeight * 0.16)
-  if (expanded) log('capture: 引用资料已展开并合并到回答截图')
-  else if (collapsed) log('capture: 引用资料点击后未确认展开，保留当前状态继续回答截图')
+  setLastOcrDiagnostic(diagnostic)
+  log(target
+    ? `ocr: purpose=xiaohe_embedded_evidence outcome=matched engine=${recognition.engine} elapsed=${Math.round(recognition.elapsedMs)}ms confidence=${target.confidence.toFixed(3)} expanded=${alreadyExpanded} physical_bounds=${target.physicalBounds.join(',')} logical_bounds=${target.logicalBounds.join(',')}`
+    : `ocr: purpose=xiaohe_embedded_evidence outcome=not_found engine=${recognition.engine} elapsed=${Math.round(recognition.elapsedMs)}ms lines=${recognition.results.length}`)
+  if (!target) return { found: false, expanded: false, capture: await waitForStable(bounds) }
+  if (alreadyExpanded) {
+    log('capture: OCR确认引用资料已经展开，直接纳入回答第一帧')
+    return { found: true, expanded: true, capture: await waitForStable(bounds) }
+  }
+  const viewportHeight = bounds[3] - bounds[1]
+  const clickTitle = async (currentTarget, attempt) => {
+    const point = evidenceSummaryTextCenter(currentTarget)
+    log(`capture: OCR识别到“${currentTarget.text}”，点击标题文字展开引用资料（${Math.round(point[0])},${Math.round(point[1])}，第${attempt}次）`)
+    await tap(point[0], point[1])
+    await delay(800)
+    return waitForStable(bounds)
+  }
+  const hierarchyExpanded = capture => {
+    const panel = evidencePanelBounds(capture.xml || '', minimum)
+    return Boolean(panel && panel[3] - panel[1] > viewportHeight * 0.16)
+  }
+  const confirmByOcr = async attempt => {
+    const confirmationFrame = await screenshot()
+    const confirmation = await ocr.recognize(confirmationFrame, { minConfidence: 0.5 })
+    const confirmationTarget = evidenceSummaryOcrTarget(confirmation, logicalSize, bounds)
+    const confirmationExpanded = evidenceSummaryExpandedByOcr(confirmation, confirmationTarget)
+    diagnostic.confirmations.push({ attempt, recognition: confirmation, target: confirmationTarget, expanded: confirmationExpanded })
+    log(`ocr: purpose=xiaohe_embedded_evidence_confirmation attempt=${attempt} outcome=${confirmationExpanded ? 'expanded' : (confirmationTarget ? 'collapsed' : 'not_found')} engine=${confirmation.engine} elapsed=${Math.round(confirmation.elapsedMs)}ms`)
+    return { target: confirmationTarget, expanded: confirmationExpanded }
+  }
+
+  let capture = await clickTitle(target, 1)
+  let expanded = hierarchyExpanded(capture)
+  if (!expanded) {
+    const confirmation = await confirmByOcr(1)
+    expanded = confirmation.expanded
+    if (!expanded && confirmation.target) {
+      log('capture: 第一次点击后OCR仍确认引用资料处于折叠状态，安全重试一次标题文字点击')
+      capture = await clickTitle(confirmation.target, 2)
+      expanded = hierarchyExpanded(capture)
+      if (!expanded) expanded = (await confirmByOcr(2)).expanded
+    }
+  }
+  if (!expanded) throw new Error('OCR已识别并点击“根据…篇资料为你总结”，但未确认引用资料展开，已停止后续截图。')
+  log('capture: 引用资料已展开并合并到回答截图')
   return { found: true, expanded, capture }
 }
 
@@ -225,7 +339,11 @@ module.exports = {
   chatSwipePlan,
   scrollEndConfirmed,
   requireQuestionLocated,
+  scrollSingleQuestionSessionToTop,
   buildReplyImages,
+  evidenceSummaryOcrTarget,
+  evidenceSummaryExpandedByOcr,
+  evidenceSummaryTextCenter,
   prepareEmbeddedEvidence,
   fillQuestionInput,
   captureStableSandwich,

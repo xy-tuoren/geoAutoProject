@@ -10,7 +10,7 @@
   "main": "src/main/index.js",
   "scripts": {
     "start": "electron .",
-    "check": "node --check src/main/index.js && node --check src/main/preload.js && node --check src/main/updater.js && node --check src/renderer/renderer.js && node --check src/questions.js && node --check src/runtime-paths.js && node --check src/cli.js && node --check src/automation/*.js && node --check scripts/*.js",
+    "check": "node --check src/main/index.js && node --check src/main/preload.js && node --check src/main/updater.js && node --check src/renderer/retry-state.js && node --check src/renderer/entry-progress.js && node --check src/renderer/renderer.js && node --check src/questions.js && node --check src/runtime-paths.js && node --check src/cli.js && node --check src/automation/*.js && node --check scripts/*.js",
     "test": "node --test tests/node/**/*.test.js",
     "run:android": "node src/cli.js",
     "clean": "node scripts/clean-generated.js",

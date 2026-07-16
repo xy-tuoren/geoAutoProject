@@ -18,6 +18,7 @@ contextBridge.exposeInMainWorld('automation', {
   downloadUpdate: () => ipcRenderer.invoke('update:download'),
   installUpdate: () => ipcRenderer.invoke('update:install'),
   onLog: callback => ipcRenderer.on('automation:log', (_event, text) => callback(text)),
+  onProgress: callback => ipcRenderer.on('automation:progress', (_event, value) => callback(value)),
   onFinished: callback => ipcRenderer.on('automation:finished', (_event, result) => callback(result)),
   onUpdateState: callback => ipcRenderer.on('update:state', (_event, value) => callback(value)),
 })

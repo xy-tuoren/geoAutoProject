@@ -10,12 +10,30 @@ const { stackFramesInGroups, verifyFrameOverlap, verifyProductGridOverlap, image
 const { createBatchDirectory, questionArtifactDirectory, batchArtifactDirectories, entryArtifactDirectories, questionArtifactDirectories } = require('../../src/automation/utils')
 const { EventLog, classifyAutomationLog } = require('../../src/automation/event-log')
 const { loadQuestionFile } = require('../../src/questions')
-const { adbConnectionLost, captureFailureDiagnostics, captureStableObserved, captureStableSandwich, calibratedProductFallbackOverlap, chatSwipePlan, conservativeFallbackOverlap, buildReplyImages, CancelledError, DOUYIN_MINIAPP_ENTRY_FILENAME, DOUYIN_SEARCH_SUMMARY_FILENAME, TOUTIAO_SEARCH_SUMMARY_FILENAME, douyinGenericAiAnswerBounds, douyinMiniAppCaptureBounds, douyinMiniAppEntryBounds, douyinOcrViewFullTarget, douyinSearchInput, douyinSearchResultTarget, douyinSearchResultsBounds, douyinViewFullBounds, failedRetryItems, fillQuestionInput, historyOnboardingVisible, maxLongImageHeight, miniAppReferenceProductsTrigger, observerRegionFallbackOptions, prepareEmbeddedEvidence, referenceProductDrawerBounds, referenceProductsCaptureComplete, referenceProductSheetExpanded, referenceProductsTrigger, referenceProductViewportReadiness, refreshedReferenceProductsTrigger, requireQuestionLocated, retryAttemptCount, runQuestionsWithRecovery, scrollEndConfirmed, toutiaoGenericConsultationPage, toutiaoHomeSearchBounds, toutiaoOcrViewMoreTarget, toutiaoSearchInput, toutiaoSearchResultBelongsToQuestion, toutiaoViewMoreBounds, waitForPackageHierarchy } = require('../../src/automation/runner')
+const { adbConnectionLost, captureFailureDiagnostics, captureStableObserved, captureStableSandwich, calibratedProductFallbackOverlap, chatSwipePlan, conservativeFallbackOverlap, buildReplyImages, CancelledError, DOUYIN_MINIAPP_ENTRY_FILENAME, DOUYIN_SEARCH_SUMMARY_FILENAME, TOUTIAO_SEARCH_SUMMARY_FILENAME, douyinGenericAiAnswerBounds, douyinMiniAppCaptureBounds, douyinMiniAppEntryBounds, douyinOcrViewFullTarget, douyinSearchInput, douyinSearchResultTarget, douyinSearchResultsBounds, douyinViewFullBounds, failedRetryItems, fillQuestionInput, historyOnboardingVisible, maxLongImageHeight, miniAppReferenceProductsTrigger, observerRegionFallbackOptions, prepareEmbeddedEvidence, referenceProductDrawerBounds, referenceProductsCaptureComplete, referenceProductSheetExpanded, referenceProductsTrigger, referenceProductViewportReadiness, refreshedReferenceProductsTrigger, requireQuestionLocated, retryAttemptCount, runQuestionsWithRecovery, scrollEndConfirmed, scrollSingleQuestionSessionToTop, toutiaoGenericConsultationPage, toutiaoHomeSearchBounds, toutiaoOcrViewMoreTarget, toutiaoSearchInput, toutiaoSearchResultBelongsToQuestion, toutiaoViewMoreBounds, waitForPackageHierarchy } = require('../../src/automation/runner')
 const { automationEntries, ENTRY_DEFINITIONS, entryHierarchyStartupTimeout, hierarchyBelongsToPackage, normalizeAutomationEntries } = require('../../src/automation/entry-catalog')
 const { DouyinSearchResultNotFoundError, ToutiaoAnswerCardNotFoundError, ToutiaoFullAnswerNotOpenedError, runDouyinSearchResultAttempts, runToutiaoAnswerCardAttempts, runToutiaoFullAnswerAttempts } = require('../../src/automation/search-recovery')
 const { createQuestionWorkflows } = require('../../src/automation/question-workflows')
+const { createReplyCapture } = require('../../src/automation/reply-capture')
 
 const CHAT_BOUNDS = [0, 200, 1080, 1800]
+
+test('抖音全文截图进入共享的回答稳定等待，不引用未定义常量', async () => {
+  let quietOptions = null
+  const capture = createReplyCapture({
+    log: () => {},
+    waitForFinalVisualQuiet: async options => {
+      quietOptions = options
+      throw new Error('quiet-probe')
+    },
+  })
+
+  await assert.rejects(
+    capture.captureDouyinFullAnswerFrames('<hierarchy />', CHAT_BOUNDS),
+    /quiet-probe/,
+  )
+  assert.deepEqual(quietOptions, { quietMs: 3_000, timeout: 25_000 })
+})
 
 test('只允许目标App层级进入UI操作流程', () => {
   const target = '<hierarchy><node package="com.aurora.xiaohe.aidoctor" class="android.widget.EditText" /></hierarchy>'
@@ -134,6 +152,12 @@ test('通用失败现场同时保存物理截图、逻辑层级、设备状态�
     deviceState: async () => ({ wm_size: { status: 'captured', value: 'Physical size: 1080x2400' } }),
     observerSnapshot: () => ({ active: true, frames: 42 }),
     ocrDiagnostic,
+    operationTelemetry: {
+      current_stage: '正在打开全文',
+      failure_analysis: { failed_operation: { operation: 'ui.click', duration_ms: 812, outcome: 'failed' } },
+      recent_operations: [{ operation: 'ui.dump_hierarchy', duration_ms: 620, outcome: 'completed' }],
+      optimization_candidates: [{ operation: 'ui.dump_hierarchy', total_ms: 1240 }],
+    },
   })
 
   const manifest = JSON.parse(await fs.readFile(result.manifest, 'utf8'))
@@ -146,6 +170,8 @@ test('通用失败现场同时保存物理截图、逻辑层级、设备状态�
   assert.equal(manifest.hierarchy.coordinate_space, 'uiautomator2_logical_pixels')
   assert.equal(manifest.current_app.value.package, 'com.ss.android.article.news')
   assert.equal(manifest.scrcpy_observer.value.frames, 42)
+  assert.equal(manifest.operation_telemetry.current_stage, '正在打开全文')
+  assert.equal(manifest.operation_telemetry.failure_analysis.failed_operation.operation, 'ui.click')
   assert.deepEqual(JSON.parse(await fs.readFile(result.ocr, 'utf8')), ocrDiagnostic)
   await Promise.all([result.screenshot, result.hierarchy, result.ocr].map(file => fs.access(file)))
 })
@@ -571,6 +597,21 @@ test('定位不到刚发送的问题时拒绝截取旧回答', () => {
   assert.throws(() => requireQuestionLocated(false, '新问题'), /避免截取旧回答/)
 })
 
+test('新会话不判断问题气泡，连续两次向上无变化才确认顶部', async () => {
+  const frames = ['中部', '顶部', '顶部', '顶部']
+  const touchpoints = []
+  const result = await scrollSingleQuestionSessionToTop({
+    capture: async () => ({ frame: '底部' }),
+    swipeUp: async attempt => { touchpoints.push(attempt % 2 ? 0.68 : 0.84); return {} },
+    settle: async () => ({ frame: frames.shift() }),
+    framesStable: async (before, after) => before === after,
+  })
+
+  assert.equal(result.confirmed, true)
+  assert.equal(result.swipes, 4)
+  assert.deepEqual(touchpoints, [0.84, 0.68, 0.84, 0.68])
+})
+
 test('稳定帧夹心校验首轮只需要两次截图', async () => {
   let now = 0
   const events = []
@@ -883,23 +924,107 @@ test('新 Android 层级格式可识别引用资料卡和推荐药品入口', ()
   assert.deepEqual(visibleLabelBounds(xml, '推荐药品'), [60, 1100, 300, 1180])
 })
 
-test('引用资料在回答第一帧前展开，并复用展开后的稳定帧', async () => {
-  const collapsed = '<hierarchy><androidx.compose.ui.viewinterop.ViewFactoryHolder class="androidx.compose.ui.viewinterop.ViewFactoryHolder" displayed="true" bounds="[40,700][1040,820]" /></hierarchy>'
-  const expanded = '<hierarchy><androidx.compose.ui.viewinterop.ViewFactoryHolder class="androidx.compose.ui.viewinterop.ViewFactoryHolder" displayed="true" bounds="[40,700][1040,1200]" /></hierarchy>'
+test('到顶后通过OCR识别引用资料标题并按物理与逻辑尺寸映射点击', async () => {
+  const expanded = '<hierarchy><androidx.compose.ui.viewinterop.ViewFactoryHolder class="androidx.compose.ui.viewinterop.ViewFactoryHolder" displayed="true" bounds="[0,466][720,900]" /></hierarchy>'
   const events = []
   const capture = { frame: Buffer.from('expanded-frame'), xml: expanded, stable: true }
   const result = await prepareEmbeddedEvidence({
-    source: async () => { events.push('source'); return collapsed },
+    screenshot: async () => { events.push('screenshot'); return Buffer.from('raw-screen') },
+    ocr: {
+      recognize: async () => {
+        events.push('ocr')
+        return {
+          engine: 'rapidocr',
+          elapsedMs: 420,
+          image: { width: 1080, height: 2400 },
+          results: [{
+            text: '根据 3 篇资料为你总结',
+            normalizedText: '根据3篇资料为你总结',
+            confidence: 0.998,
+            bounds: [90, 600, 600, 660],
+          }],
+        }
+      },
+    },
+    windowSize: async () => ({ width: 720, height: 1600 }),
+    setLastOcrDiagnostic: value => { events.push(['diagnostic', value.target.logicalBounds]) },
+    tap: async (x, y) => { events.push(['tap', x, y]) },
+    delay: async () => { events.push('delay') },
+    waitForStable: async () => { events.push('stable'); return capture },
+    log: () => {},
+  }, [0, 200, 720, 1400])
+
+  assert.deepEqual(events, [
+    'screenshot',
+    'ocr',
+    ['diagnostic', [60, 400, 400, 440]],
+    ['tap', 230, 420],
+    'delay',
+    'stable',
+  ])
+  assert.equal(result.found, true)
+  assert.equal(result.expanded, true)
+  assert.equal(result.capture, capture)
+})
+
+test('OCR发现医学文献列表时确认资料已经展开且不再点击', async () => {
+  const events = []
+  const capture = { frame: Buffer.from('expanded-frame'), xml: '<hierarchy />', stable: true }
+  const result = await prepareEmbeddedEvidence({
+    screenshot: async () => Buffer.from('raw-screen'),
+    ocr: {
+      recognize: async () => ({
+        engine: 'rapidocr',
+        elapsedMs: 380,
+        image: { width: 1080, height: 2400 },
+        results: [
+          { text: '根据3篇资料为你总结', normalizedText: '根据3篇资料为你总结', confidence: 0.999, bounds: [60, 700, 540, 750] },
+          { text: '医学文献', normalizedText: '医学文献', confidence: 0.999, bounds: [850, 820, 1000, 870] },
+        ],
+      }),
+    },
+    windowSize: async () => ({ width: 1080, height: 2400 }),
     tap: async () => { events.push('tap') },
     delay: async () => { events.push('delay') },
     waitForStable: async () => { events.push('stable'); return capture },
     log: () => {},
   }, CHAT_BOUNDS)
 
-  assert.deepEqual(events, ['source', 'tap', 'delay', 'stable'])
+  assert.deepEqual(events, ['stable'])
   assert.equal(result.found, true)
   assert.equal(result.expanded, true)
   assert.equal(result.capture, capture)
+})
+
+test('首次文字点击未展开时仅在OCR确认仍折叠后安全重试一次', async () => {
+  const collapsedRecognition = {
+    engine: 'rapidocr',
+    elapsedMs: 300,
+    image: { width: 1080, height: 2400 },
+    results: [{
+      text: '根据3篇资料为你总结', normalizedText: '根据3篇资料为你总结', confidence: 0.999, bounds: [60, 700, 540, 750],
+    }],
+  }
+  const collapsedXml = '<hierarchy><androidx.compose.ui.viewinterop.ViewFactoryHolder class="androidx.compose.ui.viewinterop.ViewFactoryHolder" displayed="true" bounds="[0,700][1080,850]" /></hierarchy>'
+  const expandedXml = '<hierarchy><androidx.compose.ui.viewinterop.ViewFactoryHolder class="androidx.compose.ui.viewinterop.ViewFactoryHolder" displayed="true" bounds="[0,700][1080,1300]" /></hierarchy>'
+  const taps = []
+  let stableReads = 0
+  const result = await prepareEmbeddedEvidence({
+    screenshot: async () => Buffer.from('raw-screen'),
+    ocr: { recognize: async () => collapsedRecognition },
+    windowSize: async () => ({ width: 1080, height: 2400 }),
+    tap: async (x, y) => { taps.push([x, y]) },
+    delay: async () => {},
+    waitForStable: async () => ({
+      frame: Buffer.from('frame'),
+      xml: stableReads++ === 0 ? collapsedXml : expandedXml,
+      stable: true,
+    }),
+    log: () => {},
+  }, CHAT_BOUNDS)
+
+  assert.deepEqual(taps, [[300, 725], [300, 725]])
+  assert.equal(result.expanded, true)
 })
 
 test('仅在底部同时可见复制和免责声明时结束回答截图', () => {
@@ -915,10 +1040,11 @@ test('兼容新版回答操作栏和免责声明文案', () => {
   assert.equal(replyTailOnScreen(xml, CHAT_BOUNDS), true)
 })
 
-test('设备明确到达滚动边界或一次向下滚动无新内容时立即结束', () => {
-  assert.equal(scrollEndConfirmed(false, 0), true)
-  assert.equal(scrollEndConfirmed(null, 1), true)
-  assert.equal(scrollEndConfirmed(true, 1), true)
+test('向下滚动必须连续两次无变化才确认底部', () => {
+  assert.equal(scrollEndConfirmed(false, 1), false)
+  assert.equal(scrollEndConfirmed(null, 1), false)
+  assert.equal(scrollEndConfirmed(true, 1), false)
+  assert.equal(scrollEndConfirmed(null, 2), true)
 })
 
 test('聊天区域会避开底部输入框，并拒绝横屏', () => {
@@ -1422,6 +1548,7 @@ test('普通资料卡（Compose 面板但无横向药品列表）不会被误判
 
 test('仅为 ADB 短暂断连启用安装重试', () => {
   assert.equal(adbConnectionLost(new Error('adb: device offline')), true)
+  assert.equal(adbConnectionLost(new Error('Remote end closed connection without response')), false)
   assert.equal(adbConnectionLost(new Error('INSTALL_FAILED_UPDATE_INCOMPATIBLE')), false)
 })
 

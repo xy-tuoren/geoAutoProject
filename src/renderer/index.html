@@ -107,10 +107,21 @@
               <button id="clear-log" class="text-button" type="button">清空</button>
             </div>
           </div>
+          <section class="entry-progress-section" aria-labelledby="entry-progress-title">
+            <div class="entry-progress-heading">
+              <h3 id="entry-progress-title">入口执行情况</h3>
+              <span id="entry-progress-total">尚未开始</span>
+            </div>
+            <div id="entry-progress" class="entry-progress-list">
+              <p class="entry-progress-empty">开始任务后显示各入口成功与失败数量</p>
+            </div>
+          </section>
           <pre id="log" aria-live="polite"></pre>
         </section>
       </section>
     </main>
+    <script src="./retry-state.js"></script>
+    <script src="./entry-progress.js"></script>
     <script src="./renderer.js"></script>
   </body>
 </html>

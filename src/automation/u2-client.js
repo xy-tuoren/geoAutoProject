@@ -1,5 +1,6 @@
 const { spawn } = require("node:child_process");
 const readline = require("node:readline");
+const { sleep } = require("./utils");
 const {
   bundledU2Executable,
   pythonProjectDirectory
@@ -26,6 +27,14 @@ const SEND_KEYS_TIMEOUT_MS = 45_000;
 // A frozen app may spend several seconds loading ONNX Runtime and models on
 // the first OCR request. Later calls reuse the same engine and are much faster.
 const OCR_TIMEOUT_MS = 60_000;
+const READ_RETRY_DELAY_MS = 500;
+
+function transientReadFailure(error) {
+  if (error instanceof U2RequestTimeoutError) return true;
+  return /Remote end closed connection|ECONNRESET|ECONNREFUSED|broken pipe|connection reset|请求超时|进程已退出|尚未启动|已停止/i.test(
+    String(error?.message || error)
+  );
+}
 
 function developmentCommand(root) {
   return {
@@ -207,18 +216,25 @@ class U2Client {
   }
 
   async request(method, params = {}, { timeout, retryRead = false } = {}) {
-    try {
-      return await this.#requestOnce(method, params, timeout);
-    } catch (error) {
-      if (!retryRead) {
-        await this.restart().catch(() => {});
-        throw error;
+    let readRetries = 0;
+    while (true) {
+      try {
+        return await this.#requestOnce(method, params, timeout);
+      } catch (error) {
+        if (!retryRead) {
+          await this.restart().catch(() => {});
+          throw error;
+        }
+        const canRetry = readRetries === 0
+          || (readRetries < 2 && transientReadFailure(error));
+        if (!canRetry) throw error;
+        readRetries += 1;
+        this.log(
+          `${method}失败，重启sidecar后仅重试本次只读请求（${readRetries}/2）：${error.message}`
+        );
+        await this.restart();
+        await sleep(this.options.readRetryDelay ?? READ_RETRY_DELAY_MS);
       }
-      this.log(
-        `${method}失败，重启sidecar后仅重试本次只读请求：${error.message}`
-      );
-      await this.restart();
-      return this.#requestOnce(method, params, timeout);
     }
   }
 
@@ -325,6 +341,8 @@ module.exports = {
   U2RequestTimeoutError,
   SEND_KEYS_TIMEOUT_MS,
   OCR_TIMEOUT_MS,
+  READ_RETRY_DELAY_MS,
+  transientReadFailure,
   developmentCommand,
   packagedCommand,
   utf8ProcessEnvironment

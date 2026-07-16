@@ -20,7 +20,8 @@ function adbBinaryCommand(adbPath, serial, args) {
 }
 
 function adbConnectionLost(error) {
-  return /device (?:not found|offline)|closed|no devices\/emulators found/i.test(String(error?.message || error))
+  const message = String(error?.message || error)
+  return /device (?:not found|offline)|no devices\/emulators found|(?:^|:\s)(?:adb:\s*)?(?:error:\s*)?closed(?:$|[\s:])/i.test(message)
 }
 
 async function waitForAdbDevice(adbPath, serial, timeout = 30_000) {

@@ -47,6 +47,7 @@ async function captureFailureDiagnostics({
   deviceState,
   observerSnapshot,
   ocrDiagnostic = null,
+  operationTelemetry = null,
   inspectImage = imageInfo,
   now = () => new Date(),
 }) {
@@ -113,6 +114,7 @@ async function captureFailureDiagnostics({
     device_state: deviceResult.ok ? { status: 'captured', value: deviceResult.value } : { status: 'failed', error: deviceResult.error },
     scrcpy_observer: observerResult.ok ? { status: 'captured', value: observerResult.value } : { status: 'failed', error: observerResult.error },
     ocr,
+    operation_telemetry: operationTelemetry || { status: 'not_available' },
   }
   await fs.writeFile(manifestPath, JSON.stringify(manifest, null, 2), 'utf8')
   return { manifest: manifestPath, screenshot: screenshot.path, hierarchy: hierarchy.path, ocr: ocr.path, details: manifest }

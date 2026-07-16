@@ -148,6 +148,7 @@ ipcMain.handle('automation:start', async (event, payload) => {
       process.stdout.write(text.endsWith('\n') ? text : `${text}\n`)
       event.sender.send('automation:log', text)
     },
+    progress: value => event.sender.send('automation:progress', value),
   })
   activeTask = runner
   updateManager?.notify()
@@ -181,6 +182,7 @@ ipcMain.handle('automation:retry-failed', async (event, payload) => {
       process.stdout.write(text.endsWith('\n') ? text : `${text}\n`)
       event.sender.send('automation:log', text)
     },
+    progress: value => event.sender.send('automation:progress', value),
   })
   activeTask = runner
   updateManager?.notify()

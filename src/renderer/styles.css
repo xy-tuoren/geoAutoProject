@@ -248,7 +248,7 @@ input:focus, select:focus, textarea:focus {
   transition: background .15s ease, border-color .15s ease, color .15s ease, transform .12s ease;
 }
 
-.secondary:active, .danger:active, .primary:active { transform: translateY(1px); }
+.secondary:active:not(:disabled), .danger:active:not(:disabled), .primary:active:not(:disabled) { transform: translateY(1px); }
 
 .secondary {
   color: #2159a8;
@@ -256,7 +256,14 @@ input:focus, select:focus, textarea:focus {
   border-color: #b7c7dd;
 }
 
-.secondary:hover { background: var(--blue-soft); border-color: #9bb6db; }
+.secondary:hover:not(:disabled) { background: var(--blue-soft); border-color: #9bb6db; }
+.secondary:disabled {
+  color: #8d99aa;
+  background: #edf1f5;
+  border-color: #d8dfe8;
+  box-shadow: none;
+  opacity: .78;
+}
 
 .support-note {
   margin-top: 2px;
@@ -411,6 +418,68 @@ textarea {
   border-radius: 10px;
   background: var(--ground-soft);
 }
+
+.entry-progress-section {
+  flex: 0 0 auto;
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fbfcfe;
+}
+
+.entry-progress-heading,
+.entry-progress-item,
+.entry-progress-stats {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.entry-progress-heading h3 {
+  margin: 0;
+  color: #31435f;
+  font-size: 12.5px;
+  font-weight: 700;
+}
+
+.entry-progress-heading > span,
+.entry-progress-empty,
+.entry-progress-stats {
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.entry-progress-list {
+  display: grid;
+  gap: 6px;
+  max-height: 96px;
+  margin-top: 8px;
+  overflow: auto;
+}
+
+.entry-progress-empty { margin: 0; line-height: 1.5; }
+
+.entry-progress-item {
+  padding: 6px 8px;
+  border: 1px solid #e4e9f1;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.entry-progress-item strong {
+  min-width: 0;
+  overflow: hidden;
+  color: #243653;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.entry-progress-stats { justify-content: flex-end; gap: 12px; }
+.entry-progress-stats .success { color: #23734b; }
+.entry-progress-stats .failure { color: var(--danger); }
 
 .option {
   display: flex;

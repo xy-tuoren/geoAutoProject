@@ -3,7 +3,7 @@ const path = require('node:path')
 const { buildReplyImages } = require('./capture-primitives')
 const { referenceProductsCaptureComplete } = require('./reference-products')
 
-const ARTIFACT_LAYOUT_VERSION = 3
+const ARTIFACT_LAYOUT_VERSION = 4
 
 function createArtifactWriter({
   defaultCaptureMethod,
@@ -23,6 +23,7 @@ function createArtifactWriter({
     ])
     const xmlPath = path.join(diagnosticDirectory, `${stem}.xml`)
     const metadataPath = path.join(diagnosticDirectory, `${stem}.json`)
+    const performancePath = path.join(diagnosticDirectory, '性能分析.json')
     let screenshotPath = path.join(deliveryDirectory, `${stem}.png`)
     let resultMeta = { ...meta }
     if (stitch) {
@@ -102,11 +103,12 @@ function createArtifactWriter({
       diagnostic_directory: diagnosticDirectory,
       event_log: path.join(diagnosticDirectory, '执行日志.jsonl'),
       batch_event_log: getBatchEventLog()?.filePath || null,
+      performance_report: performancePath,
       screenshot: screenshotPath,
       hierarchy: xmlPath,
       ...resultMeta,
     }, null, 2), 'utf8')
-    return { screenshot: screenshotPath, hierarchy: xmlPath, metadata: metadataPath }
+    return { screenshot: screenshotPath, hierarchy: xmlPath, metadata: metadataPath, performance: performancePath }
   }
   
 
@@ -114,4 +116,3 @@ function createArtifactWriter({
 }
 
 module.exports = { createArtifactWriter, ARTIFACT_LAYOUT_VERSION }
-
