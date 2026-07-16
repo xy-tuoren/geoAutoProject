@@ -16,6 +16,18 @@ class FakeJsonRpc:
         self.configurator = value
 
 
+class FakeUiObject:
+    def __init__(self, device) -> None:
+        self.device = device
+
+    def exists(self, timeout=None):
+        self.device.events.append(("focused_exists", timeout))
+        return True
+
+    def set_text(self, text):
+        self.device.events.append(("set_focused_text", text))
+
+
 class FakeDevice:
     def __init__(self) -> None:
         self.settings = {}
@@ -24,6 +36,10 @@ class FakeDevice:
         self.info = {"currentPackageName": "example.app"}
         self.current_package = "example.app"
         self.events = []
+
+    def __call__(self, **selector):
+        self.events.append(("selector", selector))
+        return FakeUiObject(self)
 
     def dump_hierarchy(self, **kwargs):
         self.events.append(("dump_hierarchy", kwargs))
@@ -99,12 +115,15 @@ def test_bridge_configures_dynamic_ui_timeouts_and_dispatches_commands():
     }
     bridge.dispatch("click", {"x": 10, "y": 20})
     bridge.dispatch("send_keys", {"text": "腹泻怎么办", "clear": True})
+    bridge.dispatch("set_focused_text", {"text": "腹泻怎么办"})
     bridge.dispatch("press", {"key": "back"})
     bridge.dispatch("app_start", {"package": "example.app"})
 
     assert ("click", 10.0, 20.0) in device.events
     assert ("set_input_ime", True) in device.events
     assert ("send_keys", "腹泻怎么办", True) in device.events
+    assert ("selector", {"focused": True}) in device.events
+    assert ("set_focused_text", "腹泻怎么办") in device.events
     assert ("press", "back") in device.events
     assert ("app_start", "example.app", True, False) in device.events
     assert ("app_wait", "example.app", 8.0, True) in device.events

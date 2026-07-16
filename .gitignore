@@ -1,7 +1,9 @@
 .DS_Store
+.pytest_cache/
 __pycache__/
 *.pyc
 captures/
+image/
 test_captures/
 build/
 dist/

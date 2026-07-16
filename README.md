@@ -10,6 +10,10 @@
 ./start_electron.sh
 ```
 
+macOS 上从 Finder、Codex 等非交互环境启动时，脚本会在 `PATH` 缺少
+`node`/`npm` 的情况下自动加载 `NVM_DIR`（默认 `~/.nvm`）中的 nvm 默认版本，
+并明确校验 Node.js 22+；仍无法找到运行时会直接给出安装或 nvm 配置提示。
+
 Windows 开发环境在项目目录执行一次 `npm run setup`，再运行 `npm start`。`setup` 会安装 npm 依赖、准备内置 ADB，并用 uv/PyInstaller 构建 Python uiautomator2 sidecar。Electron 面板支持设备刷新、问题文件导入、目录选择、日志流、停止任务和响应式布局。
 
 一批执行结束后，如有单题失败，面板会启用“重试失败项”。它只重跑失败题，沿用原批次、原入口和原题号；成功结果会写回该批次的 `交付图片/`，汇总文件同步更新。此前失败记录会保留为 `失败_重试前_*.json`，不会覆盖成功题或重新生成一个批次。
@@ -18,6 +22,8 @@ Windows 开发环境在项目目录执行一次 `npm run setup`，再运行 `npm
 
 ```bash
 npm run setup      # 首次初始化：安装依赖及自动化运行时
+npm run clean      # 清理构建目录和缓存，保留 captures/
+npm run clean:all  # 同时清理本地截图、UI层级和诊断产物
 npm run check      # Node 语法检查
 npm test           # 自动化核心逻辑测试
 npm run prepare:u2 # 构建当前平台的Python uiautomator2 sidecar
@@ -99,7 +105,7 @@ captures/
           执行日志.jsonl           # 失败前的阶段与操作时间线
 ```
 
-`交付图片/` 不写入 XML、JSON、日志或失败截图；正式图片也不会在调试区重复保存。`回答.json` 通过绝对路径关联交付图片、XML、单题日志和批次日志，并用 `artifact_layout_version=2` 标记当前结构。所有入口共用同一套失败现场采集，诊断文件只进入 `调试产物/`，不会污染交付内容。
+`交付图片/` 不写入 XML、JSON、日志或失败截图；正式图片也不会在调试区重复保存。`回答.json` 通过绝对路径关联交付图片、XML、单题日志和批次日志，并用 `artifact_layout_version=3` 标记当前结构。版本 3 新增 `entry_hierarchy_startup_timeout_ms`，用于记录入口冷启动等待目标 App 层级的只读窗口。所有入口共用同一套失败现场采集，诊断文件只进入 `调试产物/`，不会污染交付内容。
 
 `执行日志.jsonl` 每行是一条独立 JSON 事件，包含时间、顺序号、耗时、入口、问题及事件类别。回答翻页、接缝降级、引用资料、参考药品入口发现、抽屉展开、每页采集、末项确认、图片加载状态、重试和失败恢复都会形成可检索事件。排查时优先读取 `batch-summary.json` 定位失败题，再读取该题 `回答.json` 或 `失败.json`，最后按 `执行日志.jsonl` 的时间线结合 `回答.xml` 与失败现场复现判断。
 
@@ -108,7 +114,7 @@ captures/
 面板支持：
 
 - 自动识别已授权的 ADB 手机；可在多台设备中选择一台执行
-- 选择一个或多个执行入口：小荷AI医生APP、抖音搜索框（小荷AI小程序）、头条搜索框（小荷AI小程序）；面板默认勾选抖音搜索框入口
+- 选择一个或多个执行入口：小荷AI医生APP、抖音搜索框（小荷AI小程序）、头条搜索框（小荷AI小程序）；面板默认同时勾选小荷AI医生APP和抖音搜索框入口
 - 多入口执行时按入口顺序逐个完成整批问题：先跑完第一个入口的全部问题，再切换到下一个入口
 - 直接每行填写一个问题，或导入 TXT / CSV / JSON / XLSX 文件，默认读取 `问题` 列
 - 按列表顺序逐题发送、等待回复稳定，并分别保存纯截图交付件与 UI XML、JSON、JSONL 调试产物
@@ -122,13 +128,15 @@ JSON 使用数组或 `questions` / `问题` 数组；Excel 读取第一个工作
 
 单个入口的单道题发生搜索无结果、回答超时、输入/点击不确定或截图失败时，只停止当前题，不重放有副作用的操作。失败原因写入该题调试目录的 `失败.json`，同时尝试保存 `失败现场.png/.xml/.json`；如果本题调用过 OCR，还会保存 `失败现场_OCR.json` 的完整文字、置信度和物理坐标。任一诊断源采集失败只会在现场清单里记录原因，不会覆盖原始任务错误或阻止后续题。下一题开始前重新启动并校验当前入口，然后继续剩余问题和后续入口。批次结束后由 `调试产物/batch-summary.json` 汇总成功数、失败数和失败题路径。用户主动停止、ADB 设备断开或 uiautomator2 基础进程不可用仍会终止整个批次，但会先尽可能留下任务级失败现场。
 
-小荷 App 在发送前会强制清空并核对输入框文本。成功执行“每题新建会话”时，当前会话只包含本题，截图前不再依赖问题文字或右侧气泡的 Compose 结构；脚本持续向上滚动，连续两次稳定画面无变化后确认会话顶部，再从顶部向下完整采集。未成功新建会话或复用已有会话时，仍必须通过右侧用户气泡定位本题，避免截取旧回答。元数据中的 `reply_top_navigation_method`、`reply_top_confirmed` 和 `reply_question_structure_validation_required` 记录实际验收方式。推荐药品入口在点击前会等待页面稳定并从最新层级刷新坐标，避免正文重排后点击旧位置；抽屉识别兼容普通窗口和华为弹窗窗口，并使用面板和列表相对竖屏高度确认全屏状态。元数据中的 `reference_products_trigger_refreshed` 记录本题是否刷新过入口坐标。抖音搜索超时会在当前题调试目录保留 `搜索超时.png` 和 `搜索超时.xml` 供本机诊断，这些采集产物仍受忽略规则保护。
+所有入口在发送或搜索前都会强制清空并回读核对输入框文本。若 FastInputIME 的清空广播偶发失败、导致旧关键词与新问题拼接，脚本只在已确认回读不一致后，通过 uiautomator2 对当前聚焦输入控件执行一次原子 `setText` 替换；再次回读精确一致后才允许继续，仍不使用 ADB 输入，也不会重复提交问题。成功执行“每题新建会话”时，当前会话只包含本题，截图前不再依赖问题文字或右侧气泡的 Compose 结构；脚本持续向上滚动，连续两次稳定画面无变化后确认会话顶部，再从顶部向下完整采集。未成功新建会话或复用已有会话时，仍必须通过右侧用户气泡定位本题，避免截取旧回答。元数据中的 `reply_top_navigation_method`、`reply_top_confirmed` 和 `reply_question_structure_validation_required` 记录实际验收方式。推荐药品入口在点击前会等待页面稳定并从最新层级刷新坐标，避免正文重排后点击旧位置；抽屉识别兼容普通窗口和华为弹窗窗口，并使用面板和列表相对竖屏高度确认全屏状态。元数据中的 `reference_products_trigger_refreshed` 记录本题是否刷新过入口坐标。抖音搜索超时会在当前题调试目录保留 `搜索超时.png` 和 `搜索超时.xml` 供本机诊断，这些采集产物仍受忽略规则保护。
 
-抖音入口使用双路径流程：打开搜索页并搜索问题后，识别“小荷AI医生”智能总结的居中全文控件和独立小程序入口卡片。抖音会把这些卡片文字绘制在画面中但不一定暴露给 UI XML，因此归属判断不能强依赖可见文字；只有全文控件时保存完整搜索结果页为 `回答_智能总结.png` 并点击全文，同时出现展开型回答和独立小程序卡片时优先走可强校验的独立卡片，避免把抖音自身的“AI生成回答/展开更多”误当成小荷总结。如果层级明确暴露“AI生成回答/展开更多”，脚本也会直接忽略它。如果短暂优先等待后仍未出现智能总结，但识别到独立入口卡片，则保存搜索页为 `回答_小程序入口.png`，按卡片标题区域的相对位置点击，并通过 `MiniAppHostActivity` 和小程序外壳强校验跳转成功。入口页会继续等待回答正文真正出现并稳定，不能把空白回答气泡当作成功。首屏没有两种结果时会有限向下扫描搜索结果；第一轮完成三次扫描仍无结果时，脚本按实际扫描距离回到顶部，确认搜索框仍是当前问题后下拉刷新，并完整执行第二轮识别和扫描。第二轮仍无结果才明确失败、保存搜索超时现场并继续后续任务，不进行第三轮，也不重新输入或重复点击搜索按钮。成功元数据中的 `douyin_search_attempts` 和 `douyin_search_refreshed` 记录实际识别轮次与是否刷新。
+抖音入口使用双路径流程：打开搜索页并搜索问题后，识别“小荷AI医生”智能总结的居中全文控件和独立小程序入口卡片。抖音会把这些卡片文字绘制在画面中但不一定暴露给 UI XML，因此先使用层级结构；层级没有可靠目标时，才对稳定的 ADB 原始 PNG 启用 RapidOCR。OCR 必须同时高置信识别“小荷AI医生”、“根据医学数据智能总结”和位于其下方合理距离的“查看全文”，单独识别到通用按钮不会点击；图片物理坐标会按实时 UI 逻辑尺寸映射，最终仍由 uiautomator2 点击。只有全文控件时保存完整搜索结果页为 `回答_智能总结.png` 并点击全文，同时出现展开型回答和独立小程序卡片时优先走可强校验的独立卡片，避免把抖音自身的“AI生成回答/展开更多”误当成小荷总结。如果层级明确暴露“AI生成回答/展开更多”，脚本也会直接忽略它。如果短暂优先等待后仍未出现智能总结，但识别到独立入口卡片，则保存搜索页为 `回答_小程序入口.png`，按卡片标题区域的相对位置点击，并通过 `MiniAppHostActivity` 和小程序外壳强校验跳转成功。入口页会继续等待回答正文真正出现并稳定，不能把空白回答气泡当作成功。首屏没有两种结果时会有限向下扫描搜索结果；第一轮完成三次扫描仍无结果时，脚本按实际扫描距离回到顶部，确认搜索框仍是当前问题后下拉刷新，并完整执行第二轮识别和扫描。第二轮仍无结果才明确失败、保存搜索超时现场并继续后续任务，不进行第三轮，也不重新输入或重复点击搜索按钮。成功元数据中的 `douyin_search_attempts`、`douyin_search_refreshed` 和 `douyin_search_target_detection_method` 记录实际识别轮次、是否刷新及最终证据来源。
 
 两条路径最终都会先等待小程序回答连续 3 秒静止，再从全文顶部向下滚动并保存 `回答_001.png`。正文截图使用 ADB 原始 PNG，并根据小程序真实滚动视口排除固定的咨询人选择栏、顶部工具栏和底部输入区；相邻视口执行像素接缝校验，通过后才无缝裁掉重叠内容。顶部需要连续两次滚动无变化确认；没有参考药品时，末端也需要连续两次无变化。出现无文字的“参考药品”卡片时，脚本会按右上箭头和商品图的结构识别入口，立即进入药品终止序列：打开抖音 BottomSheet、确认首项图片已加载、持续滚动到真实末项并另存 `回答_参考药品_001.png`。入口、抽屉和商品图片均使用相对竖屏尺寸及节点层级识别，不依赖 1080×2400 固定坐标。JSON 的 `douyin_result_mode` 区分 `smart_summary` 与 `miniapp_entry_card`；入口路径额外记录 `douyin_miniapp_entry_detected`、入口截图及卡片/点击范围、宿主 Activity 和 `douyin_miniapp_entry_opened`，智能总结路径继续记录 `douyin_search_summary_captured`、`douyin_search_summary_screenshot` 和 `douyin_view_full_opened`。正文和药品验收分别记录 `reply_continuity_verified`、`reference_products_detected`、`reference_products_images_ready`、`reference_products_confirmed_end` 和 `reference_products_capture_complete`。
 
-今日头条入口使用对应的独立搜索流程：脚本先按头条首页顶部搜索框的语义节点打开搜索页，再通过搜索页编辑框输入并确认问题，两阶段均不使用固定坐标。随后优先从 UI 层级等待“小荷AI医生·智能总结”和可点击的“查看更多”；头条 WebView 未暴露文字时，才对稳定的 ADB 原始 PNG 启用 RapidOCR 兜底。OCR 必须同时高置信识别品牌标题和位于其下方合理距离的“查看更多”，单独识别到通用“查看更多”不会点击。OCR 返回图片物理坐标，脚本按实时 UI 层级逻辑尺寸显式映射，并在保存稳定搜索结果截图后再次识别确认，随后仍由 uiautomator2 点击且强校验全文页已经打开。完整搜索结果页保存为 `回答_智能总结.png`；全文首次打开后需等待连续 3 秒无画面活动，再从真实顶部向下采集并保存 `回答_001.png`。JSON 额外记录 `toutiao_answer_card_detection_method`、OCR 引擎/耗时/置信度及物理和逻辑坐标、`toutiao_search_summary_captured`、`toutiao_view_more_opened`、`toutiao_full_page_confirmed_top` 和 `toutiao_full_page_confirmed_end`。
+今日头条入口使用对应的独立搜索流程：脚本先按头条首页顶部搜索框的语义节点打开搜索页，再通过搜索页编辑框输入并确认问题，两阶段均不使用固定坐标。头条冷启动时允许最多 30 秒等待其 UI 层级出现，其他入口仍保持 8 秒；该阶段仅执行只读层级检查，不会点击、输入或重放有副作用的操作。随后优先从 UI 层级等待“小荷AI医生·智能总结”和可点击的“查看更多”；只有结果页搜索框仍与当前原始问题逐字一致时才接受卡片，切换中的旧查询结果会被忽略。头条 WebView 未暴露文字时，才对稳定的 ADB 原始 PNG 启用 RapidOCR 兜底。OCR 必须同时高置信识别品牌标题和位于其下方合理距离的“查看更多”，单独识别到通用“查看更多”不会点击。OCR 返回图片物理坐标，脚本按实时 UI 层级逻辑尺寸显式映射，并在保存稳定搜索结果截图后再次识别确认，随后仍由 uiautomator2 点击且强校验全文页已经打开；若已确认进入小程序宿主但只读层级连接刚好重启，会按宿主就绪条件继续等待，而不会重放点击。若完整等待窗口内确实没有召回目标卡片，脚本只会在重新精确确认搜索框内容后，用同一个原始问题受控重试一次；UI 读取、点击或前台应用异常不会触发重试。完整搜索结果页保存为 `回答_智能总结.png`；全文首次打开后需等待连续 3 秒无画面活动，再从真实顶部向下采集并保存 `回答_001.png`。JSON 额外记录 `toutiao_search_attempts`、`toutiao_search_repeated_exact_question`、`toutiao_answer_card_detection_method`、OCR 引擎/耗时/置信度及物理和逻辑坐标、`toutiao_search_summary_captured`、`toutiao_view_more_opened`、`toutiao_full_page_confirmed_top` 和 `toutiao_full_page_confirmed_end`。
+
+头条“查看更多”打开后还会检查全文目标页语义：带“发送消息”输入框的通用咨询页、药盒识别页等不能冒充本题全文。若明确进入了这类错误路由且本题尚未使用搜索重试额度，脚本会关闭该页、再次精确确认同一个原始问题并仅重试一次；读取或点击异常不会触发该路径。JSON 通过 `toutiao_full_answer_open_attempts` 和 `toutiao_full_answer_route_repeated` 记录全文路由尝试。
 
 通用 OCR 的接口、坐标契约、调用示例、日志字段和扩展规则见 [本地 OCR 设计与使用](docs/ocr.md)。正常 UI 层级可识别时不会调用 OCR，因此不会给所有任务增加固定等待。
 
@@ -138,7 +146,28 @@ JSON 使用数组或 `questions` / `问题` 数组；Excel 读取第一个工作
 src/
   main/          # Electron 主进程和 preload
   renderer/      # 桌面面板页面、样式和交互
-  automation/    # uiautomator2/OCR客户端、scrcpy观察器、ADB截图、长图拼接和UI层级解析
+  automation/
+    runner.js                    # 组合根：设备会话、批次生命周期和公开接口
+    entry-catalog.js             # 入口定义、选择、包名与启动策略
+    question-input-workflow.js   # 输入、发送、新会话与搜索框准备
+    douyin-search-workflow.js    # 抖音搜索、OCR证据链和全文路由
+    toutiao-search-workflow.js   # 头条搜索、OCR证据链和全文路由
+    question-workflows.js        # 单题入口编排，不承载底层截图算法
+    capture-stability.js         # scrcpy门控与ADB区域稳定复核
+    reply-capture.js             # 正文、引用资料和小程序全文采集状态机
+    reference-products.js        # 参考药品入口、抽屉与就绪判定
+    reference-product-capture.js # 参考药品从首项到末项的采集状态机
+    artifact-writer.js           # 交付图片、层级和元数据写入
+    capture-primitives.js        # 无状态截图、输入与拼接辅助接口
+    miniapp-locators.js          # 分辨率自适应的层级/OCR定位器
+    device-bridge.js             # ADB连接、原始PNG和断连恢复
+    batch-recovery.js            # 批次失败隔离和失败题重试
+    failure-diagnostics.js       # 失败现场证据采集
+    search-recovery.js           # 搜索与全文路由的有限恢复策略
+    hierarchy.js                 # UI层级解析与结构识别
+    images.js                    # 图片稳定性、接缝验证和长图拼接
+    u2-client.js                 # Python uiautomator2/OCR sidecar客户端
+    scrcpy-observer.js           # 低分辨率画面活动观察器
   questions.js   # 问题文件导入
   runtime-paths.js
   cli.js

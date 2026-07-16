@@ -95,6 +95,12 @@ class U2Bridge:
                 if original_ime and device.current_ime() != original_ime:
                     device.shell(["ime", "set", original_ime])
             return True
+        if method == "set_focused_text":
+            field = device(focused=True)
+            if not field.exists(timeout=1.0):
+                raise BridgeError("未找到当前聚焦的输入控件，已停止替换文本")
+            field.set_text(str(params.get("text", "")))
+            return True
         if method == "press":
             device.press(str(params["key"]))
             return True

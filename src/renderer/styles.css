@@ -54,6 +54,7 @@ button:disabled { cursor: not-allowed; }
 
 .topbar-actions {
   display: flex;
+  flex: 1 1 auto;
   align-items: center;
   justify-content: flex-end;
   gap: 8px;
@@ -81,10 +82,13 @@ h2 { font-size: 15px; font-weight: 700; letter-spacing: -.01em; }
   padding: 7px 14px;
   font-size: 13px;
   font-weight: 600;
-  max-width: min(58%, 520px);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  max-width: min(100%, 520px);
+  line-height: 1.35;
+  text-align: center;
+  white-space: normal;
+  overflow: visible;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
 }
 
 .update-action {

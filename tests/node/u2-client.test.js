@@ -58,6 +58,23 @@ test('首次输入允许FastInputIME安装和切换完成', async () => {
   assert.equal(SEND_KEYS_TIMEOUT_MS, 45_000)
 })
 
+test('输入回读不一致时可原子替换当前聚焦控件文本', async () => {
+  const client = new U2Client({ root, adbPath: '/bundled/adb', log: () => {} })
+  const calls = []
+  client.request = async (method, params, options) => {
+    calls.push({ method, params, options })
+    return true
+  }
+
+  await client.setFocusedText('纠正后的问题')
+
+  assert.deepEqual(calls, [{
+    method: 'set_focused_text',
+    params: { text: '纠正后的问题' },
+    options: { timeout: SEND_KEYS_TIMEOUT_MS },
+  }])
+})
+
 test('OCR通过通用只读请求传输图片和选项', async () => {
   const client = new U2Client({ root, adbPath: '/bundled/adb', log: () => {} })
   const calls = []

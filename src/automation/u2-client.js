@@ -278,6 +278,10 @@ class U2Client {
     return this.request("send_keys", { text: String(text), clear }, { timeout });
   }
 
+  setFocusedText(text, { timeout = SEND_KEYS_TIMEOUT_MS } = {}) {
+    return this.request("set_focused_text", { text: String(text) }, { timeout });
+  }
+
   press(key) {
     return this.request("press", { key });
   }
