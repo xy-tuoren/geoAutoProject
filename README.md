@@ -41,6 +41,8 @@ npm run run:android -- --serial <设备序列号> --output-dir ./captures/curren
 
 当前已有回答若明确同时显示“响应超时，点击重新生成回答”和可点击的“重试”按钮，流程会先确认对应问题，点击前重新读取目标应用层级并刷新按钮坐标，然后仅点击一次重试。重试后再次响应超时或无法确认回答稳定时会明确失败，绝不进行第二次点击；整个过程仍不会新建会话、聚焦输入框、输入或发送问题。`回答.json` 通过 `existing_reply_timeout_detected`、`existing_reply_retry_performed`、`existing_reply_retry_attempts` 和 `existing_reply_retry_succeeded` 记录实际状态，批次事件日志记录检测、点击和完成/失败事件。
 
+普通小荷 APP 批量提问也会在回答稳定等待结束后、正式截图前执行同一项响应超时检查。命中时刷新 UI 层级和按钮坐标后仅点击一次“重试”，并重新等待回答稳定；唯一一次重试后仍超时则只将本题记为失败，不生成超时提示的正式交付图，也不会进行第二次点击。`回答.json` 使用 `submitted_reply_timeout_detected`、`submitted_reply_retry_performed`、`submitted_reply_retry_attempts` 和 `submitted_reply_retry_succeeded` 记录批量提问的实际恢复状态。
+
 也可以在命令末尾直接提供已知的问题文字。小荷正式批量流程本来就持有该文字；真机复用已有回答验收时提供它，可直接按新会话路径从物理顶部采集，不再识别问题气泡，且仍不会输入或发送：
 
 ```bash

@@ -749,6 +749,13 @@ function createRunner(options) {
     tapSend,
     recoverObserver,
     waitForStableReply,
+    windowSize,
+    recordResponseTimeoutRecovery: async (event, details) => {
+      await Promise.all([
+        batchEventLog?.record(event, { category: 'recovery', details, context: activeQuestionContext }),
+        activeQuestionEventLog?.record(event, { category: 'recovery', details }),
+      ])
+    },
     captureFullReplyFrames,
     getActiveEntry: () => activeEntry,
     getActivePackageName: activePackageName,

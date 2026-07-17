@@ -2,6 +2,8 @@ const fs = require('node:fs/promises')
 const path = require('node:path')
 const { sleep } = require('./utils')
 const { entryHierarchyStartupTimeout } = require('./entry-catalog')
+const { findChatScrollBounds } = require('./hierarchy')
+const { recoverTimedOutReply } = require('./existing-reply-recovery')
 const {
   runDouyinSearchResultAttempts,
   runToutiaoAnswerCardAttempts,
@@ -40,6 +42,8 @@ function createQuestionWorkflows({
   tapSend,
   recoverObserver,
   waitForStableReply,
+  windowSize,
+  recordResponseTimeoutRecovery = async () => {},
   captureFullReplyFrames,
   getActiveEntry,
   getActivePackageName,
@@ -279,7 +283,35 @@ function createQuestionWorkflows({
         await recoverObserver(error)
       }
     } else await sleep(2_000)
-    const result = await waitForStableReply(payload.timeout * 1_000, { startedAt: replyStartedAt })
+    let result = await waitForStableReply(payload.timeout * 1_000, { startedAt: replyStartedAt })
+    let timeoutRecoveryMeta = {
+      submitted_reply_timeout_detected: false,
+      submitted_reply_retry_performed: false,
+      submitted_reply_retry_attempts: 0,
+      submitted_reply_retry_succeeded: null,
+    }
+    // Avoid an extra device screenshot for ordinary successful answers. The
+    // full chat bounds are only needed when the hierarchy contains the timeout
+    // prompt; the locator then still requires the paired clickable button.
+    if (String(result.xml || '').includes('响应超时')) {
+      const chatBounds = findChatScrollBounds(result.xml, await windowSize())
+      const recovery = await recoverTimedOutReply({
+        xml: result.xml,
+        chatBounds,
+        timeout: payload.timeout * 1_000,
+        source,
+        tap,
+        waitForStableReply,
+        log,
+        record: recordResponseTimeoutRecovery,
+        scope: 'submitted_reply',
+        replyLabel: '本题回答',
+        completionMessage: '继续本题回答采集',
+      })
+      result = { ...result, status: 'stable', xml: recovery.xml }
+      timeoutRecoveryMeta = recovery.meta
+    }
+    Object.assign(meta, timeoutRecoveryMeta)
     log(`stage: 回答等待结束（${result.status}），开始截图`)
     return saveArtifacts({
       artifacts,

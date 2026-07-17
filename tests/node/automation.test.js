@@ -91,6 +91,106 @@ test('小荷App单题编排通过注入的当前入口生成元数据并继续�
   assert.equal(saved.meta.entry_hierarchy_startup_timeout_ms, 8_000)
 })
 
+test('小荷App普通批次遇到响应超时时只点击一次重试并等待新回答后再截图', async () => {
+  const timeoutXml = '<hierarchy><node class="android.view.View" scrollable="true" bounds="[0,384][1080,1968]">'
+    + '<node package="com.aurora.xiaohe.aidoctor" class="android.widget.TextView" text="响应超时，点击重新生成回答。" bounds="[55,643][811,726]" />'
+    + '<node package="com.aurora.xiaohe.aidoctor" class="android.widget.Button" text="重试" clickable="true" bounds="[55,754][1025,887]" />'
+    + '</node></hierarchy>'
+  const stableXml = '<hierarchy><node class="android.view.View" scrollable="true" bounds="[0,384][1080,1968]">'
+    + '<node package="com.aurora.xiaohe.aidoctor" class="android.widget.TextView" text="重新生成后的回答" bounds="[55,643][1025,887]" />'
+    + '</node></hierarchy>'
+  const taps = []
+  const events = []
+  let waits = 0
+  let saved = null
+  const workflow = createQuestionWorkflows({
+    observer: {
+      active: true,
+      mark: () => ({ frameCount: 0 }),
+      snapshot: () => ({ active: true }),
+      waitForActivity: async () => ({ activity: true }),
+    },
+    recoverySnapshot: () => ({}),
+    log: () => {},
+    tap: async (x, y) => taps.push([x, y]),
+    source: async () => timeoutXml,
+    windowSize: async () => ({ width: 1080, height: 2400 }),
+    recordResponseTimeoutRecovery: async (event, details) => events.push([event, details]),
+    tapNewSession: async () => false,
+    inputQuestion: async () => {},
+    tapSend: async () => {},
+    recoverObserver: async () => false,
+    waitForStableReply: async () => {
+      waits += 1
+      return waits === 1
+        ? { status: 'stable', xml: timeoutXml }
+        : { status: 'stable', xml: stableXml }
+    },
+    captureFullReplyFrames: async () => ({}),
+    saveArtifacts: async options => {
+      saved = options
+      return { metadata: '/tmp/回答.json' }
+    },
+    getActiveEntry: () => ENTRY_DEFINITIONS['xiaohe-app'],
+    getActivePackageName: () => ENTRY_DEFINITIONS['xiaohe-app'].packageName,
+  })
+
+  await workflow.askOnce({ serial: 'device', timeout: 90, newSession: false }, {
+    batchDirectory: '/tmp/batch_1',
+    diagnosticDirectory: '/tmp/batch_1/调试产物/001_测试',
+  }, '测试问题', 1)
+
+  assert.equal(waits, 2)
+  assert.deepEqual(taps, [[540, 820]])
+  assert.equal(saved.xml, stableXml)
+  assert.deepEqual({
+    detected: saved.meta.submitted_reply_timeout_detected,
+    performed: saved.meta.submitted_reply_retry_performed,
+    attempts: saved.meta.submitted_reply_retry_attempts,
+    succeeded: saved.meta.submitted_reply_retry_succeeded,
+  }, { detected: true, performed: true, attempts: 1, succeeded: true })
+  assert.equal(events.some(([event]) => event === 'submitted_reply_timeout_retry_clicked'), true)
+})
+
+test('小荷App普通批次唯一一次重试后仍超时则本题失败且不生成正式截图', async () => {
+  const timeoutXml = '<hierarchy><node class="android.view.View" scrollable="true" bounds="[0,240][720,1320]">'
+    + '<node class="android.widget.TextView" text="响应超时，点击重新生成回答。" bounds="[36,420][542,478]" />'
+    + '<node class="android.widget.Button" content-desc="重试" clickable="true" bounds="[36,495][684,585]" />'
+    + '</node></hierarchy>'
+  let taps = 0
+  let saves = 0
+  const workflow = createQuestionWorkflows({
+    observer: {
+      active: true,
+      mark: () => ({ frameCount: 0 }),
+      snapshot: () => ({ active: true }),
+      waitForActivity: async () => ({ activity: true }),
+    },
+    recoverySnapshot: () => ({}),
+    log: () => {},
+    tap: async () => { taps += 1 },
+    source: async () => timeoutXml,
+    windowSize: async () => ({ width: 720, height: 1600 }),
+    tapNewSession: async () => false,
+    inputQuestion: async () => {},
+    tapSend: async () => {},
+    recoverObserver: async () => false,
+    waitForStableReply: async () => ({ status: 'stable', xml: timeoutXml }),
+    captureFullReplyFrames: async () => ({}),
+    saveArtifacts: async () => { saves += 1 },
+    getActiveEntry: () => ENTRY_DEFINITIONS['xiaohe-app'],
+    getActivePackageName: () => ENTRY_DEFINITIONS['xiaohe-app'].packageName,
+  })
+
+  await assert.rejects(workflow.askOnce({ serial: 'device', timeout: 90, newSession: false }, {
+    batchDirectory: '/tmp/batch_1',
+    diagnosticDirectory: '/tmp/batch_1/调试产物/001_测试',
+  }, '测试问题', 1), /唯一一次重试后仍显示响应超时/)
+
+  assert.equal(taps, 1)
+  assert.equal(saves, 0)
+})
+
 test('失败重试只选择失败题，并保留原结果位置和题号', () => {
   const summary = {
     retry_count: 1,
