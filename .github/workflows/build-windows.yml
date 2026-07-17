@@ -160,7 +160,23 @@ jobs:
           remote="$UPDATE_SERVER_USER@$UPDATE_SERVER_HOST"
           release_dir='/var/www/geo-updates/win'
           staging_dir="$release_dir/.incoming-${GITHUB_RUN_ID}"
+          server_assets_dir='server-update-assets'
+          server_installer='question-automation-electron-setup.exe'
+          installer_source=$(find release-assets -maxdepth 1 -type f -name '*.exe' -print -quit)
+          blockmap_source="${installer_source}.blockmap"
+          test -n "$installer_source"
+          test -f "$blockmap_source"
+          rm -rf "$server_assets_dir"
+          mkdir -p "$server_assets_dir"
+          cp "$installer_source" "$server_assets_dir/$server_installer"
+          cp "$blockmap_source" "$server_assets_dir/${server_installer}.blockmap"
+          sed -E \
+            -e "s|^([[:space:]]*-[[:space:]]*)url: .*\\.exe$|\\1url: $server_installer|" \
+            -e "s|^path: .*\\.exe$|path: $server_installer|" \
+            release-assets/latest.yml > "$server_assets_dir/latest.yml"
+          grep -F "url: $server_installer" "$server_assets_dir/latest.yml"
+          grep -F "path: $server_installer" "$server_assets_dir/latest.yml"
           ssh_options=(-o StrictHostKeyChecking=accept-new -o PreferredAuthentications=password -o PubkeyAuthentication=no -o NumberOfPasswordPrompts=1 -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=2)
           timeout 30s sshpass -e ssh "${ssh_options[@]}" "$remote" "mkdir -p '$staging_dir'"
-          timeout 15m sshpass -e scp "${ssh_options[@]}" release-assets/*.exe release-assets/*.blockmap release-assets/latest.yml "$remote:$staging_dir/"
-          timeout 30s sshpass -e ssh "${ssh_options[@]}" "$remote" "set -eu; test -f '$staging_dir/latest.yml'; cp '$staging_dir'/*.exe '$release_dir/'; cp '$staging_dir'/*.blockmap '$release_dir/'; cp '$staging_dir/latest.yml' '$release_dir/latest.yml.next'; mv '$release_dir/latest.yml.next' '$release_dir/latest.yml'; rm -rf '$staging_dir'"
+          timeout 15m sshpass -e scp "${ssh_options[@]}" "$server_assets_dir/$server_installer" "$server_assets_dir/${server_installer}.blockmap" "$server_assets_dir/latest.yml" "$remote:$staging_dir/"
+          timeout 30s sshpass -e ssh "${ssh_options[@]}" "$remote" "set -eu; test -f '$staging_dir/latest.yml'; test -f '$staging_dir/$server_installer'; test -f '$staging_dir/${server_installer}.blockmap'; cp '$staging_dir/$server_installer' '$release_dir/$server_installer.next'; cp '$staging_dir/${server_installer}.blockmap' '$release_dir/${server_installer}.blockmap.next'; mv '$release_dir/$server_installer.next' '$release_dir/$server_installer'; mv '$release_dir/${server_installer}.blockmap.next' '$release_dir/${server_installer}.blockmap'; cp '$staging_dir/latest.yml' '$release_dir/latest.yml.next'; mv '$release_dir/latest.yml.next' '$release_dir/latest.yml'; find '$release_dir' -maxdepth 1 -type f \( -name '*.exe' -o -name '*.blockmap' \) ! -name '$server_installer' ! -name '${server_installer}.blockmap' -delete; rm -rf '$staging_dir'"
