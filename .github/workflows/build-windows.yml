@@ -160,6 +160,7 @@ jobs:
           remote="$UPDATE_SERVER_USER@$UPDATE_SERVER_HOST"
           release_dir='/var/www/geo-updates/win'
           staging_dir="$release_dir/.incoming-${GITHUB_RUN_ID}"
-          sshpass -e ssh -o StrictHostKeyChecking=accept-new "$remote" "mkdir -p '$staging_dir'"
-          sshpass -e scp -o StrictHostKeyChecking=accept-new release-assets/*.exe release-assets/*.blockmap release-assets/latest.yml "$remote:$staging_dir/"
-          sshpass -e ssh -o StrictHostKeyChecking=accept-new "$remote" "set -eu; test -f '$staging_dir/latest.yml'; cp '$staging_dir'/*.exe '$release_dir/'; cp '$staging_dir'/*.blockmap '$release_dir/'; cp '$staging_dir/latest.yml' '$release_dir/latest.yml.next'; mv '$release_dir/latest.yml.next' '$release_dir/latest.yml'; rm -rf '$staging_dir'"
+          ssh_options=(-o StrictHostKeyChecking=accept-new -o PreferredAuthentications=password -o PubkeyAuthentication=no -o NumberOfPasswordPrompts=1 -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=2)
+          timeout 30s sshpass -e ssh "${ssh_options[@]}" "$remote" "mkdir -p '$staging_dir'"
+          timeout 15m sshpass -e scp "${ssh_options[@]}" release-assets/*.exe release-assets/*.blockmap release-assets/latest.yml "$remote:$staging_dir/"
+          timeout 30s sshpass -e ssh "${ssh_options[@]}" "$remote" "set -eu; test -f '$staging_dir/latest.yml'; cp '$staging_dir'/*.exe '$release_dir/'; cp '$staging_dir'/*.blockmap '$release_dir/'; cp '$staging_dir/latest.yml' '$release_dir/latest.yml.next'; mv '$release_dir/latest.yml.next' '$release_dir/latest.yml'; rm -rf '$staging_dir'"

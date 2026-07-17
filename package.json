@@ -1,6 +1,6 @@
 {
   "name": "question-automation-electron",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "private": true,
   "description": "Cross-platform Electron operator panel for ADB question automation.",
   "repository": {
@@ -78,7 +78,7 @@
     "publish": [
       {
         "provider": "generic",
-        "url": "http://43.138.254.94/geo-updates/win/"
+        "url": "http://104.168.30.172/geo-updates/win/"
       }
     ]
   }
