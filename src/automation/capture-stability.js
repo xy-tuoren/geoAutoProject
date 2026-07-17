@@ -138,7 +138,7 @@ function createCaptureStability({
     if (direction === 'up') await swipe(x, center - Math.floor(distance / 2), center + Math.ceil(distance / 2), duration || fallbackDuration)
     else await swipe(x, center + Math.ceil(distance / 2), center - Math.floor(distance / 2), duration || fallbackDuration)
     if (!activityMark) await sleep(settle)
-    return { distance, canScrollMore, activityMark }
+    return { distance, canScrollMore, activityMark, x: Math.round(x), durationMs: duration }
   }
   
   async function waitForRegionPixelsStable(bounds, timeout = 8_000) {

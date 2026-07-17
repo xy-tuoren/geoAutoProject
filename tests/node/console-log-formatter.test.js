@@ -30,3 +30,9 @@ test('错误、恢复和关键截图汇总不被控制台过滤', () => {
   assert.match(formatter.format('capture: 回答截图完成，帧=6，精确接缝=5/5，安全重复接缝=0，重采=0，模式=verified_overlap_long_image，耗时=39767ms'), /6屏.*接缝5\/5.*39\.8s/)
   assert.equal(formatter.format('[uiautomator2] Traceback (most recent call last):'), '[uiautomator2] Traceback (most recent call last):')
 })
+
+test('接缝调试包在控制台压缩为数量摘要', () => {
+  const formatter = new ConsoleLogFormatter()
+  const line = 'capture: 接缝汇总已保存 /tmp/调试产物/001_测试/接缝汇总.json（帧=22，接缝=20/21，异常证据=13组）'
+  assert.equal(formatter.format(line), '  诊断  接缝汇总｜22帧｜接缝20/21｜异常证据13组')
+})

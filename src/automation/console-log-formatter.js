@@ -61,6 +61,9 @@ class ConsoleLogFormatter {
     const bounds = text.match(/^capture: chat bounds=([^（]+)(.*)$/)
     if (bounds) return `  区域  正文截图 ${bounds[1]}${bounds[2]}`
 
+    const seamSummary = text.match(/^capture: 接缝汇总已保存 .+（帧=(\d+)，接缝=(\d+)\/(\d+)，异常证据=(\d+)组）$/)
+    if (seamSummary) return `  诊断  接缝汇总｜${seamSummary[1]}帧｜接缝${seamSummary[2]}/${seamSummary[3]}｜异常证据${seamSummary[4]}组`
+
     const completed = text.match(/^capture: 回答截图完成，帧=(\d+)，精确接缝=(\d+)\/(\d+)，安全重复接缝=(\d+)，重采=(\d+)，模式=([^，]+)，耗时=(\d+)ms$/)
     if (completed) {
       const fallback = Number(completed[4]) ? `｜安全重复${completed[4]}` : ''

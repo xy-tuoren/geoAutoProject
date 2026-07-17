@@ -4,6 +4,7 @@ const {
   findChatScrollBounds,
   validateCaptureViewport,
   replyCaptureBounds,
+  replyTailOnScreen,
   estimateVerticalScrollShift,
 } = require('./hierarchy')
 const {
@@ -12,6 +13,8 @@ const {
   imagesSimilar,
   imageRegionsStable,
   verifyFrameOverlap,
+  analyzeReplyScrollEvidence,
+  detectFloatingDownArrow,
 } = require('./images')
 const {
   requireQuestionLocated,
@@ -22,7 +25,10 @@ const {
 } = require('./capture-primitives')
 const { referenceProductsTrigger, miniAppReferenceProductsTrigger } = require('./reference-products')
 const { douyinMiniAppCaptureBounds } = require('./miniapp-locators')
+const { hierarchyLogicalSize } = require('./miniapp-locators')
+const { mapPhysicalBoundsToLogical } = require('./ocr')
 const { REPLY_STABLE_QUIET_MS } = require('./capture-stability')
+const { CaptureSequence } = require('./capture-sequence')
 
 async function replyBoundaryFramesStable(first, second) {
   const firstInfo = await imageInfo(first)
@@ -44,6 +50,31 @@ async function replyBoundaryFramesStable(first, second) {
     return imageRegionsStable(before, after)
   }))
   return comparisons.every(Boolean)
+}
+
+function seamErrorSummary(error) {
+  if (!error) return null
+  return {
+    message: error.message || String(error),
+    candidate_overlaps: Array.isArray(error.candidateOverlaps) ? error.candidateOverlaps : [],
+    suggested_overlap: Number.isFinite(error.suggestedOverlap) ? error.suggestedOverlap : null,
+  }
+}
+
+function stableCaptureSummary(capture) {
+  return {
+    stable: capture?.stable ?? null,
+    attempts: capture?.attempts ?? null,
+    observer: capture?.observer ?? null,
+    reason: capture?.reason || null,
+  }
+}
+
+function shouldDiscardUnprovenCandidate({ transition, reliableMeasuredShift, newContentEvidence, bottomContext }) {
+  return Boolean(transition && !transition.verified
+    && bottomContext
+    && !(Number.isFinite(reliableMeasuredShift) && reliableMeasuredShift > 0)
+    && !newContentEvidence?.provesNewContent)
 }
 
 function createReplyCapture({
@@ -122,8 +153,32 @@ function createReplyCapture({
     }
     const topXml = await source()
     evidence.capture.xml = topXml
-    const { bounds, floatingControl } = replyCaptureBounds(topXml, size)
-    validateCaptureViewport(size, bounds)
+    const logicalSize = hierarchyLogicalSize(topXml, size)
+    const captureBounds = replyCaptureBounds(topXml, logicalSize)
+    const bounds = captureBounds.bounds
+    let floatingControl = captureBounds.floatingControl
+    let floatingControlDetectionMethod = floatingControl ? 'hierarchy' : null
+    if (!floatingControl) {
+      const physicalFrame = await screenshot()
+      const physicalSize = await imageInfo(physicalFrame)
+      const physicalSearchBounds = [
+        Math.round(bounds[0] * physicalSize.width / logicalSize.width),
+        Math.round(bounds[1] * physicalSize.height / logicalSize.height),
+        Math.round(bounds[2] * physicalSize.width / logicalSize.width),
+        Math.round(bounds[3] * physicalSize.height / logicalSize.height),
+      ]
+      const detected = await detectFloatingDownArrow(physicalFrame, physicalSearchBounds)
+      if (detected) {
+        floatingControl = mapPhysicalBoundsToLogical(detected.bounds, physicalSize, logicalSize)
+        const safeBottom = floatingControl[1] - Math.max(8, Math.floor((bounds[3] - bounds[1]) * 0.008))
+        if (safeBottom - bounds[1] >= logicalSize.height * 0.3) {
+          bounds[3] = safeBottom
+          floatingControlDetectionMethod = 'image'
+          log(`capture: UI层级未暴露固定向下按钮，图像兜底已识别并避开（score=${detected.score.toFixed(3)}，bounds=${floatingControl.join(',')}）`)
+        } else floatingControl = null
+      }
+    }
+    validateCaptureViewport(logicalSize, bounds)
     log(`capture: chat bounds=${bounds.join(',')}${floatingControl ? '（已在顶部稳定后避开固定向下按钮）' : ''}`)
     const contained = bounds[0] >= navigationBounds[0] && bounds[1] >= navigationBounds[1]
       && bounds[2] <= navigationBounds[2] && bounds[3] <= navigationBounds[3]
@@ -139,8 +194,10 @@ function createReplyCapture({
         ]),
       }
     } else initialCapture = await waitForStableReplyRegion(bounds)
-    const frames = []
-    const transitions = []
+    const sequence = new CaptureSequence()
+    const seamRecords = []
+    const seamDiagnostics = []
+    const scrollDecisions = []
     let noProgress = 0
     let recaptureCount = 0
     const fallbackReasons = []
@@ -180,14 +237,16 @@ function createReplyCapture({
       }
     }
     let capture = initialCapture
-    let frame = capture.frame
+    sequence.addInitial(capture.frame)
+    scrollDecisions.push({ attempt: 1, outcome: 'initial_frame_appended', frame_count: sequence.length })
+    log('capture: page 1')
     const captureDeadline = Date.now() + 5 * 60_000
     for (let page = 0; ; page += 1) {
       if (Date.now() >= captureDeadline) throw new Error('回答已连续采集5分钟但仍未到达末端，为避免静默截断已停止本题')
       let xml = capture.xml || await source()
-      if (!frames.length || !(await imageRegionsStable(frames.at(-1), frame))) { frames.push(frame); log(`capture: page ${frames.length}`) }
       if (await captureProductsIfVisible(xml)) break
-      const before = frame
+      const screenBefore = capture.frame
+      const before = sequence.lastFrame
       const scroll = await swipeChat(bounds, 'down', scrollFraction, {
         eventDrivenSettle: true,
         xFraction: noProgress > 0 ? 0.68 : 0.84,
@@ -195,11 +254,18 @@ function createReplyCapture({
       const shift = scroll.distance
       let afterCapture = await waitForStableReplyRegion(bounds, 8_000, { settleSince: scroll.activityMark })
       let after = afterCapture.frame
-      if (await replyBoundaryFramesStable(before, after)) {
+      if (await replyBoundaryFramesStable(screenBefore, after)) {
         noProgress += 1
+        scrollDecisions.push({
+          attempt: page + 1,
+          page: sequence.length,
+          outcome: 'no_progress',
+          unchanged_count: noProgress,
+          scroll: { distance: scroll.distance, x: scroll.x ?? null, duration_ms: scroll.durationMs ?? null, can_scroll_more: scroll.canScrollMore },
+          capture: stableCaptureSummary(afterCapture),
+        })
         const afterXml = afterCapture.xml || await source()
         capture = afterCapture
-        frame = after
         if (await captureProductsIfVisible(afterXml)) break
         if (scrollEndConfirmed(scroll.canScrollMore, noProgress)) {
           log('capture: 已连续两次向下滚动无变化，确认到达回答底部')
@@ -207,55 +273,182 @@ function createReplyCapture({
         }
         log('capture: 第一次向下滚动无变化，切换触点再次确认底部')
       } else {
-        noProgress = 0
+        const noProgressBeforeScroll = noProgress
         let afterXml = afterCapture.xml || await source()
         const frameHeight = (await imageInfo(before)).height
         let measuredShift = estimateVerticalScrollShift(xml, afterXml, bounds)
         let reliableMeasuredShift = measuredShift !== null && measuredShift <= shift * 1.35 ? measuredShift : null
         const expectedShift = reliableMeasuredShift ?? shift
         let expectedOverlap = Math.max(12, frameHeight - expectedShift)
+        const initialAfterCapture = afterCapture
+        const initialAfter = after
+        const initialAfterXml = afterXml
+        const initialMeasurement = {
+          requested_scroll_distance: shift,
+          measured_shift: measuredShift,
+          reliable_measured_shift: reliableMeasuredShift,
+          expected_shift: expectedShift,
+          expected_overlap: expectedOverlap,
+        }
+        let retryMeasurement = null
+        let firstError = null
+        let retryError = null
+        let recaptureSnapshot = null
         let transition
         try {
           if (!afterCapture.stable) throw new Error('滚动后的局部画面未稳定')
           transition = { verified: true, overlap: await verifyFrameOverlap(before, after, expectedOverlap) }
         } catch (error) {
+          firstError = error
           recaptureCount += 1
           afterCapture = await waitForStableReplyRegion(bounds, 3_000)
           after = afterCapture.frame
           afterXml = afterCapture.xml || await source()
+          recaptureSnapshot = { ...stableCaptureSummary(afterCapture), frame: after, xml: afterXml }
           measuredShift = estimateVerticalScrollShift(xml, afterXml, bounds)
           reliableMeasuredShift = measuredShift !== null && measuredShift <= shift * 1.35 ? measuredShift : null
           const retryExpectedShift = reliableMeasuredShift ?? shift
           expectedOverlap = Math.max(12, frameHeight - retryExpectedShift)
+          retryMeasurement = {
+            requested_scroll_distance: shift,
+            measured_shift: measuredShift,
+            reliable_measured_shift: reliableMeasuredShift,
+            expected_shift: retryExpectedShift,
+            expected_overlap: expectedOverlap,
+          }
           try {
             if (!afterCapture.stable) throw new Error('重采后的局部画面仍未稳定')
             transition = { verified: true, overlap: await verifyFrameOverlap(before, after, expectedOverlap) }
-          } catch (retryError) {
-            const reason = retryError.message || error.message
+          } catch (retryFailure) {
+            const reason = retryFailure.message || error.message
+            retryError = retryFailure
             // Once pixel continuity cannot be proven, XML coordinates and the
             // requested swipe distance are only estimates. Cropping by either
             // can silently remove lines after a Compose reflow, so retain the
             // complete next viewport and make the duplicate boundary explicit.
             const fallbackOverlap = 0
             transition = { verified: false, fallbackOverlap, reason }
-            fallbackReasons.push(reason)
-            log(`capture: 接缝无法精确校验，保留下一屏完整视口、重复内容和浅色留白：${reason}`)
           }
         }
-        if (!(await imageRegionsStable(frames.at(-1), after))) {
-          frames.push(after)
-          transitions.push(transition)
-          log(`capture: page ${frames.length}`)
+        const newContentEvidence = await analyzeReplyScrollEvidence(before, after, expectedOverlap)
+        const provesNewContent = (Number.isFinite(reliableMeasuredShift) && reliableMeasuredShift > 0)
+          || newContentEvidence.provesNewContent
+        const bottomContext = noProgressBeforeScroll > 0 || replyTailOnScreen(afterXml, bounds)
+        const discardUnproven = shouldDiscardUnprovenCandidate({
+          transition,
+          reliableMeasuredShift,
+          newContentEvidence,
+          bottomContext,
+        })
+        if (discardUnproven) {
+          noProgress = noProgressBeforeScroll + 1
+          const seamIndex = sequence.length
+          const outcome = noProgressBeforeScroll > 0 ? 'bottom_bounce_discarded' : 'unproven_candidate_discarded'
+          const record = {
+            index: seamIndex,
+            from_page: sequence.length,
+            to_page: null,
+            outcome,
+            scroll: { distance: scroll.distance, x: scroll.x ?? null, duration_ms: scroll.durationMs ?? null, can_scroll_more: scroll.canScrollMore },
+            initial_measurement: initialMeasurement,
+            retry_measurement: retryMeasurement,
+            first_error: seamErrorSummary(firstError),
+            retry_error: seamErrorSummary(retryError),
+            new_content_evidence: { ...newContentEvidence, hierarchy_shift: reliableMeasuredShift, bottom_context: bottomContext },
+            transition: null,
+          }
+          seamRecords.push(record)
+          seamDiagnostics.push({
+            index: seamIndex,
+            createdAt: new Date().toISOString(),
+            fromPage: sequence.length,
+            toPage: null,
+            scroll: record.scroll,
+            initialMeasurement,
+            retryMeasurement,
+            firstError,
+            retryError,
+            transition: null,
+            newContentEvidence: record.new_content_evidence,
+            previous: { ...stableCaptureSummary(capture), frame: before, xml },
+            afterScroll: { ...stableCaptureSummary(initialAfterCapture), frame: initialAfter, xml: initialAfterXml },
+            recapture: recaptureSnapshot,
+          })
+          scrollDecisions.push({
+            attempt: page + 1,
+            page: sequence.length,
+            outcome,
+            unchanged_count: noProgress,
+            new_content_evidence: record.new_content_evidence,
+          })
+          capture = afterCapture
+          log(noProgressBeforeScroll > 0
+            ? 'capture: 第二次底部确认只出现回弹/固定控件差异，未发现一致位移和新增正文，不加入新页面'
+            : 'capture: 接缝失败且没有一致位移或层级移动证据，暂按无进展确认，不加入新页面')
+          if (await captureProductsIfVisible(afterXml)) break
+          if (scrollEndConfirmed(scroll.canScrollMore, noProgress)) {
+            log('capture: 已排除底部回弹并连续两次确认无新内容，确认到达回答底部')
+            break
+          }
+          continue
         }
-        frame = after
+        noProgress = 0
+        if (!transition.verified) {
+          fallbackReasons.push(transition.reason)
+          log(provesNewContent
+            ? `capture: 已确认存在新页面但接缝无法精确校验，保留下一屏完整视口、重复内容和浅色留白：${transition.reason}`
+            : `capture: 尚未取得到底上下文且无法证明接缝，为避免漏掉可能的新正文，保留下一屏完整视口并明确降级：${transition.reason}`)
+        }
+        if (!(await imageRegionsStable(sequence.lastFrame, after))) {
+          const seamIndex = sequence.length
+          const record = {
+            index: seamIndex,
+            from_page: sequence.length,
+            to_page: sequence.length + 1,
+            outcome: transition.verified ? (firstError ? 'verified_after_recapture' : 'verified') : 'fallback',
+            scroll: { distance: scroll.distance, x: scroll.x ?? null, duration_ms: scroll.durationMs ?? null, can_scroll_more: scroll.canScrollMore },
+            initial_measurement: initialMeasurement,
+            retry_measurement: retryMeasurement,
+            first_error: seamErrorSummary(firstError),
+            retry_error: seamErrorSummary(retryError),
+            new_content_evidence: { ...newContentEvidence, hierarchy_shift: reliableMeasuredShift, bottom_context: bottomContext },
+            transition,
+          }
+          seamRecords.push(record)
+          if (firstError) {
+            seamDiagnostics.push({
+              index: seamIndex,
+              createdAt: new Date().toISOString(),
+              fromPage: sequence.length,
+              toPage: sequence.length + 1,
+              scroll: record.scroll,
+              initialMeasurement,
+              retryMeasurement,
+              firstError,
+              retryError,
+              transition,
+              newContentEvidence: record.new_content_evidence,
+              previous: { ...stableCaptureSummary(capture), frame: before, xml },
+              afterScroll: { ...stableCaptureSummary(initialAfterCapture), frame: initialAfter, xml: initialAfterXml },
+              recapture: recaptureSnapshot,
+            })
+          }
+          sequence.append(after, transition)
+          scrollDecisions.push({ attempt: page + 1, page: sequence.length, outcome: 'candidate_appended', seam_index: seamIndex, transition: record.outcome, new_content_evidence: record.new_content_evidence })
+          log(`capture: page ${sequence.length}`)
+        } else scrollDecisions.push({ attempt: page + 1, page: sequence.length, outcome: 'candidate_discarded_as_duplicate', capture: stableCaptureSummary(afterCapture) })
         capture = afterCapture
         if (await captureProductsIfVisible(afterXml)) break
       }
     }
     if (!productDetected) log('capture: 回答滚动过程中未发现参考/推荐药品入口，无需完成后重复扫描')
+    const captured = sequence.toCaptureResult()
     const result = {
-      frames: frames.length ? frames : [await cropImage(await screenshot(), bounds)],
-      transitions,
+      frames: captured.frames,
+      transitions: captured.transitions,
+      seamRecords,
+      seamDiagnostics,
+      scrollDecisions,
       bounds,
       recaptureCount,
       fullRetryCount: 0,
@@ -274,6 +467,8 @@ function createReplyCapture({
         reply_top_navigation_method: topNavigationMethod,
         reply_question_structure_validation_required: !singleQuestionSession,
         reply_top_confirmation_swipes: topConfirmationSwipes,
+        reply_floating_control_detection_method: floatingControlDetectionMethod,
+        reply_floating_control_bounds: floatingControl,
       },
     }
     if (fallbackReasons.length) log('capture: 不可靠接缝只做本屏局部重采；仍无法校验时保留完整下一视口并明确分隔，不再整题回滚')
@@ -299,8 +494,7 @@ function createReplyCapture({
     openedMetadataKey,
     initialQuietMs = 0,
   }) {
-    const frames = []
-    const transitions = []
+    const sequence = new CaptureSequence()
     const fallbackReasons = []
     let recaptureCount = 0
     let unchangedCount = 0
@@ -362,14 +556,14 @@ function createReplyCapture({
       topUnchangedCount = await imagesSimilar(before, capture.frame, 3) ? topUnchangedCount + 1 : 0
     }
     log(`capture: ${platformLabel}小荷AI全文已确认位于顶部（回滚尝试=${topNavigationAttempts}）`)
-    frames.push(capture.frame)
+    sequence.addInitial(capture.frame)
     log(`capture: ${platformLabel}小荷AI全文 page 1`)
   
     let terminalSequence = await captureProductsIfVisible(capture.xml || await source())
   
     while (!terminalSequence && unchangedCount < 2) {
       scrollAttempts += 1
-      const before = frames.at(-1)
+      const before = sequence.lastFrame
       const scroll = await swipeChat(bounds, 'down', 0.5, { maxFraction: 0.58, speed: 1_600, eventDrivenSettle: true })
       let afterCapture = await waitForMiniAppStableRegion(bounds, platformLabel, 8_000)
       let after = afterCapture.frame
@@ -403,17 +597,17 @@ function createReplyCapture({
           log(`capture: ${platformLabel}全文接缝无法精确校验，保留下一屏完整视口和浅色留白：${reason}`)
         }
       }
-      if (!(await imagesSimilar(frames.at(-1), after, 3))) {
-        frames.push(after)
-        transitions.push(transition)
-        log(`capture: ${platformLabel}小荷AI全文 page ${frames.length}`)
+      if (!(await imagesSimilar(sequence.lastFrame, after, 3))) {
+        sequence.append(after, transition)
+        log(`capture: ${platformLabel}小荷AI全文 page ${sequence.length}`)
       }
       terminalSequence = await captureProductsIfVisible(afterCapture.xml || await source())
     }
     if (!terminalSequence) log(`capture: ${platformLabel}小荷AI全文连续两次滚动无变化，已确认到底`)
+    const captured = sequence.toCaptureResult()
     return {
-      frames,
-      transitions,
+      frames: captured.frames,
+      transitions: captured.transitions,
       bounds,
       recaptureCount,
       fullRetryCount: 0,
@@ -474,4 +668,4 @@ function createReplyCapture({
   }
 }
 
-module.exports = { createReplyCapture, replyBoundaryFramesStable }
+module.exports = { createReplyCapture, replyBoundaryFramesStable, shouldDiscardUnprovenCandidate }

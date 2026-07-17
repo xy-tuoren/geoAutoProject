@@ -2,8 +2,9 @@ const fs = require('node:fs/promises')
 const path = require('node:path')
 const { buildReplyImages } = require('./capture-primitives')
 const { referenceProductsCaptureComplete } = require('./reference-products')
+const { writeReplySeamDiagnostics } = require('./seam-diagnostics')
 
-const ARTIFACT_LAYOUT_VERSION = 4
+const ARTIFACT_LAYOUT_VERSION = 5
 
 function createArtifactWriter({
   defaultCaptureMethod,
@@ -30,13 +31,23 @@ function createArtifactWriter({
       const replyCaptureStarted = Date.now()
       const capture = await captureMethod(question)
       const { frames, transitions, bounds, recaptureCount, fullRetryCount, fallbackReasons, topNavigationMs, questionLocated, questionFullyVisible, evidenceEmbedded, evidenceExpanded, productDetected, products, productCaptureAttempts, productCaptureMs, captureMetadata = {} } = capture
+      const seamArtifacts = await writeReplySeamDiagnostics(diagnosticDirectory, capture)
+      log(`capture: 接缝汇总已保存 ${seamArtifacts.summary}（帧=${seamArtifacts.details.frame_count}，接缝=${seamArtifacts.details.transition_count}/${seamArtifacts.details.expected_transition_count}，异常证据=${seamArtifacts.diagnostics.length}组）`)
       if (!referenceProductsCaptureComplete({ detected: productDetected, products })) {
-        throw new Error('检测到推荐药品入口，但药品截图未完整完成')
+        const error = new Error('检测到推荐药品入口，但药品截图未完整完成')
+        error.replySeamDiagnostics = seamArtifacts
+        throw error
       }
       const seamsTotal = Math.max(0, frames.length - 1)
       const seamsVerified = transitions.filter(transition => transition.verified).length
       const continuityVerified = transitions.length === seamsTotal && seamsVerified === seamsTotal
-      const images = await buildReplyImages(frames, { transitions, maxHeight: getMaxLongImageHeight() })
+      let images
+      try {
+        images = await buildReplyImages(frames, { transitions, maxHeight: getMaxLongImageHeight() })
+      } catch (error) {
+        error.replySeamDiagnostics = seamArtifacts
+        throw error
+      }
       const replyCaptureMs = Date.now() - replyCaptureStarted
       const paths = []
       for (const [index, image] of images.entries()) { const file = path.join(deliveryDirectory, `${stem}_${String(index + 1).padStart(3, '0')}.png`); await fs.writeFile(file, image); paths.push(file) }
@@ -52,6 +63,9 @@ function createArtifactWriter({
         reply_seams_verified: seamsVerified,
         reply_seams_with_safe_overlap: seamsTotal - seamsVerified,
         reply_recapture_count: recaptureCount,
+        reply_seam_summary: seamArtifacts.summary,
+        reply_seam_diagnostic_directories: seamArtifacts.diagnostics.map(item => item.directory),
+        reply_frame_transition_invariant_valid: seamArtifacts.details.frame_transition_invariant_valid,
         reply_full_retry_count: fullRetryCount,
         reply_top_navigation_ms: topNavigationMs,
         ...(questionLocated !== undefined ? { reply_question_located: questionLocated } : {}),
@@ -108,7 +122,13 @@ function createArtifactWriter({
       hierarchy: xmlPath,
       ...resultMeta,
     }, null, 2), 'utf8')
-    return { screenshot: screenshotPath, hierarchy: xmlPath, metadata: metadataPath, performance: performancePath }
+    return {
+      screenshot: screenshotPath,
+      hierarchy: xmlPath,
+      metadata: metadataPath,
+      performance: performancePath,
+      ...(resultMeta.reply_seam_summary ? { seam_summary: resultMeta.reply_seam_summary } : {}),
+    }
   }
   
 

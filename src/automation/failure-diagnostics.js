@@ -29,8 +29,23 @@ function hierarchyDiagnosticSummary(xml) {
   }
 }
 
-function diagnosticError(error) {
-  return { name: error?.name || 'Error', message: error?.message || String(error), stack: error?.stack || null }
+function diagnosticError(error, depth = 0) {
+  return {
+    name: error?.name || 'Error',
+    message: error?.message || String(error),
+    stack: error?.stack || null,
+    ...(error?.cause && depth < 4 ? { cause: diagnosticError(error.cause, depth + 1) } : {}),
+    ...(error?.replySeamDiagnostics ? {
+      reply_seam_diagnostics: {
+        summary: error.replySeamDiagnostics.summary,
+        diagnostic_directories: error.replySeamDiagnostics.diagnostics?.map(item => item.directory) || [],
+        frame_count: error.replySeamDiagnostics.details?.frame_count ?? null,
+        transition_count: error.replySeamDiagnostics.details?.transition_count ?? null,
+        expected_transition_count: error.replySeamDiagnostics.details?.expected_transition_count ?? null,
+        frame_transition_invariant_valid: error.replySeamDiagnostics.details?.frame_transition_invariant_valid ?? null,
+      },
+    } : {}),
+  }
 }
 
 async function captureFailureDiagnostics({

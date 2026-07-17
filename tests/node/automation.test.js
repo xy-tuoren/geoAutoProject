@@ -11,10 +11,12 @@ const { createBatchDirectory, questionArtifactDirectory, batchArtifactDirectorie
 const { EventLog, classifyAutomationLog } = require('../../src/automation/event-log')
 const { loadQuestionFile } = require('../../src/questions')
 const { adbConnectionLost, captureFailureDiagnostics, captureStableObserved, captureStableSandwich, calibratedProductFallbackOverlap, chatSwipePlan, conservativeFallbackOverlap, buildReplyImages, CancelledError, DOUYIN_MINIAPP_ENTRY_FILENAME, DOUYIN_SEARCH_SUMMARY_FILENAME, TOUTIAO_SEARCH_SUMMARY_FILENAME, douyinGenericAiAnswerBounds, douyinMiniAppCaptureBounds, douyinMiniAppEntryBounds, douyinOcrViewFullTarget, douyinSearchInput, douyinSearchResultTarget, douyinSearchResultsBounds, douyinViewFullBounds, failedRetryItems, fillQuestionInput, historyOnboardingVisible, maxLongImageHeight, miniAppReferenceProductsTrigger, observerRegionFallbackOptions, prepareEmbeddedEvidence, referenceProductDrawerBounds, referenceProductsCaptureComplete, referenceProductSheetExpanded, referenceProductsTrigger, referenceProductViewportReadiness, refreshedReferenceProductsTrigger, requireQuestionLocated, retryAttemptCount, runQuestionsWithRecovery, scrollEndConfirmed, scrollSingleQuestionSessionToTop, toutiaoGenericConsultationPage, toutiaoHomeSearchBounds, toutiaoOcrViewMoreTarget, toutiaoSearchInput, toutiaoSearchResultBelongsToQuestion, toutiaoViewMoreBounds, waitForPackageHierarchy } = require('../../src/automation/runner')
+const { toutiaoAddToHomeScreenCancelBounds } = require('../../src/automation/miniapp-locators')
 const { automationEntries, ENTRY_DEFINITIONS, entryHierarchyStartupTimeout, hierarchyBelongsToPackage, normalizeAutomationEntries } = require('../../src/automation/entry-catalog')
 const { DouyinSearchResultNotFoundError, ToutiaoAnswerCardNotFoundError, ToutiaoFullAnswerNotOpenedError, runDouyinSearchResultAttempts, runToutiaoAnswerCardAttempts, runToutiaoFullAnswerAttempts } = require('../../src/automation/search-recovery')
 const { createQuestionWorkflows } = require('../../src/automation/question-workflows')
 const { createReplyCapture } = require('../../src/automation/reply-capture')
+const { toutiaoAnswerRegionLooksReady } = require('../../src/automation/toutiao-search-workflow')
 
 const CHAT_BOUNDS = [0, 200, 1080, 1800]
 
@@ -144,7 +146,7 @@ test('通用失败现场同时保存物理截图、逻辑层级、设备状态�
     serial: 'portrait-device',
     entry: { id: 'toutiao-xiaohe-miniapp', label: '头条搜索框（小荷AI小程序）', packageName: 'com.ss.android.article.news' },
     context: { question: '测试问题', question_index: 2 },
-    error: new Error('未找到小荷AI医生卡片'),
+    error: new Error('未找到小荷AI医生卡片', { cause: new Error('搜索结果仍是旧问题') }),
     captureScreenshot: async () => frame,
     dumpHierarchy: async () => xml,
     currentApp: async () => ({ package: 'com.ss.android.article.news', activity: '.MainActivity' }),
@@ -162,6 +164,7 @@ test('通用失败现场同时保存物理截图、逻辑层级、设备状态�
 
   const manifest = JSON.parse(await fs.readFile(result.manifest, 'utf8'))
   assert.equal(manifest.original_error.message, '未找到小荷AI医生卡片')
+  assert.equal(manifest.original_error.cause.message, '搜索结果仍是旧问题')
   assert.deepEqual(manifest.context, { question: '测试问题', question_index: 2 })
   assert.deepEqual([manifest.screenshot.width, manifest.screenshot.height], [1080, 2400])
   assert.equal(manifest.screenshot.coordinate_space, 'adb_screenshot_physical_pixels')
@@ -377,6 +380,41 @@ test('头条全文路由拒绝带发送框的通用咨询页', () => {
   assert.equal(toutiaoGenericConsultationPage(fullAnswer), false)
 })
 
+test('头条新版回答页正文已出现时不因发送框被误判为通用咨询页', () => {
+  const answerPage = `<hierarchy>
+    <node package="com.ss.android.article.news" class="android.view.View" content-desc="点击退出小程序" visible-to-user="true" bounds="[0,0][1080,2400]" />
+    <node package="com.ss.android.article.news" class="android.view.ViewGroup" visible-to-user="true" bounds="[0,233][1080,2014]">
+      <node package="com.ss.android.article.news" class="android.view.ViewGroup" visible-to-user="true" bounds="[0,233][1080,2014]" />
+    </node>
+    <node package="com.ss.android.article.news" class="android.widget.HorizontalScrollView" visible-to-user="true" bounds="[0,2014][1080,2180]" />
+    <node package="com.ss.android.article.news" class="android.widget.EditText" text="发送消息" hint="发送消息" visible-to-user="true" bounds="[99,2249][861,2321]" />
+  </hierarchy>`
+  assert.equal(toutiaoGenericConsultationPage(answerPage, { answerContentReady: true }), false)
+  assert.equal(toutiaoGenericConsultationPage(answerPage, { answerContentReady: false }), true)
+})
+
+test('头条回答正文像素检测映射不同物理与逻辑竖屏尺寸', async () => {
+  const blank = await sharp({ create: { width: 1080, height: 2400, channels: 3, background: '#f5f5f5' } }).png().toBuffer()
+  const answer = await sharp(blank).composite([
+    { input: Buffer.from('<svg width="720" height="500"><rect width="720" height="500" fill="white"/><path d="M20 70H650M20 150H680M20 230H610M20 310H670" stroke="black" stroke-width="16"/></svg>'), left: 180, top: 300 },
+  ]).png().toBuffer()
+  const logicalSize = { width: 720, height: 1600 }
+  const logicalBounds = [0, 155, 720, 1343]
+  assert.equal(await toutiaoAnswerRegionLooksReady(blank, logicalBounds, logicalSize), false)
+  assert.equal(await toutiaoAnswerRegionLooksReady(answer, logicalBounds, logicalSize), true)
+})
+
+test('头条冷启动只识别添加到主屏幕弹窗的取消按钮', () => {
+  const popup = `<hierarchy>
+    <node package="com.huawei.android.launcher" class="android.widget.TextView" text="添加到主屏幕" visible-to-user="true" bounds="[120,1655][960,1747]" />
+    <node package="com.huawei.android.launcher" class="android.widget.TextView" text="今日头条" visible-to-user="true" bounds="[435,2029][643,2099]" />
+    <node package="com.huawei.android.launcher" class="android.widget.Button" text="取消" clickable="true" visible-to-user="true" bounds="[84,2202][539,2334]" />
+    <node package="com.huawei.android.launcher" class="android.widget.Button" text="添加" clickable="true" visible-to-user="true" bounds="[541,2202][996,2334]" />
+  </hierarchy>`
+  assert.deepEqual(toutiaoAddToHomeScreenCancelBounds(popup), [84, 2202, 539, 2334])
+  assert.equal(toutiaoAddToHomeScreenCancelBounds(popup.replace('今日头条', '其他应用')), null)
+})
+
 test('头条全文误入通用咨询页时只重新搜索并路由一次', async () => {
   const calls = []
   const result = await runToutiaoFullAnswerAttempts({
@@ -410,6 +448,16 @@ test('头条非路由错误或已用完搜索次数时不重放全文点击', as
     repeatExactSearch: async () => { repeats += 1 },
   }), /已用完搜索次数/)
   assert.equal(repeats, 0)
+})
+
+test('头条全文二次路由失败保留最后一次底层拒绝原因', async () => {
+  await assert.rejects(() => runToutiaoFullAnswerAttempts({
+    initialTarget: { viewMore: 'first' },
+    openFullAnswer: async target => {
+      throw new ToutiaoFullAnswerNotOpenedError(target.viewMore === 'first' ? '首次页面空白' : '正文区域仍未出现')
+    },
+    repeatExactSearch: async () => ({ viewMore: 'second' }),
+  }), /正文区域仍未出现/)
 })
 
 test('抖音小荷AI全文页排除固定顶部、工具栏和输入区', () => {
@@ -996,7 +1044,7 @@ test('OCR发现医学文献列表时确认资料已经展开且不再点击', as
   assert.equal(result.capture, capture)
 })
 
-test('首次文字点击未展开时仅在OCR确认仍折叠后安全重试一次', async () => {
+test('前两次文字点击未展开时重新OCR并在文字框内偏移点击，最多尝试三次', async () => {
   const collapsedRecognition = {
     engine: 'rapidocr',
     elapsedMs: 300,
@@ -1009,21 +1057,30 @@ test('首次文字点击未展开时仅在OCR确认仍折叠后安全重试一�
   const expandedXml = '<hierarchy><androidx.compose.ui.viewinterop.ViewFactoryHolder class="androidx.compose.ui.viewinterop.ViewFactoryHolder" displayed="true" bounds="[0,700][1080,1300]" /></hierarchy>'
   const taps = []
   let stableReads = 0
+  const randomValues = [0, 1, 1, 0]
   const result = await prepareEmbeddedEvidence({
     screenshot: async () => Buffer.from('raw-screen'),
     ocr: { recognize: async () => collapsedRecognition },
     windowSize: async () => ({ width: 1080, height: 2400 }),
     tap: async (x, y) => { taps.push([x, y]) },
+    random: () => randomValues.shift(),
     delay: async () => {},
     waitForStable: async () => ({
       frame: Buffer.from('frame'),
-      xml: stableReads++ === 0 ? collapsedXml : expandedXml,
+      xml: stableReads++ < 2 ? collapsedXml : expandedXml,
       stable: true,
     }),
     log: () => {},
   }, CHAT_BOUNDS)
 
-  assert.deepEqual(taps, [[300, 725], [300, 725]])
+  assert.equal(taps.length, 3)
+  assert.deepEqual(taps[0], [300, 725])
+  assert.ok(taps[1][0] >= 60 + 480 * 0.38 && taps[1][0] <= 60 + 480 * 0.48)
+  assert.ok(taps[1][1] >= 700 + 50 * 0.42 && taps[1][1] <= 700 + 50 * 0.58)
+  assert.ok(taps[2][0] >= 60 + 480 * 0.52 && taps[2][0] <= 60 + 480 * 0.62)
+  assert.ok(taps[2][1] >= 700 + 50 * 0.42 && taps[2][1] <= 700 + 50 * 0.58)
+  assert.notDeepEqual(taps[1], taps[0])
+  assert.notDeepEqual(taps[2], taps[0])
   assert.equal(result.expanded, true)
 })
 

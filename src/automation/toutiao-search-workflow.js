@@ -1,5 +1,5 @@
 const { sleep } = require('./utils')
-const { imageRegionsStable } = require('./images')
+const { cropImage, imageInfo, imageLooksLoaded, imageRegionsStable } = require('./images')
 const { captureStableSandwich } = require('./capture-primitives')
 const {
   toutiaoSearchInput,
@@ -13,6 +13,27 @@ const {
   ToutiaoAnswerCardNotFoundError,
   ToutiaoFullAnswerNotOpenedError,
 } = require('./search-recovery')
+
+async function toutiaoAnswerRegionLooksReady(frame, logicalBounds, logicalSize) {
+  const physical = await imageInfo(frame)
+  if (!logicalSize?.width || !logicalSize?.height || physical.width <= 0 || physical.height <= 0) return false
+  const scaleX = physical.width / logicalSize.width
+  const scaleY = physical.height / logicalSize.height
+  const [left, top, right, bottom] = logicalBounds
+  const viewportWidth = right - left
+  const viewportHeight = bottom - top
+  if (viewportWidth <= 0 || viewportHeight <= 0) return false
+  // Inspect the upper-middle body rather than the shell edges or bottom quick
+  // actions. A routed-but-empty consultation page is nearly uniform here;
+  // an answer card has enough text edges to pass imageLooksLoaded().
+  const bodyBounds = [
+    Math.round((left + viewportWidth * 0.08) * scaleX),
+    Math.round((top + viewportHeight * 0.05) * scaleY),
+    Math.round((right - viewportWidth * 0.08) * scaleX),
+    Math.round((top + viewportHeight * 0.58) * scaleY),
+  ]
+  return imageLooksLoaded(await cropImage(frame, bodyBounds))
+}
 
 function createToutiaoSearchWorkflow({
   source,
@@ -131,11 +152,20 @@ function createToutiaoSearchWorkflow({
       await waitForVisualQuiet({ timeout: 1_000, fallbackMs: 400 })
       const xml = await source()
       const bounds = douyinMiniAppCaptureBounds(xml, size)
-      if (bounds && !toutiaoGenericConsultationPage(xml)) return { xml, bounds }
-      if (toutiaoGenericConsultationPage(xml)) {
+      const hasMessageInput = toutiaoGenericConsultationPage(xml)
+      let answerContentReady = false
+      if (bounds && hasMessageInput) {
+        answerContentReady = await toutiaoAnswerRegionLooksReady(
+          await screenshot(),
+          bounds,
+          hierarchyLogicalSize(xml, size),
+        )
+      }
+      if (bounds && !toutiaoGenericConsultationPage(xml, { answerContentReady })) return { xml, bounds }
+      if (hasMessageInput && !answerContentReady) {
         genericConsultationReads += 1
         if (genericConsultationReads >= 3) {
-          throw new ToutiaoFullAnswerNotOpenedError('头条“查看更多”进入了小荷AI通用咨询页，而不是当前问题的全文页。')
+          throw new ToutiaoFullAnswerNotOpenedError('头条“查看更多”已进入小程序，但连续三次未检测到回答正文像素。')
         }
       } else genericConsultationReads = 0
       const current = await ui.currentApp()
@@ -158,4 +188,4 @@ function createToutiaoSearchWorkflow({
   }
 }
 
-module.exports = { createToutiaoSearchWorkflow }
+module.exports = { createToutiaoSearchWorkflow, toutiaoAnswerRegionLooksReady }

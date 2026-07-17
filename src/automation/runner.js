@@ -98,6 +98,21 @@ async function waitForPackageHierarchy({
   throw new Error(`当前前台页面不是${packageLabel}（层级中缺少 ${packageName}），已停止UI操作。`)
 }
 
+function seamDiagnosticsForError(error) {
+  const value = error?.replySeamDiagnostics
+  if (!value) return {}
+  return {
+    reply_seam_diagnostics: {
+      summary: value.summary,
+      diagnostic_directories: value.diagnostics?.map(item => item.directory) || [],
+      frame_count: value.details?.frame_count ?? null,
+      transition_count: value.details?.transition_count ?? null,
+      expected_transition_count: value.details?.expected_transition_count ?? null,
+      frame_transition_invariant_valid: value.details?.frame_transition_invariant_valid ?? null,
+    },
+  }
+}
+
 function createRunner(options) {
   let cancelled = false
   let activeSerial = null
@@ -922,6 +937,7 @@ function createRunner(options) {
           error_name: error?.name || 'Error',
           error_message: error?.message || String(error),
           stack: error?.stack || null,
+          ...seamDiagnosticsForError(error),
           failure_diagnostics: diagnostics,
           operation_telemetry: { ...telemetry.snapshot(), current_stage: currentStage },
           performance_report: performanceReportPath(activeQuestionArtifacts || batchArtifacts),
@@ -1020,6 +1036,7 @@ function createRunner(options) {
                 error_name: error?.name || 'Error',
                 error_message: error?.message || String(error),
                 stack: error?.stack || null,
+                ...seamDiagnosticsForError(error),
                 failure_diagnostics: diagnostics,
                 operation_telemetry: { ...telemetry.snapshot(), current_stage: currentStage },
               }
@@ -1105,6 +1122,7 @@ function createRunner(options) {
           error_name: error?.name || 'Error',
           error_message: error?.message || String(error),
           stack: error?.stack || null,
+          ...seamDiagnosticsForError(error),
           failure_diagnostics: diagnostics,
           operation_telemetry: { ...telemetry.snapshot(), current_stage: currentStage },
           performance_report: performanceReportPath(activeQuestionArtifacts || batchArtifacts),
@@ -1227,6 +1245,7 @@ function createRunner(options) {
               error_name: error?.name || 'Error',
               error_message: error?.message || String(error),
               stack: error?.stack || null,
+              ...seamDiagnosticsForError(error),
               failure_diagnostics: diagnostics,
               operation_telemetry: { ...telemetry.snapshot(), current_stage: currentStage },
             }
@@ -1289,6 +1308,7 @@ function createRunner(options) {
           error_name: error?.name || 'Error',
           error_message: error?.message || String(error),
           stack: error?.stack || null,
+          ...seamDiagnosticsForError(error),
           failure_diagnostics: diagnostics,
           operation_telemetry: { ...telemetry.snapshot(), current_stage: currentStage },
           performance_report: performanceReportPath(activeQuestionArtifacts || batchArtifacts),

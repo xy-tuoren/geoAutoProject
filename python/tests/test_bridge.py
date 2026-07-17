@@ -139,6 +139,33 @@ def test_app_start_rejects_silent_launch_failure():
         bridge.dispatch("app_start", {"package": "example.app"})
 
 
+def test_foreground_window_falls_back_to_huawei_z_ordered_window_list():
+    class HuaweiDevice(FakeDevice):
+        def shell(self, args):
+            self.events.append(("shell", args))
+            return type(
+                "ShellResult",
+                (),
+                {
+                    "output": """
+Window #0 Window{15a3099 u0 GestureNavAnim}:
+Window #7 Window{14b5771 u0 DockedStackDivider}:
+Window #8 Window{15a31b9 u0 com.ss.android.article.news/com.android.bytedance.search.SearchActivity}:
+Window #9 Window{14ab409 u0 com.ss.android.article.news/com.ss.android.article.news.activity.MainActivity}:
+mObscuringWindow=null
+"""
+                },
+            )()
+
+    bridge = U2Bridge(lambda serial: HuaweiDevice())
+    bridge.dispatch("connect", {"serial": "HUAWEI"})
+
+    assert bridge.dispatch("foreground_window", {}) == {
+        "package": "com.ss.android.article.news",
+        "activity": "com.android.bytedance.search.SearchActivity",
+    }
+
+
 def test_ocr_is_device_independent_and_uses_structured_service():
     ocr = FakeOcrService()
     bridge = U2Bridge(lambda serial: FakeDevice(), ocr_service=ocr)

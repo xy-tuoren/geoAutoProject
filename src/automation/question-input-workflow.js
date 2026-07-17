@@ -3,6 +3,7 @@ const {
   iterNodes,
   nodeAttr,
   nodeIsVisible,
+  parseBounds,
   boundsForNodeAttribute,
   visibleLabelBounds,
 } = require('./hierarchy')
@@ -11,7 +12,66 @@ const {
   douyinSearchInput,
   toutiaoSearchInput,
   toutiaoHomeSearchBounds,
+  toutiaoAddToHomeScreenCancelBounds,
 } = require('./miniapp-locators')
+
+const SESSION_FIXED_LABELS = new Set([
+  '开启新会话', '历史记录', '输入问题', '输入', '发送', '拍药品', '上传图片',
+])
+
+function sessionContentLabels(xml) {
+  return iterNodes(xml).flatMap(attrs => {
+    if (!nodeIsVisible(attrs) || nodeAttr(attrs, 'class') === 'android.widget.EditText') return []
+    const label = (nodeAttr(attrs, 'text') || nodeAttr(attrs, 'content-desc')).replace(/\s+/g, ' ').trim()
+    if (!label || SESSION_FIXED_LABELS.has(label) || /^\d{1,2}:\d{2}$/.test(label)
+      || /^(?:今天|昨天|前天)(?:\s+\d{1,2}:\d{2})?$/.test(label)) return []
+    return [label]
+  })
+}
+
+function hierarchySize(xml) {
+  let width = 0
+  let height = 0
+  for (const attrs of iterNodes(xml)) {
+    const rawBounds = nodeAttr(attrs, 'bounds')
+    if (!rawBounds) continue
+    const bounds = parseBounds(rawBounds)
+    width = Math.max(width, bounds[2])
+    height = Math.max(height, bounds[3])
+  }
+  return { width, height }
+}
+
+function inputHintBounds(xml, hints = ['输入问题']) {
+  const candidates = iterNodes(xml).flatMap(attrs => {
+    if (!nodeIsVisible(attrs) || nodeAttr(attrs, 'class') === 'android.widget.EditText') return []
+    const label = nodeAttr(attrs, 'text') || nodeAttr(attrs, 'content-desc')
+    const rawBounds = nodeAttr(attrs, 'bounds')
+    if (!label || !rawBounds || !hints.some(hint => label.includes(hint))) return []
+    return [parseBounds(rawBounds)]
+  })
+  candidates.sort((a, b) => b[1] - a[1])
+  return candidates[0] || null
+}
+
+function cleanNewSessionReady(xml, hints = ['输入问题']) {
+  const size = hierarchySize(xml)
+  if (size.height <= size.width || size.height <= 0) return false
+  const inputReady = boundsForNodeAttribute(xml, 'class', 'android.widget.EditText') || inputHintBounds(xml, hints)
+  if (!inputReady) return false
+  const contentTop = Math.floor(size.height * 0.16)
+  const contentBottom = Math.floor(size.height * 0.82)
+  const conversationLabels = iterNodes(xml).filter(attrs => {
+    if (!nodeIsVisible(attrs) || nodeAttr(attrs, 'class') === 'android.widget.EditText') return false
+    const label = nodeAttr(attrs, 'text') || nodeAttr(attrs, 'content-desc')
+    const rawBounds = nodeAttr(attrs, 'bounds')
+    if (!label || !rawBounds || SESSION_FIXED_LABELS.has(label)) return false
+    const bounds = parseBounds(rawBounds)
+    const centerY = (bounds[1] + bounds[3]) / 2
+    return centerY >= contentTop && centerY <= contentBottom
+  })
+  return conversationLabels.length === 0
+}
 
 function createQuestionInputWorkflow({
   checkCancelled,
@@ -50,13 +110,10 @@ function createQuestionInputWorkflow({
         const attrs = iterNodes(xml).find(item => nodeAttr(item, 'class') === 'android.widget.EditText')
         return { bounds: editBounds, text: attrs ? nodeAttr(attrs, 'text') : '' }
       }
-      for (const hintText of getActiveEntry().inputHints || ['输入问题']) {
-        const hint = visibleLabelBounds(xml, hintText)
-        if (hint) {
-          await tap((hint[0] + hint[2]) / 2, (hint[1] + hint[3]) / 2)
-          await sleep(500)
-          break
-        }
+      const hint = inputHintBounds(xml, getActiveEntry().inputHints || ['输入问题'])
+      if (hint) {
+        await tap((hint[0] + hint[2]) / 2, (hint[1] + hint[3]) / 2)
+        await sleep(500)
       }
       await sleep(500)
     }
@@ -109,23 +166,58 @@ function createQuestionInputWorkflow({
     await tap(x, y)
   }
   
-  async function tapNewSession() {
+  async function tapNewSession({ timeout = 5_000 } = {}) {
     // Compose exposes the icon's label on a non-clickable child while its
     // clickable hit target is the parent. Clicking the label works on some
     // devices but silently fails on others, so prefer the parent when present.
-    const newSession = boundsForNodeAttribute(await source(), 'content-desc', '开启新会话')
-    if (!newSession) return false
-    await tap((newSession[0] + newSession[2]) / 2, (newSession[1] + newSession[3]) / 2)
-    await waitForVisualQuiet({ timeout: 1_200, fallbackMs: 1_000 })
-    for (const text of ['确定', '确认', '开始', '新会话']) {
-      const button = visibleLabelBounds(await source(), text)
-      if (button) {
-        await tap((button[0] + button[2]) / 2, (button[1] + button[3]) / 2)
-        await waitForVisualQuiet({ timeout: 1_200, fallbackMs: 1_000 })
-        break
-      }
+    const beforeXml = await source()
+    const inputHints = getActiveEntry().inputHints || ['输入问题']
+    if (cleanNewSessionReady(beforeXml, inputHints)) {
+      log('stage: 当前已经是无历史消息的新会话输入页，无需重复点击')
+      return true
     }
-    return true
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      const currentXml = attempt === 1 ? beforeXml : await source()
+      const newSession = boundsForNodeAttribute(currentXml, 'content-desc', '开启新会话')
+      if (!newSession) return false
+      await tap((newSession[0] + newSession[2]) / 2, (newSession[1] + newSession[3]) / 2)
+      await waitForVisualQuiet({ timeout: 1_200, fallbackMs: 1_000 })
+      const deadline = Date.now() + timeout
+      let confirmationHandled = false
+      let lastChangedSignature = null
+      let stableChangedReads = 0
+      while (Date.now() < deadline) {
+        checkCancelled()
+        const xml = await source()
+        if (!confirmationHandled) {
+          for (const text of ['确定', '确认', '开始', '新会话']) {
+            const button = visibleLabelBounds(xml, text)
+            if (!button) continue
+            await tap((button[0] + button[2]) / 2, (button[1] + button[3]) / 2)
+            confirmationHandled = true
+            await waitForVisualQuiet({ timeout: 1_200, fallbackMs: 1_000 })
+            break
+          }
+          if (confirmationHandled) continue
+        }
+        if (cleanNewSessionReady(xml, inputHints)) {
+          const signature = JSON.stringify(sessionContentLabels(xml))
+          stableChangedReads = signature === lastChangedSignature ? stableChangedReads + 1 : 1
+          lastChangedSignature = signature
+          if (stableChangedReads >= 2) {
+            log(`stage: 已确认旧会话内容消失，新会话输入页稳定（点击=${attempt}次）`)
+            return true
+          }
+        } else {
+          lastChangedSignature = null
+          stableChangedReads = 0
+        }
+        await sleep(Math.min(200, Math.max(1, deadline - Date.now())))
+      }
+      if (attempt < 2) log('stage: 第一次点击后旧会话仍完整存在，重新读取入口并安全重试一次')
+    }
+    log('stage: 两次点击新会话入口后，旧会话内容仍未确认消失')
+    return false
   }
   
   async function waitForDouyinSearchInput(timeout = 12_000) {
@@ -169,36 +261,72 @@ function createQuestionInputWorkflow({
   }
   
   async function waitForToutiaoSearchInput(timeout = 12_000) {
-    const deadline = Date.now() + timeout
-    while (Date.now() < deadline) {
-      const xml = await source()
+    async function readHierarchyHandlingStartupPopup() {
+      try {
+        return await source()
+      } catch (error) {
+        if (typeof ui.dumpHierarchy !== 'function') throw error
+        const rawXml = await ui.dumpHierarchy()
+        const cancel = toutiaoAddToHomeScreenCancelBounds(rawXml)
+        if (!cancel) throw error
+        log('stage: 正在取消头条冷启动的“添加到主屏幕”提示')
+        await tap((cancel[0] + cancel[2]) / 2, (cancel[1] + cancel[3]) / 2)
+        await waitForVisualQuiet({ timeout: 1_500, fallbackMs: 800 })
+        return null
+      }
+    }
+
+    async function inspectHierarchy(xml) {
+      if (!xml) return { progressed: true }
       const close = boundsForNodeAttribute(xml, 'content-desc', '关闭')
       if (close) {
         log('stage: 正在关闭上一题的头条小荷AI全文页')
         await tap((close[0] + close[2]) / 2, (close[1] + close[3]) / 2)
         await waitForVisualQuiet({ timeout: 1_500, fallbackMs: 800 })
-        continue
+        return { progressed: true }
       }
       const edit = toutiaoSearchInput(xml)
       if (edit) {
         await tap((edit.bounds[0] + edit.bounds[2]) / 2, (edit.bounds[1] + edit.bounds[3]) / 2)
         await waitForVisualQuiet({ timeout: 1_200, fallbackMs: 500 })
-        return toutiaoSearchInput(await source()) || edit
+        return { input: toutiaoSearchInput(await source()) || edit }
       }
       const homeSearch = toutiaoHomeSearchBounds(xml)
       if (homeSearch) {
         log('stage: 正在打开头条首页搜索入口')
         await tap((homeSearch[0] + homeSearch[2]) / 2, (homeSearch[1] + homeSearch[3]) / 2)
         await waitForVisualQuiet({ timeout: 1_500, fallbackMs: 800 })
-        continue
+        return { progressed: true }
       }
       const search = boundsForNodeAttribute(xml, 'content-desc', '搜索') || visibleLabelBounds(xml, '搜索')
       if (search) {
         await tap((search[0] + search[2]) / 2, (search[1] + search[3]) / 2)
         await waitForVisualQuiet({ timeout: 1_500, fallbackMs: 800 })
-        continue
+        return { progressed: true }
       }
+      return { progressed: false }
+    }
+
+    const deadline = Date.now() + timeout
+    while (Date.now() < deadline) {
+      const result = await inspectHierarchy(await readHierarchyHandlingStartupPopup())
+      if (result.input) return result.input
       await sleep(400)
+    }
+
+    // A slow home feed can expose its search node in the same few hundred
+    // milliseconds between the last poll and the timeout diagnostic. Perform
+    // one final read and, only when it proves forward progress, allow a short
+    // bounded grace window for the real EditText to attach.
+    const finalResult = await inspectHierarchy(await readHierarchyHandlingStartupPopup())
+    if (finalResult.input) return finalResult.input
+    if (finalResult.progressed) {
+      const graceDeadline = Date.now() + 3_000
+      while (Date.now() < graceDeadline) {
+        const result = await inspectHierarchy(await readHierarchyHandlingStartupPopup())
+        if (result.input) return result.input
+        await sleep(250)
+      }
     }
     throw new Error('未能在今日头条打开搜索输入框。请确认头条首页可正常使用且没有登录或升级提示遮挡。')
   }
@@ -233,4 +361,3 @@ function createQuestionInputWorkflow({
 }
 
 module.exports = { createQuestionInputWorkflow }
-

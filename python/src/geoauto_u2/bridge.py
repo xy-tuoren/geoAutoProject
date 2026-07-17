@@ -70,6 +70,18 @@ class U2Bridge:
                 output,
             )
             if not match:
+                # Some Huawei WindowManager builds omit mCurrentFocus and
+                # mFocusedApp entirely. Their `windows` dump is ordered from
+                # top to bottom, so the first component-backed Activity window
+                # is the foreground application window. System decorations
+                # such as StatusBar/GestureNav do not contain a component.
+                match = re.search(
+                    r"^\s*Window #\d+ Window\{[^\n]*?\su\d+\s+"
+                    r"([A-Za-z0-9._]+)/([A-Za-z0-9._$]*Activity[A-Za-z0-9._$]*)\}:",
+                    output,
+                    re.MULTILINE,
+                )
+            if not match:
                 raise BridgeError("无法从系统窗口状态读取当前前台 Activity")
             return {"package": match.group(1), "activity": match.group(2)}
         if method == "dump_hierarchy":

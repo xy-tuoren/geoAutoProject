@@ -53,6 +53,22 @@ function toutiaoHomeSearchBounds(xml) {
   return rawBounds ? parseBounds(rawBounds) : null
 }
 
+function toutiaoAddToHomeScreenCancelBounds(xml) {
+  const nodes = iterNodes(xml).filter(nodeIsVisible)
+  const launcherPackage = 'com.huawei.android.launcher'
+  const hasTitle = nodes.some(attrs => nodeAttr(attrs, 'package') === launcherPackage
+    && nodeAttr(attrs, 'text') === '添加到主屏幕')
+  const hasToutiao = nodes.some(attrs => nodeAttr(attrs, 'package') === launcherPackage
+    && nodeAttr(attrs, 'text') === '今日头条')
+  if (!hasTitle || !hasToutiao) return null
+  const cancel = nodes.find(attrs => nodeAttr(attrs, 'package') === launcherPackage
+    && nodeAttr(attrs, 'class') === 'android.widget.Button'
+    && nodeAttr(attrs, 'text') === '取消'
+    && nodeAttr(attrs, 'clickable') === 'true')
+  const rawBounds = cancel && nodeAttr(cancel, 'bounds')
+  return rawBounds ? parseBounds(rawBounds) : null
+}
+
 function toutiaoViewMoreBounds(xml) {
   const nodes = iterNodes(xml)
   const hasXiaoheSummary = nodes.some(attrs => nodeIsVisible(attrs)
@@ -329,11 +345,12 @@ function douyinMiniAppCaptureBounds(xml, screenSize) {
   return [0, top, width, bottom]
 }
 
-function toutiaoGenericConsultationPage(xml) {
-  return iterNodes(xml).some(attrs => nodeIsVisible(attrs)
+function toutiaoGenericConsultationPage(xml, { answerContentReady = false } = {}) {
+  const hasMessageInput = iterNodes(xml).some(attrs => nodeIsVisible(attrs)
     && nodeAttr(attrs, 'package') === ENTRY_DEFINITIONS['toutiao-xiaohe-miniapp'].packageName
     && nodeAttr(attrs, 'class') === 'android.widget.EditText'
     && /发送消息/.test(`${nodeAttr(attrs, 'text')} ${nodeAttr(attrs, 'hint')}`))
+  return hasMessageInput && !answerContentReady
 }
 
 
@@ -342,6 +359,7 @@ module.exports = {
   toutiaoSearchInput,
   toutiaoSearchResultBelongsToQuestion,
   toutiaoHomeSearchBounds,
+  toutiaoAddToHomeScreenCancelBounds,
   toutiaoViewMoreBounds,
   hierarchyLogicalSize,
   toutiaoOcrViewMoreTarget,
@@ -354,4 +372,3 @@ module.exports = {
   douyinMiniAppCaptureBounds,
   toutiaoGenericConsultationPage,
 }
-

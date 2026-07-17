@@ -31,6 +31,32 @@ async function imagesMeanDiff(first, second) {
 
 async function imagesSimilar(first, second, threshold = 6) { return (await imagesMeanDiff(first, second)) <= threshold }
 
+function darkContentMetrics(raw, bounds = [0, 0, raw.width, raw.height]) {
+  const left = Math.max(0, Math.floor(bounds[0]))
+  const top = Math.max(0, Math.floor(bounds[1]))
+  const right = Math.min(raw.width, Math.ceil(bounds[2]))
+  const bottom = Math.min(raw.height, Math.ceil(bounds[3]))
+  let dark = 0
+  let edges = 0
+  let samples = 0
+  for (let y = top; y < bottom; y += 2) {
+    for (let x = left; x < right; x += 2) {
+      const offset = (y * raw.width + x) * raw.channels
+      const value = luminosity(raw.data, offset)
+      if (value < 225) dark += 1
+      if (x >= left + 2) {
+        const previous = offset - raw.channels * 2
+        if (Math.abs(value - luminosity(raw.data, previous)) >= 18) edges += 1
+      }
+      samples += 1
+    }
+  }
+  return {
+    darkRatio: dark / Math.max(1, samples),
+    edgeRatio: edges / Math.max(1, samples),
+  }
+}
+
 async function imageRegionsStable(first, second, {
   globalThreshold = 1.5,
   tileMeanThreshold = 2.5,
@@ -331,6 +357,85 @@ async function findVerticalOverlapWithScore(previous, current, expected = null, 
   return { ...candidate, candidateOverlaps: overlaps, reason: candidate.valid ? null : (candidate.tilesStable ? `差异分数 ${candidate.score.toFixed(1)}` : '局部内容发生变化') }
 }
 
+async function analyzeReplyScrollEvidence(previous, current, expected = null) {
+  const result = await findVerticalOverlapWithScore(previous, current, expected)
+  const candidates = result.candidateOverlaps || []
+  const consistentShift = candidates.length >= 2 && Math.max(...candidates) - Math.min(...candidates) <= 3
+  const currentRaw = await rawImage(current)
+  const overlap = Math.max(0, Math.min(currentRaw.height, Math.round(result.overlap || 0)))
+  const addedHeight = currentRaw.height - overlap
+  const metrics = addedHeight > 0
+    ? darkContentMetrics(currentRaw, [Math.floor(currentRaw.width * 0.04), overlap, Math.ceil(currentRaw.width * 0.96), currentRaw.height])
+    : { darkRatio: 0, edgeRatio: 0 }
+  const bottomHasContent = addedHeight >= Math.max(12, Math.floor(currentRaw.height * 0.015))
+    && (metrics.darkRatio >= 0.002 || metrics.edgeRatio >= 0.001)
+  return {
+    overlap: result.overlap,
+    validOverlap: result.valid,
+    candidateOverlaps: candidates,
+    consistentShift,
+    addedHeight,
+    bottomHasContent,
+    bottomDarkRatio: metrics.darkRatio,
+    bottomEdgeRatio: metrics.edgeRatio,
+    provesNewContent: consistentShift && bottomHasContent,
+    reason: result.reason || null,
+  }
+}
+
+async function detectFloatingDownArrow(image, searchBounds = null) {
+  const raw = await rawImage(image)
+  const bounds = searchBounds || [0, 0, raw.width, raw.height]
+  const left = Math.max(0, Math.floor(bounds[0]))
+  const top = Math.max(0, Math.floor(bounds[1]))
+  const right = Math.min(raw.width, Math.ceil(bounds[2]))
+  const bottom = Math.min(raw.height, Math.ceil(bounds[3]))
+  const viewportWidth = right - left
+  const viewportHeight = bottom - top
+  if (viewportWidth <= 0 || viewportHeight <= 0) return null
+  const centerX = (left + right) / 2
+  const sizes = [0.075, 0.09, 0.105, 0.12].map(ratio => Math.max(28, Math.round(viewportWidth * ratio)))
+  let best = null
+  for (const size of sizes) {
+    const half = size / 2
+    const yStart = Math.round(top + viewportHeight * 0.48)
+    const yEnd = Math.round(bottom - half - viewportHeight * 0.015)
+    for (let centerY = yStart; centerY <= yEnd; centerY += Math.max(2, Math.round(size * 0.06))) {
+      const sample = (xRatio, yRatio, radiusRatio = 0.045) => {
+        const cx = centerX + xRatio * size
+        const cy = centerY + yRatio * size
+        const radius = Math.max(1, Math.round(size * radiusRatio))
+        let dark = 0
+        let count = 0
+        for (let y = Math.round(cy - radius); y <= Math.round(cy + radius); y += 1) {
+          for (let x = Math.round(cx - radius); x <= Math.round(cx + radius); x += 1) {
+            if (x < left || x >= right || y < top || y >= bottom) continue
+            if (luminosity(raw.data, (y * raw.width + x) * raw.channels) < 120) dark += 1
+            count += 1
+          }
+        }
+        return dark / Math.max(1, count)
+      }
+      const shaft = (sample(0, -0.2) + sample(0, -0.08) + sample(0, 0.03)) / 3
+      const arrowHead = (sample(-0.13, 0.08) + sample(-0.07, 0.14) + sample(0, 0.2)
+        + sample(0.07, 0.14) + sample(0.13, 0.08)) / 5
+      const clearSides = 1 - (sample(-0.28, -0.02, 0.07) + sample(0.28, -0.02, 0.07)) / 2
+      const clearTop = 1 - (sample(-0.2, -0.28, 0.06) + sample(0.2, -0.28, 0.06)) / 2
+      const score = shaft * 0.42 + arrowHead * 0.42 + clearSides * 0.1 + clearTop * 0.06
+      if (shaft >= 0.18 && arrowHead >= 0.12 && clearSides >= 0.82 && clearTop >= 0.82
+        && (!best || score > best.score)) {
+        best = {
+          bounds: [Math.round(centerX - half), Math.round(centerY - half), Math.round(centerX + half), Math.round(centerY + half)],
+          score,
+          shaftRatio: shaft,
+          arrowHeadRatio: arrowHead,
+        }
+      }
+    }
+  }
+  return best && best.score >= 0.26 ? best : null
+}
+
 async function verifyFrameOverlap(previous, current, expected) {
   const result = await findVerticalOverlapWithScore(previous, current, expected)
   if (!result.valid) {
@@ -519,4 +624,4 @@ async function textSeamsAreValid(frames, seams) {
   })
 }
 
-module.exports = { imageInfo, cropImage, imagesMeanDiff, imagesSimilar, imageRegionsStable, imageHasVisibleContent, imageLooksLoaded, alignCropToWhitespace, stackFramesInGroups, verifyFrameOverlap, verifyProductGridOverlap, stitchFramesInGroups, stitchFramesWithOverlaps, stackFramesWithSeparators, stitchFramesWithTransitions, composeLongImages, cropFramesAtTextSeams, textSeamsAreValid }
+module.exports = { imageInfo, cropImage, imagesMeanDiff, imagesSimilar, imageRegionsStable, imageHasVisibleContent, imageLooksLoaded, alignCropToWhitespace, stackFramesInGroups, verifyFrameOverlap, verifyProductGridOverlap, analyzeReplyScrollEvidence, detectFloatingDownArrow, stitchFramesInGroups, stitchFramesWithOverlaps, stackFramesWithSeparators, stitchFramesWithTransitions, composeLongImages, cropFramesAtTextSeams, textSeamsAreValid }

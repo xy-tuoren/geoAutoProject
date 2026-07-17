@@ -111,12 +111,27 @@ function evidenceSummaryTextCenter(target) {
   return [(left + right) / 2, (top + bottom) / 2]
 }
 
+function evidenceSummaryTapPoint(target, attempt, random = Math.random) {
+  if (attempt === 1) return evidenceSummaryTextCenter(target)
+  const [left, top, right, bottom] = target.logicalBounds
+  const width = right - left
+  const height = bottom - top
+  // Keep retries inside the OCR glyph box while avoiding the exact point that
+  // Compose may have transiently ignored. The two retry bands sit on opposite
+  // sides of the title centre and scale with the current logical resolution.
+  const horizontalStart = attempt === 2 ? 0.38 : 0.52
+  const horizontalFraction = horizontalStart + random() * 0.1
+  const verticalFraction = 0.42 + random() * 0.16
+  return [left + width * horizontalFraction, top + height * verticalFraction]
+}
+
 async function prepareEmbeddedEvidence({
   screenshot,
   ocr,
   windowSize,
   setLastOcrDiagnostic = () => {},
   tap,
+  random = Math.random,
   delay,
   waitForStable,
   log,
@@ -150,7 +165,7 @@ async function prepareEmbeddedEvidence({
   }
   const viewportHeight = bounds[3] - bounds[1]
   const clickTitle = async (currentTarget, attempt) => {
-    const point = evidenceSummaryTextCenter(currentTarget)
+    const point = evidenceSummaryTapPoint(currentTarget, attempt, random)
     log(`capture: OCR识别到“${currentTarget.text}”，点击标题文字展开引用资料（${Math.round(point[0])},${Math.round(point[1])}，第${attempt}次）`)
     await tap(point[0], point[1])
     await delay(800)
@@ -170,19 +185,20 @@ async function prepareEmbeddedEvidence({
     return { target: confirmationTarget, expanded: confirmationExpanded }
   }
 
-  let capture = await clickTitle(target, 1)
-  let expanded = hierarchyExpanded(capture)
-  if (!expanded) {
-    const confirmation = await confirmByOcr(1)
+  let capture = null
+  let expanded = false
+  let currentTarget = target
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    capture = await clickTitle(currentTarget, attempt)
+    expanded = hierarchyExpanded(capture)
+    if (expanded) break
+    const confirmation = await confirmByOcr(attempt)
     expanded = confirmation.expanded
-    if (!expanded && confirmation.target) {
-      log('capture: 第一次点击后OCR仍确认引用资料处于折叠状态，安全重试一次标题文字点击')
-      capture = await clickTitle(confirmation.target, 2)
-      expanded = hierarchyExpanded(capture)
-      if (!expanded) expanded = (await confirmByOcr(2)).expanded
-    }
+    if (expanded || !confirmation.target || attempt === 3) break
+    log(`capture: 第${attempt}次点击后OCR仍确认引用资料处于折叠状态，重新识别位置后安全尝试第${attempt + 1}次标题文字点击`)
+    currentTarget = confirmation.target
   }
-  if (!expanded) throw new Error('OCR已识别并点击“根据…篇资料为你总结”，但未确认引用资料展开，已停止后续截图。')
+  if (!expanded) throw new Error('OCR已识别并尝试点击“根据…篇资料为你总结”最多三次，但未确认引用资料展开，已停止后续截图。')
   log('capture: 引用资料已展开并合并到回答截图')
   return { found: true, expanded, capture }
 }

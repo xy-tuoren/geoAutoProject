@@ -34,6 +34,18 @@ function classifyAutomationLog(message) {
   }
   if (/^capture: 引用资料/.test(text) || /^capture: 在回答截图前展开引用资料/.test(text)) return { event: 'evidence_capture', category: 'capture', details: {} }
   if (/^capture: 抖音小程序入口搜索页已保存/.test(text)) return { event: 'douyin_miniapp_entry_captured', category: 'capture', details: {} }
+  const seamSummary = text.match(/^capture: 接缝汇总已保存 (.+)（帧=(\d+)，接缝=(\d+)\/(\d+)，异常证据=(\d+)组）$/)
+  if (seamSummary) return {
+    event: 'reply_seam_diagnostics_saved',
+    category: 'diagnostic',
+    details: {
+      summary: seamSummary[1],
+      frames: Number(seamSummary[2]),
+      transitions: Number(seamSummary[3]),
+      expected_transitions: Number(seamSummary[4]),
+      diagnostic_groups: Number(seamSummary[5]),
+    },
+  }
   const reply = text.match(/^capture: 回答截图完成，帧=(\d+)，精确接缝=(\d+)\/(\d+)，安全重复接缝=(\d+)，重采=(\d+)，模式=([^，]+)，耗时=(\d+)ms$/)
   if (reply) return { event: 'reply_capture_completed', category: 'capture', details: { frames: Number(reply[1]), verified_seams: Number(reply[2]), total_seams: Number(reply[3]), safe_overlap_seams: Number(reply[4]), recaptures: Number(reply[5]), mode: reply[6], elapsed_ms: Number(reply[7]) } }
   if (/^capture: .*接缝无法精确校验/.test(text)) return { event: 'capture_seam_fallback', category: 'capture', details: {} }
