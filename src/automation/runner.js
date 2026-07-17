@@ -2,7 +2,7 @@ const fs = require('node:fs/promises')
 const path = require('node:path')
 const { sleep, createBatchDirectory, batchArtifactDirectories, entryArtifactDirectories, questionArtifactDirectories } = require('./utils')
 const { EventLog } = require('./event-log')
-const { iterNodes, nodeAttr, nodeIsVisible, parseBounds, currentQuestionText, findChatScrollBounds, validateCaptureViewport, visibleLabelBounds, boundsForNodeAttribute } = require('./hierarchy')
+const { iterNodes, nodeAttr, nodeIsVisible, parseBounds, currentQuestionText, findChatScrollBounds, validateCaptureViewport, visibleLabelBounds, boundsForNodeAttribute, responseTimeoutRetryTarget } = require('./hierarchy')
 const { imageInfo, cropImage, imagesSimilar } = require('./images')
 const { U2Client } = require('./u2-client')
 const { OcrRecognizer } = require('./ocr')
@@ -69,6 +69,7 @@ const { createReplyCapture } = require('./reply-capture')
 const { createQuestionInputWorkflow } = require('./question-input-workflow')
 const { createDouyinSearchWorkflow } = require('./douyin-search-workflow')
 const { createToutiaoSearchWorkflow } = require('./toutiao-search-workflow')
+const { recoverTimedOutExistingReply } = require('./existing-reply-recovery')
 const { createArtifactWriter, ARTIFACT_LAYOUT_VERSION } = require('./artifact-writer')
 const { OperationTelemetry } = require('./operation-telemetry')
 const { ConsoleLogFormatter } = require('./console-log-formatter')
@@ -804,6 +805,12 @@ function createRunner(options) {
         const size = await windowSize()
         let question = ''
         let captureMethod = captureFullReplyFrames
+        let existingReplyRecoveryMeta = {
+          existing_reply_timeout_detected: false,
+          existing_reply_retry_performed: false,
+          existing_reply_retry_attempts: 0,
+          existing_reply_retry_succeeded: null,
+        }
         if (activeEntry.workflow === 'douyin-search' || activeEntry.workflow === 'toutiao-search') {
           question = String(payload.questions?.[0] || '').trim()
           if (!question) throw new Error('小程序当前已有回答模式需要在命令末尾提供当前问题文字，仅用于文件夹命名；不会输入或发送。')
@@ -820,10 +827,34 @@ function createRunner(options) {
           const chatBounds = findChatScrollBounds(xml, size)
           validateCaptureViewport(size, chatBounds)
           question = String(payload.questions?.[0] || '').trim()
+          if (!question) question = currentQuestionText(xml, chatBounds) || ''
+          if (responseTimeoutRetryTarget(xml, chatBounds) && !question) {
+            throw new Error('当前已有回答显示响应超时，但无法先确认它对应的问题；为避免对错误会话重新生成，本次未点击重试。')
+          }
+          const recovery = await recoverTimedOutExistingReply({
+            xml,
+            chatBounds,
+            timeout: payload.timeout * 1_000,
+            source,
+            tap,
+            waitForStableReply,
+            log,
+            record: (event, details) => batchEventLog.record(event, {
+              category: 'recovery',
+              details,
+              context: {
+                entry_id: activeEntry.id,
+                entry_label: activeEntry.label,
+                question,
+                question_index: 1,
+              },
+            }),
+          })
+          xml = recovery.xml
+          existingReplyRecoveryMeta = recovery.meta
           if (question) {
-            captureMethod = currentQuestion => captureFullReplyFrames(currentQuestion, 30, { singleQuestionSession: true })
+            if (payload.questions?.[0]) captureMethod = currentQuestion => captureFullReplyFrames(currentQuestion, 30, { singleQuestionSession: true })
           } else {
-            question = currentQuestionText(xml, chatBounds)
             let unchangedAtTop = 0
             let locateFrame = question ? null : await cropImage(await screenshot(), chatBounds)
             while (!question && unchangedAtTop < 2) {
@@ -872,6 +903,7 @@ function createRunner(options) {
             input_performed: false,
             send_performed: false,
             new_session_performed: false,
+            ...existingReplyRecoveryMeta,
             ui_backend: 'python_uiautomator2_strict',
             ui_fallback_enabled: false,
           },

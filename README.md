@@ -39,6 +39,8 @@ npm run dist       # 准备内置运行时并打包桌面应用
 npm run run:android -- --serial <设备序列号> --output-dir ./captures/current-answer --capture-current-answer
 ```
 
+当前已有回答若明确同时显示“响应超时，点击重新生成回答”和可点击的“重试”按钮，流程会先确认对应问题，点击前重新读取目标应用层级并刷新按钮坐标，然后仅点击一次重试。重试后再次响应超时或无法确认回答稳定时会明确失败，绝不进行第二次点击；整个过程仍不会新建会话、聚焦输入框、输入或发送问题。`回答.json` 通过 `existing_reply_timeout_detected`、`existing_reply_retry_performed`、`existing_reply_retry_attempts` 和 `existing_reply_retry_succeeded` 记录实际状态，批次事件日志记录检测、点击和完成/失败事件。
+
 也可以在命令末尾直接提供已知的问题文字。小荷正式批量流程本来就持有该文字；真机复用已有回答验收时提供它，可直接按新会话路径从物理顶部采集，不再识别问题气泡，且仍不会输入或发送：
 
 ```bash

@@ -5,7 +5,7 @@ const os = require('node:os')
 const path = require('node:path')
 const sharp = require('sharp')
 const XLSX = require('xlsx')
-const { questionVisible, currentQuestionText, replyTailOnScreen, findChatScrollBounds, validateCaptureViewport, floatingScrollControlBounds, replyCaptureBounds, estimateVerticalScrollShift, sharedTextSeam, evidencePanelBounds, visibleLabelBounds, visibleLabelBoundsList, boundsListForNodeAttribute, referenceProductsSection, referenceProductImageBounds } = require('../../src/automation/hierarchy')
+const { questionVisible, currentQuestionText, replyTailOnScreen, findChatScrollBounds, validateCaptureViewport, floatingScrollControlBounds, replyCaptureBounds, estimateVerticalScrollShift, sharedTextSeam, evidencePanelBounds, visibleLabelBounds, visibleLabelBoundsList, boundsListForNodeAttribute, responseTimeoutRetryTarget, referenceProductsSection, referenceProductImageBounds } = require('../../src/automation/hierarchy')
 const { stackFramesInGroups, verifyFrameOverlap, verifyProductGridOverlap, imageInfo, imageLooksLoaded, imagesSimilar, imageRegionsStable, alignCropToWhitespace, stitchFramesWithOverlaps, composeLongImages, cropFramesAtTextSeams } = require('../../src/automation/images')
 const { createBatchDirectory, questionArtifactDirectory, batchArtifactDirectories, entryArtifactDirectories, questionArtifactDirectories } = require('../../src/automation/utils')
 const { EventLog, classifyAutomationLog } = require('../../src/automation/event-log')
@@ -16,6 +16,7 @@ const { automationEntries, ENTRY_DEFINITIONS, entryHierarchyStartupTimeout, hier
 const { DouyinSearchResultNotFoundError, ToutiaoAnswerCardNotFoundError, ToutiaoFullAnswerNotOpenedError, runDouyinSearchResultAttempts, runToutiaoAnswerCardAttempts, runToutiaoFullAnswerAttempts } = require('../../src/automation/search-recovery')
 const { createQuestionWorkflows } = require('../../src/automation/question-workflows')
 const { createReplyCapture } = require('../../src/automation/reply-capture')
+const { recoverTimedOutExistingReply } = require('../../src/automation/existing-reply-recovery')
 const { toutiaoAnswerRegionLooksReady } = require('../../src/automation/toutiao-search-workflow')
 
 const CHAT_BOUNDS = [0, 200, 1080, 1800]
@@ -953,6 +954,86 @@ test('从右侧消息气泡自动识别当前已有问题而不依赖输入框',
     + '<node class="android.widget.TextView" text="腹泻脱水首选口服补液盐" bounds="[65,970][1207,1192]" />'
     + '</node></node></hierarchy>'
   assert.equal(currentQuestionText(xml, [0, 440, 1272, 2315]), '腹泻脱水用什么药')
+})
+
+test('当前真机较宽的问题气泡仍可在响应超时前确认对应问题', () => {
+  const xml = '<hierarchy><node class="android.view.View" bounds="[0,333][1080,2010]">'
+    + '<node class="android.view.View" bounds="[55,439][1025,577]">'
+    + '<node class="android.view.View" bounds="[225,442][981,574]">'
+    + '<node class="android.widget.TextView" text="类风湿性关节炎用什么中成药？" content-desc="类风湿性关节炎用什么中成药？" visible-to-user="true" bounds="[225,472][981,544]" />'
+    + '</node></node></node></hierarchy>'
+  assert.equal(currentQuestionText(xml, [0, 384, 1080, 1968]), '类风湿性关节炎用什么中成药？')
+})
+
+test('仅在聊天区同时出现响应超时提示和可点击重试按钮时识别重试目标', () => {
+  const physical1080 = '<hierarchy><node package="com.aurora.xiaohe.aidoctor" class="android.view.View" bounds="[0,200][1080,2200]">'
+    + '<node package="com.aurora.xiaohe.aidoctor" class="android.widget.TextView" text="响应超时，点击重新生成回答。" bounds="[55,643][811,726]" />'
+    + '<node package="com.aurora.xiaohe.aidoctor" class="android.widget.Button" text="重试" content-desc="重试" clickable="true" bounds="[55,754][1025,887]" />'
+    + '</node></hierarchy>'
+  assert.deepEqual(responseTimeoutRetryTarget(physical1080, [0, 200, 1080, 2200]), {
+    promptBounds: [55, 643, 811, 726],
+    retryBounds: [55, 754, 1025, 887],
+    tap: [540, 820],
+  })
+
+  const logical720 = '<hierarchy><node package="com.aurora.xiaohe.aidoctor" class="android.view.View" bounds="[0,120][720,1460]">'
+    + '<node package="com.aurora.xiaohe.aidoctor" class="android.widget.TextView" content-desc="响应超时，请重新生成回答" bounds="[36,420][542,478]" />'
+    + '<node package="com.aurora.xiaohe.aidoctor" class="android.widget.Button" content-desc="重试" clickable="true" bounds="[36,495][684,585]" />'
+    + '</node></hierarchy>'
+  assert.deepEqual(responseTimeoutRetryTarget(logical720, [0, 120, 720, 1460]), {
+    promptBounds: [36, 420, 542, 478],
+    retryBounds: [36, 495, 684, 585],
+    tap: [360, 540],
+  })
+
+  const unrelatedRetry = '<hierarchy><node class="android.widget.Button" text="重试" clickable="true" bounds="[40,500][680,590]" /></hierarchy>'
+  assert.equal(responseTimeoutRetryTarget(unrelatedRetry, [0, 120, 720, 1460]), null)
+})
+
+test('当前已有回答响应超时时刷新坐标并且只点击一次重试', async () => {
+  const timeoutXml = '<hierarchy><node package="com.aurora.xiaohe.aidoctor" class="android.widget.TextView" text="响应超时，点击重新生成回答。" bounds="[55,643][811,726]" />'
+    + '<node package="com.aurora.xiaohe.aidoctor" class="android.widget.Button" text="重试" clickable="true" bounds="[55,754][1025,887]" /></hierarchy>'
+  const stableXml = '<hierarchy><node package="com.aurora.xiaohe.aidoctor" class="android.widget.TextView" text="回答正文" bounds="[55,643][1025,887]" /></hierarchy>'
+  const events = []
+  const result = await recoverTimedOutExistingReply({
+    xml: timeoutXml,
+    chatBounds: [0, 200, 1080, 2200],
+    timeout: 90_000,
+    source: async () => { events.push('source'); return timeoutXml },
+    tap: async (x, y) => { events.push(['tap', x, y]) },
+    waitForStableReply: async (timeout, options) => {
+      events.push(['wait', timeout, Number.isFinite(options.startedAt)])
+      return { status: 'stable', xml: stableXml }
+    },
+    log: message => events.push(['log', message]),
+    record: async (event, details) => events.push(['record', event, details.retry_bounds || null]),
+  })
+
+  assert.equal(result.xml, stableXml)
+  assert.deepEqual(result.meta, {
+    existing_reply_timeout_detected: true,
+    existing_reply_retry_performed: true,
+    existing_reply_retry_attempts: 1,
+    existing_reply_retry_succeeded: true,
+  })
+  assert.deepEqual(events.filter(event => Array.isArray(event) && event[0] === 'tap'), [['tap', 540, 820]])
+  assert.equal(events.some(event => Array.isArray(event) && event[1] === 'existing_reply_timeout_detected'), true)
+  assert.equal(events.some(event => Array.isArray(event) && event[1] === 'existing_reply_timeout_retry_completed'), true)
+})
+
+test('当前已有回答唯一一次重试后仍响应超时则明确失败且不二次点击', async () => {
+  const timeoutXml = '<hierarchy><node class="android.widget.TextView" text="响应超时，点击重新生成回答。" bounds="[36,420][542,478]" />'
+    + '<node class="android.widget.Button" content-desc="重试" clickable="true" bounds="[36,495][684,585]" /></hierarchy>'
+  let taps = 0
+  await assert.rejects(recoverTimedOutExistingReply({
+    xml: timeoutXml,
+    chatBounds: [0, 120, 720, 1460],
+    timeout: 1_000,
+    source: async () => timeoutXml,
+    tap: async () => { taps += 1 },
+    waitForStableReply: async () => ({ status: 'stable', xml: timeoutXml }),
+  }), /唯一一次重试后仍显示响应超时/)
+  assert.equal(taps, 1)
 })
 
 test('药品卡片里的医保标签不能被误识别为当前问题', () => {

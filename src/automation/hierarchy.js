@@ -180,7 +180,10 @@ function userQuestionCandidates(xml, chatBounds) {
       if (parentBounds && rowBounds && boundsIntersect(bounds, chatBounds)
         && rowBounds[2] - rowBounds[0] >= chatWidth * 0.72
         && rowBounds[0] <= bounds[0] && rowBounds[2] >= bounds[2]
-        && parentBounds[0] >= rowBounds[0] + chatWidth * 0.18
+        // Longer questions legitimately produce wider right-aligned bubbles.
+        // Keep a proportional right-bubble inset while allowing the 1080-wide
+        // live layout whose left inset is about 15.7% of the chat viewport.
+        && parentBounds[0] >= rowBounds[0] + chatWidth * 0.14
         && parentBounds[2] <= rowBounds[2] - chatWidth * 0.02
         && parentBounds[2] - parentBounds[0] <= (rowBounds[2] - rowBounds[0]) * 0.86
         && Math.abs(parentBounds[0] - bounds[0]) <= chatWidth * 0.04
@@ -270,6 +273,57 @@ function replyCaptureBounds(xml, screenSize) {
 function visibleLabelBounds(xml, label) { return visibleNodesWithLabel(xml, label)[0] || null }
 
 function visibleLabelBoundsList(xml, label) { return visibleNodesWithLabel(xml, label) }
+
+function responseTimeoutRetryTarget(xml, chatBounds) {
+  const chatWidth = chatBounds[2] - chatBounds[0]
+  const chatHeight = chatBounds[3] - chatBounds[1]
+  const candidates = iterNodes(xml).flatMap(attrs => {
+    if (!nodeIsVisible(attrs)) return []
+    const rawBounds = nodeAttr(attrs, 'bounds')
+    if (!rawBounds) return []
+    const bounds = parseBounds(rawBounds)
+    if (!boundsIntersect(bounds, chatBounds)) return []
+    return [{
+      attrs,
+      bounds,
+      label: (nodeAttr(attrs, 'text') || nodeAttr(attrs, 'content-desc')).trim(),
+      packageName: nodeAttr(attrs, 'package'),
+    }]
+  })
+  const prompts = candidates.filter(candidate =>
+    candidate.label.includes('响应超时')
+    && (candidate.label.includes('重新生成回答') || candidate.label.includes('重试')))
+  const retries = candidates.filter(candidate => {
+    const width = candidate.bounds[2] - candidate.bounds[0]
+    const height = candidate.bounds[3] - candidate.bounds[1]
+    return candidate.label === '重试'
+      && nodeAttr(candidate.attrs, 'clickable') === 'true'
+      && /Button$/.test(nodeAttr(candidate.attrs, 'class'))
+      && width >= chatWidth * 0.35
+      && height >= chatHeight * 0.025
+      && height <= chatHeight * 0.16
+  })
+  const pairs = []
+  for (const prompt of prompts) {
+    for (const retry of retries) {
+      if (prompt.packageName && retry.packageName && prompt.packageName !== retry.packageName) continue
+      const gap = retry.bounds[1] - prompt.bounds[3]
+      if (gap < 0 || gap > chatHeight * 0.12) continue
+      pairs.push({ prompt, retry, gap })
+    }
+  }
+  pairs.sort((first, second) => first.gap - second.gap)
+  const pair = pairs[0]
+  if (!pair) return null
+  return {
+    promptBounds: pair.prompt.bounds,
+    retryBounds: pair.retry.bounds,
+    tap: [
+      Math.floor((pair.retry.bounds[0] + pair.retry.bounds[2]) / 2),
+      boundsCenterY(pair.retry.bounds),
+    ],
+  }
+}
 
 function boundsListForNodeAttribute(xml, attribute, value) {
   return iterNodes(xml).flatMap(attrs => {
@@ -430,4 +484,4 @@ function referenceProductImageBounds(xml, listBounds) {
   return { mode: inferred.length ? 'inferred_card_artwork' : 'viewport_content', bounds: inferred }
 }
 
-module.exports = { LOADING_TEXT_MARKERS, iterNodes, nodeAttr, nodeIsVisible, parseBounds, boundsIntersect, boundsCenterY, estimateVerticalScrollShift, sharedTextSeam, hierarchyIsLoading, visibleNodesWithLabel, replyTailOnScreen, questionVisible, currentQuestionText, findChatScrollBounds, validateCaptureViewport, floatingScrollControlBounds, replyCaptureBounds, visibleLabelBounds, visibleLabelBoundsList, boundsForNodeAttribute, boundsListForNodeAttribute, evidencePanelBounds, panelIsClipped, evidenceMinimumHeight, parseNodeTree, referenceProductsSection, referenceProductImageBounds }
+module.exports = { LOADING_TEXT_MARKERS, iterNodes, nodeAttr, nodeIsVisible, parseBounds, boundsIntersect, boundsCenterY, estimateVerticalScrollShift, sharedTextSeam, hierarchyIsLoading, visibleNodesWithLabel, replyTailOnScreen, questionVisible, currentQuestionText, findChatScrollBounds, validateCaptureViewport, floatingScrollControlBounds, replyCaptureBounds, visibleLabelBounds, visibleLabelBoundsList, responseTimeoutRetryTarget, boundsForNodeAttribute, boundsListForNodeAttribute, evidencePanelBounds, panelIsClipped, evidenceMinimumHeight, parseNodeTree, referenceProductsSection, referenceProductImageBounds }
