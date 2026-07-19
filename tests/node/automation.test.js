@@ -6,20 +6,40 @@ const path = require('node:path')
 const sharp = require('sharp')
 const XLSX = require('xlsx')
 const { questionVisible, currentQuestionText, replyTailOnScreen, findChatScrollBounds, validateCaptureViewport, floatingScrollControlBounds, replyCaptureBounds, estimateVerticalScrollShift, sharedTextSeam, evidencePanelBounds, visibleLabelBounds, visibleLabelBoundsList, boundsListForNodeAttribute, responseTimeoutRetryTarget, referenceProductsSection, referenceProductImageBounds } = require('../../src/automation/hierarchy')
-const { stackFramesInGroups, verifyFrameOverlap, verifyProductGridOverlap, imageInfo, imageLooksLoaded, imagesSimilar, imageRegionsStable, alignCropToWhitespace, stitchFramesWithOverlaps, composeLongImages, cropFramesAtTextSeams } = require('../../src/automation/images')
+const { stackFramesInGroups, verifyFrameOverlap, verifyReplyFrameOverlap, verifyProductGridOverlap, imageInfo, imageLooksLoaded, imagesSimilar, imageRegionsStable, alignCropToWhitespace, stitchFramesWithOverlaps, composeLongImages, cropFramesAtTextSeams } = require('../../src/automation/images')
 const { createBatchDirectory, questionArtifactDirectory, batchArtifactDirectories, entryArtifactDirectories, questionArtifactDirectories } = require('../../src/automation/utils')
 const { EventLog, classifyAutomationLog } = require('../../src/automation/event-log')
 const { loadQuestionFile } = require('../../src/questions')
-const { adbConnectionLost, captureFailureDiagnostics, captureStableObserved, captureStableSandwich, calibratedProductFallbackOverlap, chatSwipePlan, conservativeFallbackOverlap, buildReplyImages, CancelledError, DOUYIN_MINIAPP_ENTRY_FILENAME, DOUYIN_SEARCH_SUMMARY_FILENAME, TOUTIAO_SEARCH_SUMMARY_FILENAME, douyinGenericAiAnswerBounds, douyinMiniAppCaptureBounds, douyinMiniAppEntryBounds, douyinOcrViewFullTarget, douyinSearchInput, douyinSearchResultTarget, douyinSearchResultsBounds, douyinViewFullBounds, failedRetryItems, fillQuestionInput, historyOnboardingVisible, maxLongImageHeight, miniAppReferenceProductsTrigger, observerRegionFallbackOptions, prepareEmbeddedEvidence, referenceProductDrawerBounds, referenceProductsCaptureComplete, referenceProductSheetExpanded, referenceProductsTrigger, referenceProductViewportReadiness, refreshedReferenceProductsTrigger, requireQuestionLocated, retryAttemptCount, runQuestionsWithRecovery, scrollEndConfirmed, scrollSingleQuestionSessionToTop, toutiaoGenericConsultationPage, toutiaoHomeSearchBounds, toutiaoOcrViewMoreTarget, toutiaoSearchInput, toutiaoSearchResultBelongsToQuestion, toutiaoViewMoreBounds, waitForPackageHierarchy } = require('../../src/automation/runner')
+const { adbConnectionLost, captureFailureDiagnostics, captureStableObserved, captureStableSandwich, calibratedProductFallbackOverlap, chatSwipePlan, conservativeFallbackOverlap, buildReplyImages, CancelledError, confirmPersistentScrollEnd, DOUYIN_MINIAPP_ENTRY_FILENAME, DOUYIN_SEARCH_SUMMARY_FILENAME, TOUTIAO_SEARCH_SUMMARY_FILENAME, douyinGenericAiAnswerBounds, douyinMiniAppCaptureBounds, douyinMiniAppEntryBounds, douyinOcrViewFullTarget, douyinSearchInput, douyinSearchResultTarget, douyinSearchResultsBounds, douyinViewFullBounds, failedRetryItems, fillQuestionInput, historyOnboardingVisible, maxLongImageHeight, miniAppReferenceProductsTrigger, observerRegionFallbackOptions, prepareEmbeddedEvidence, referenceProductDrawerBounds, referenceProductsCaptureComplete, referenceProductSheetExpanded, referenceProductsTrigger, referenceProductViewportReadiness, refreshedReferenceProductsTrigger, requireQuestionLocated, retryAttemptCount, runQuestionsWithRecovery, scrollEndConfirmed, scrollSingleQuestionSessionToTop, toutiaoGenericConsultationPage, toutiaoHomeSearchBounds, toutiaoOcrViewMoreTarget, toutiaoSearchInput, toutiaoSearchResultBelongsToQuestion, toutiaoViewMoreBounds, waitForPackageHierarchy } = require('../../src/automation/runner')
 const { toutiaoAddToHomeScreenCancelBounds } = require('../../src/automation/miniapp-locators')
 const { automationEntries, ENTRY_DEFINITIONS, entryHierarchyStartupTimeout, hierarchyBelongsToPackage, normalizeAutomationEntries } = require('../../src/automation/entry-catalog')
 const { DouyinSearchResultNotFoundError, ToutiaoAnswerCardNotFoundError, ToutiaoFullAnswerNotOpenedError, runDouyinSearchResultAttempts, runToutiaoAnswerCardAttempts, runToutiaoFullAnswerAttempts } = require('../../src/automation/search-recovery')
 const { createQuestionWorkflows } = require('../../src/automation/question-workflows')
-const { createReplyCapture } = require('../../src/automation/reply-capture')
+const { createReplyCapture, navigateReplyToBottomControl } = require('../../src/automation/reply-capture')
 const { recoverTimedOutExistingReply } = require('../../src/automation/existing-reply-recovery')
 const { toutiaoAnswerRegionLooksReady } = require('../../src/automation/toutiao-search-workflow')
 
 const CHAT_BOUNDS = [0, 200, 1080, 1800]
+
+test('小荷到底按钮未在首次点击后消失时只按最新层级受控重试', async () => {
+  const control = '<hierarchy><node class="android.view.View" clickable="true" visible-to-user="true" bounds="[475,1500][607,1632]" /></hierarchy>'
+  const cleared = '<hierarchy><node class="android.view.View" clickable="false" visible-to-user="true" bounds="[0,200][1080,1800]" /></hierarchy>'
+  const sources = [control, cleared]
+  const taps = []
+  const logs = []
+  const result = await navigateReplyToBottomControl({
+    initialXml: control,
+    bounds: CHAT_BOUNDS,
+    source: async () => sources.shift(),
+    tap: async (x, y) => taps.push([x, y]),
+    log: message => logs.push(message),
+    delay: async () => {},
+  })
+  assert.deepEqual(taps, [[541, 1566], [541, 1566]])
+  assert.equal(result.clicks, 2)
+  assert.equal(result.targetCleared, true)
+  assert.match(logs[0], /最新层级重新定位/)
+})
 
 test('抖音全文截图进入共享的回答稳定等待，不引用未定义常量', async () => {
   let quietOptions = null
@@ -761,6 +781,26 @@ test('新会话不判断问题气泡，连续两次向上无变化才确认顶�
   assert.deepEqual(touchpoints, [0.84, 0.68, 0.84, 0.68])
 })
 
+test('正式截图前以持续不可滚动和画面稳定确认回答已完整生成', async () => {
+  let now = 0
+  const frames = ['生成中', '新内容', '底部', '底部', '底部', '底部', '底部']
+  const result = await confirmPersistentScrollEnd({
+    capture: async () => ({ frame: frames.shift(), xml: '<stable />' }),
+    swipeDown: async () => ({}),
+    settle: async () => ({ frame: frames.shift() || '底部', xml: '<stable />' }),
+    framesStable: async (before, after) => before === after,
+    quietMs: 900,
+    probeInterval: 300,
+    delay: async milliseconds => { now += milliseconds },
+    now: () => now,
+  })
+
+  assert.equal(result.confirmed, true)
+  assert.equal(result.resets, 2)
+  assert.ok(result.probes >= 5)
+  assert.ok(result.quietMs >= 900)
+})
+
 test('稳定帧夹心校验首轮只需要两次截图', async () => {
   let now = 0
   const events = []
@@ -1310,12 +1350,12 @@ test('滚到顶部后重新计算回答截图范围并排除新出现的向下�
   })
 })
 
-test('顶部定位使用更长且更快的滚动，回答采集保持较高重叠', () => {
+test('完成确认和顶部定位使用长距离快速滚动，正式回答采集保持较高重叠', () => {
   const bounds = [0, 333, 1080, 2001]
   const capture = chatSwipePlan(bounds, 0.45, { speed: 1400 })
-  const navigation = chatSwipePlan(bounds, 0.65, { speed: 3200 })
+  const navigation = chatSwipePlan(bounds, 0.78, { maxFraction: 0.82, speed: 4000 })
   assert.equal(capture.distance, 750)
-  assert.equal(navigation.distance, 1084)
+  assert.equal(navigation.distance, 1301)
   assert.ok(navigation.durationMs < capture.durationMs)
 })
 
@@ -1466,14 +1506,17 @@ test('结构化事件日志记录参考药品关键阶段和单题上下文', as
       now: () => new Date('2026-07-15T04:00:00.000Z'),
     })
     logger.recordMessage('stage: 正在发送问题')
+    logger.recordMessage('waiting: 小荷回答底部已持续6秒不可继续滚动且内容无变化，确认生成完成（探测=4，重置=1）')
     logger.recordMessage('capture: 推荐药品截图完成，共 4 屏，图片已全部加载')
     await logger.flush()
     const records = (await fs.readFile(filePath, 'utf8')).trim().split('\n').map(JSON.parse)
-    assert.deepEqual(records.map(item => item.sequence), [1, 2])
-    assert.deepEqual(records.map(item => item.event), ['stage', 'reference_products_capture_completed'])
-    assert.equal(records[1].question, '测试')
-    assert.equal(records[1].details.pages, 4)
-    assert.equal(records[1].details.images_status, '已全部加载')
+    assert.deepEqual(records.map(item => item.sequence), [1, 2, 3])
+    assert.deepEqual(records.map(item => item.event), ['stage', 'reply_completion_confirmed', 'reference_products_capture_completed'])
+    assert.equal(records[1].details.method, 'persistent_scroll_end')
+    assert.equal(records[1].details.resets, 1)
+    assert.equal(records[2].question, '测试')
+    assert.equal(records[2].details.pages, 4)
+    assert.equal(records[2].details.images_status, '已全部加载')
   } finally { await fs.rm(directory, { recursive: true, force: true }) }
 })
 
@@ -1536,6 +1579,72 @@ test('不同内容区域测得不同滚动位移时拒绝拼接', async () => {
   const current = await sharp({ create: { width, height, channels: 3, background: 'white' } })
     .composite([{ input: left, left: 0, top: 0 }, { input: right, left: 120, top: 0 }]).png().toBuffer()
   await assert.rejects(() => verifyFrameOverlap(previous, current, 210), /区域.*不一致|连续性/)
+  await assert.rejects(() => verifyReplyFrameOverlap(previous, current, 210), /区域.*不一致|连续性/)
+})
+
+test('小荷正文接缝以多区域多数共识容忍单个局部动态区', async () => {
+  const width = 400
+  const height = 500
+  const shift = 140
+  const overlap = height - shift
+  const raw = Buffer.alloc(width * height * 3)
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const offset = (y * width + x) * 3
+      const value = 35 + ((y * 31 + x * 17 + (x * y) % 101) % 190)
+      raw[offset] = value
+      raw[offset + 1] = (value + 37) % 240
+      raw[offset + 2] = (value + 73) % 240
+    }
+  }
+  const previous = await sharp(raw, { raw: { width, height, channels: 3 } }).png().toBuffer()
+  const currentBase = await sharp(previous).extract({ left: 0, top: shift, width, height: overlap })
+    .extend({ bottom: shift, background: '#f4f4f4' }).png().toBuffer()
+  const changedBand = await sharp({ create: { width: 80, height: overlap, channels: 3, background: '#f39a53' } }).png().toBuffer()
+  const current = await sharp(currentBase).composite([{ input: changedBand, left: 16, top: 0 }]).png().toBuffer()
+
+  assert.equal(await verifyReplyFrameOverlap(previous, current, overlap), overlap)
+})
+
+test('小荷正文局部样式整行变化时可用层级位移和图像候选双重确认接缝', async () => {
+  const width = 400
+  const height = 500
+  const shift = 140
+  const overlap = height - shift
+  const raw = Buffer.alloc(width * height * 3)
+  for (let index = 0; index < raw.length; index += 1) raw[index] = (index * 47 + Math.floor(index / 13) * 19) % 256
+  const previous = await sharp(raw, { raw: { width, height, channels: 3 } }).png().toBuffer()
+  const currentBase = await sharp(previous).extract({ left: 0, top: shift, width, height: overlap })
+    .extend({ bottom: shift, background: '#f4f4f4' }).png().toBuffer()
+  const changedRow = await sharp({ create: { width, height: 72, channels: 3, background: '#ff8a45' } }).png().toBuffer()
+  const current = await sharp(currentBase).composite([{ input: changedRow, left: 0, top: 110 }]).png().toBuffer()
+
+  assert.equal(await verifyReplyFrameOverlap(previous, current, overlap), overlap)
+  assert.equal(await verifyReplyFrameOverlap(previous, current, overlap, { measuredShift: shift }), overlap)
+})
+
+test('小荷正文三个区域在比例容差内一致时取最小重叠保留安全重复', async () => {
+  const width = 400
+  const height = 500
+  const raw = Buffer.alloc(width * height * 3)
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const offset = (y * width + x) * 3
+      const value = (y * 37 + x * 17 + (y * x) % 97) % 256
+      raw[offset] = value
+      raw[offset + 1] = (value * 3) % 256
+      raw[offset + 2] = (value * 7) % 256
+    }
+  }
+  const previous = await sharp(raw, { raw: { width, height, channels: 3 } }).png().toBuffer()
+  const shifts = [140, 144, 148, 80]
+  const bands = await Promise.all(shifts.map((shift, index) => sharp(previous)
+    .extract({ left: index * 100, top: shift, width: 100, height: height - shift })
+    .extend({ bottom: shift, background: '#f2f2f2' }).png().toBuffer()))
+  const current = await sharp({ create: { width, height, channels: 3, background: '#f2f2f2' } })
+    .composite(bands.map((input, index) => ({ input, left: index * 100, top: 0 }))).png().toBuffer()
+
+  assert.equal(await verifyReplyFrameOverlap(previous, current, 360), 352)
 })
 
 test('末屏一侧大面积同色时以跨区域唯一候选确认短距离滚动', async () => {

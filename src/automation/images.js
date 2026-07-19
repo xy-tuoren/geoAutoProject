@@ -357,6 +357,65 @@ async function findVerticalOverlapWithScore(previous, current, expected = null, 
   return { ...candidate, candidateOverlaps: overlaps, reason: candidate.valid ? null : (candidate.tilesStable ? `差异分数 ${candidate.score.toFixed(1)}` : '局部内容发生变化') }
 }
 
+const REPLY_OVERLAP_BANDS = [[0.04, 0.24], [0.26, 0.46], [0.54, 0.74], [0.76, 0.96]]
+
+function largestOverlapConsensus(results, tolerance = 3) {
+  let best = []
+  for (const pivot of results) {
+    const cluster = results.filter(result => Math.abs(result.overlap - pivot.overlap) <= tolerance)
+    if (cluster.length > best.length || (cluster.length === best.length
+      && cluster.reduce((sum, item) => sum + item.score, 0) < best.reduce((sum, item) => sum + item.score, 0))) best = cluster
+  }
+  return best
+}
+
+async function findReplyOverlapWithScore(previous, current, expected = null) {
+  const [previousRaw, currentRaw] = await Promise.all([rawImage(previous), rawImage(current)])
+  const maxOverlap = Math.min(previousRaw.height, currentRaw.height) - 8
+  const minOverlap = Math.min(40, Math.floor(maxOverlap / 2))
+  if (maxOverlap <= minOverlap) {
+    return { overlap: Math.max(0, Math.floor(Math.min(previousRaw.height, currentRaw.height) / 3)), candidateOverlaps: [], score: 255, valid: false, reason: '截图高度不足' }
+  }
+  let low = minOverlap
+  let high = maxOverlap
+  if (expected !== null) {
+    low = Math.max(minOverlap, Math.round(expected) - 260)
+    high = Math.min(maxOverlap, Math.round(expected) + 260)
+    if (low >= high) { low = minOverlap; high = maxOverlap }
+  }
+  const results = REPLY_OVERLAP_BANDS.map(band => ({
+    band,
+    ...bestBandOverlap(previousRaw, currentRaw, band, low, high),
+  }))
+  const usable = results.filter(result => result.contentRatio >= 0.004)
+  const candidateOverlaps = usable.map(result => result.overlap)
+  if (usable.length < 3) {
+    return { overlap: expected ?? results[0].overlap, candidateOverlaps, score: Math.max(...results.map(result => result.score)), valid: false, reason: '相邻截图缺少足够的可比内容' }
+  }
+  const consensusTolerance = Math.max(3, Math.floor(Math.min(previousRaw.height, currentRaw.height) * 0.016))
+  const consensus = largestOverlapConsensus(usable, consensusTolerance)
+  const required = Math.floor(usable.length / 2) + 1
+  const overlap = consensus.length
+    ? Math.min(...consensus.map(result => result.overlap))
+    : Math.round(candidateOverlaps.reduce((sum, value) => sum + value, 0) / candidateOverlaps.length)
+  if (consensus.length < required) {
+    return { overlap, candidateOverlaps, score: Math.max(...usable.map(result => result.score)), valid: false, consensusCount: consensus.length, consensusRequired: required, consensusTolerance, reason: `不同图像区域测得的滚动位移不一致（重叠 ${candidateOverlaps.join('/')}px）` }
+  }
+  const validations = consensus.map(result => validateOverlapCandidate(previousRaw, currentRaw, overlap, [result.band]))
+  const stableValidations = validations.filter(result => result.valid)
+  const score = Math.max(...validations.map(result => result.score))
+  return {
+    overlap,
+    candidateOverlaps,
+    score,
+    valid: stableValidations.length >= required,
+    consensusCount: consensus.length,
+    consensusRequired: required,
+    consensusTolerance,
+    reason: stableValidations.length >= required ? null : '局部内容发生变化',
+  }
+}
+
 async function analyzeReplyScrollEvidence(previous, current, expected = null) {
   const result = await findVerticalOverlapWithScore(previous, current, expected)
   const candidates = result.candidateOverlaps || []
@@ -416,6 +475,7 @@ async function detectFloatingDownArrow(image, searchBounds = null) {
         }
         return dark / Math.max(1, count)
       }
+      const sampleLight = (xRatio, yRatio, radiusRatio = 0.045) => 1 - sample(xRatio, yRatio, radiusRatio)
       const shaft = (sample(0, -0.2) + sample(0, -0.08) + sample(0, 0.03)) / 3
       const arrowHead = (sample(-0.13, 0.08) + sample(-0.07, 0.14) + sample(0, 0.2)
         + sample(0.07, 0.14) + sample(0.13, 0.08)) / 5
@@ -431,9 +491,36 @@ async function detectFloatingDownArrow(image, searchBounds = null) {
           arrowHeadRatio: arrowHead,
         }
       }
+      const lightShaft = (sampleLight(0, -0.2) + sampleLight(0, -0.08) + sampleLight(0, 0.03)) / 3
+      const lightArrowHead = (sampleLight(-0.13, 0.08) + sampleLight(-0.07, 0.14) + sampleLight(0, 0.2)
+        + sampleLight(0.07, 0.14) + sampleLight(0.13, 0.08)) / 5
+      const darkSides = 1 - (sampleLight(-0.28, -0.02, 0.07) + sampleLight(0.28, -0.02, 0.07)) / 2
+      const darkTop = 1 - (sampleLight(-0.2, -0.28, 0.06) + sampleLight(0.2, -0.28, 0.06)) / 2
+      const inverseScore = lightShaft * 0.42 + lightArrowHead * 0.42 + darkSides * 0.1 + darkTop * 0.06
+      if (lightShaft >= 0.52 && lightArrowHead >= 0.38 && darkSides >= 0.58 && darkTop >= 0.58
+        && (!best || inverseScore > best.score)) {
+        best = {
+          bounds: [Math.round(centerX - half), Math.round(centerY - half), Math.round(centerX + half), Math.round(centerY + half)],
+          score: inverseScore,
+          shaftRatio: lightShaft,
+          arrowHeadRatio: lightArrowHead,
+          polarity: 'light_on_dark',
+        }
+      }
     }
   }
-  return best && best.score >= 0.26 ? best : null
+  if (!best || best.score < 0.26) return null
+  const center = [(best.bounds[0] + best.bounds[2]) / 2, (best.bounds[1] + best.bounds[3]) / 2]
+  const detectedSize = best.bounds[2] - best.bounds[0]
+  const outerSize = Math.max(detectedSize, Math.round(viewportWidth * 0.12))
+  const halfOuter = outerSize / 2
+  best.bounds = [
+    Math.max(left, Math.round(center[0] - halfOuter)),
+    Math.max(top, Math.round(center[1] - halfOuter)),
+    Math.min(right, Math.round(center[0] + halfOuter)),
+    Math.min(bottom, Math.round(center[1] + halfOuter)),
+  ]
+  return best
 }
 
 async function verifyFrameOverlap(previous, current, expected) {
@@ -445,6 +532,29 @@ async function verifyFrameOverlap(previous, current, expected) {
     throw error
   }
   return result.overlap
+}
+
+async function verifyReplyFrameOverlap(previous, current, expected, { measuredShift = null } = {}) {
+  const result = await findReplyOverlapWithScore(previous, current, expected)
+  if (result.valid) return result.overlap
+
+  if (result.consensusCount >= result.consensusRequired) return result.overlap
+
+  const candidates = result.candidateOverlaps || []
+  if (candidates.length === REPLY_OVERLAP_BANDS.length
+    && Math.max(...candidates) - Math.min(...candidates) <= 3) return result.overlap
+
+  if (Number.isFinite(measuredShift) && measuredShift >= 0) {
+    const height = (await imageInfo(previous)).height
+    const hierarchyOverlap = height - measuredShift
+    const agreeing = candidates.filter(value => Math.abs(value - hierarchyOverlap) <= 3)
+    if (agreeing.length >= 2 && agreeing.length > candidates.length / 2) return Math.round(hierarchyOverlap)
+  }
+
+  const error = new Error(`无法验证相邻截图连续性（${result.reason || `差异分数 ${result.score.toFixed(1)}`}）；已停止无缝拼接以避免叠字或漏图。`)
+  error.candidateOverlaps = result.candidateOverlaps || []
+  error.suggestedOverlap = result.overlap
+  throw error
 }
 
 async function verifyProductGridOverlap(previous, current, expected) {
@@ -624,4 +734,4 @@ async function textSeamsAreValid(frames, seams) {
   })
 }
 
-module.exports = { imageInfo, cropImage, imagesMeanDiff, imagesSimilar, imageRegionsStable, imageHasVisibleContent, imageLooksLoaded, alignCropToWhitespace, stackFramesInGroups, verifyFrameOverlap, verifyProductGridOverlap, analyzeReplyScrollEvidence, detectFloatingDownArrow, stitchFramesInGroups, stitchFramesWithOverlaps, stackFramesWithSeparators, stitchFramesWithTransitions, composeLongImages, cropFramesAtTextSeams, textSeamsAreValid }
+module.exports = { imageInfo, cropImage, imagesMeanDiff, imagesSimilar, imageRegionsStable, imageHasVisibleContent, imageLooksLoaded, alignCropToWhitespace, stackFramesInGroups, verifyFrameOverlap, verifyReplyFrameOverlap, verifyProductGridOverlap, analyzeReplyScrollEvidence, detectFloatingDownArrow, stitchFramesInGroups, stitchFramesWithOverlaps, stackFramesWithSeparators, stitchFramesWithTransitions, composeLongImages, cropFramesAtTextSeams, textSeamsAreValid }

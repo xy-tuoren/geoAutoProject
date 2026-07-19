@@ -74,6 +74,46 @@ async function scrollSingleQuestionSessionToTop({
   throw new Error(`新会话已创建，但${Math.round(timeout / 1000)}秒内未能通过连续两次无变化确认到达会话顶部。`)
 }
 
+async function confirmPersistentScrollEnd({
+  capture,
+  swipeDown,
+  settle,
+  framesStable = imageRegionsStable,
+  hierarchyLoading = () => false,
+  requiredUnchanged = 3,
+  quietMs = 6_000,
+  probeInterval = 350,
+  timeout = 90_000,
+  delay = sleep,
+  now = Date.now,
+}) {
+  if (!Number.isInteger(requiredUnchanged) || requiredUnchanged < 2) throw new Error('底部确认次数必须是不小于2的整数。')
+  const deadline = now() + timeout
+  let current = await capture()
+  let unchangedCount = 0
+  let stableSince = now()
+  let probes = 0
+  let resets = 0
+  while (now() < deadline) {
+    const scroll = await swipeDown(probes)
+    const next = await settle(scroll)
+    probes += 1
+    const unchanged = !hierarchyLoading(next.xml || '') && await framesStable(current.frame, next.frame)
+    if (unchanged) unchangedCount += 1
+    else {
+      unchangedCount = 0
+      stableSince = now()
+      resets += 1
+    }
+    current = next
+    if (unchangedCount >= requiredUnchanged && now() - stableSince >= quietMs) {
+      return { capture: current, confirmed: true, probes, resets, quietMs: now() - stableSince }
+    }
+    await delay(Math.min(probeInterval, Math.max(0, deadline - now())))
+  }
+  throw new Error(`回答底部在${Math.round(timeout / 1000)}秒内仍有新内容或可继续滚动，未开始正式截图。`)
+}
+
 async function buildReplyImages(frames, { transitions = [], maxHeight = DEFAULT_MAX_LONG_IMAGE_HEIGHT } = {}) {
   return composeLongImages(frames, { transitions, maxHeight, separatorHeight: 24 })
 }
@@ -356,6 +396,7 @@ module.exports = {
   scrollEndConfirmed,
   requireQuestionLocated,
   scrollSingleQuestionSessionToTop,
+  confirmPersistentScrollEnd,
   buildReplyImages,
   evidenceSummaryOcrTarget,
   evidenceSummaryExpandedByOcr,

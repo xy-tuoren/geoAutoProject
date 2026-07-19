@@ -41,6 +41,17 @@ async function arrowImage(width, height, centerY, size) {
   return sharp(svg).png().toBuffer()
 }
 
+async function inverseArrowImage(width, height, centerY, size) {
+  const svg = Buffer.from(`<svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg">
+    <rect width="100%" height="100%" fill="#fff"/>
+    <g transform="translate(${width / 2},${centerY})">
+      <circle r="${size * 0.48}" fill="#30343a"/>
+      <path d="M 0 ${-size * 0.22} L 0 ${size * 0.14} M ${-size * 0.17} ${size * 0.02} L 0 ${size * 0.2} L ${size * 0.17} ${size * 0.02}" fill="none" stroke="#fff" stroke-width="${Math.max(3, size * 0.055)}" stroke-linecap="round" stroke-linejoin="round"/>
+    </g>
+  </svg>`)
+  return sharp(svg).png().toBuffer()
+}
+
 for (const fixture of [
   { width: 720, height: 1600, centerY: 1080, size: 72 },
   { width: 1080, height: 2400, centerY: 1580, size: 108 },
@@ -51,8 +62,17 @@ for (const fixture of [
     assert.ok(detected)
     assert.ok(Math.abs((detected.bounds[0] + detected.bounds[2]) / 2 - fixture.width / 2) <= 2)
     assert.ok(Math.abs((detected.bounds[1] + detected.bounds[3]) / 2 - fixture.centerY) <= fixture.size * 0.15)
+    assert.ok(detected.bounds[2] - detected.bounds[0] >= fixture.width * 0.11)
   })
 }
+
+test('floating down-arrow image fallback detects a light arrow on the dark Xiaohe button', async () => {
+  const image = await inverseArrowImage(1272, 2800, 1920, 126)
+  const detected = await detectFloatingDownArrow(image, [0, 440, 1272, 2296])
+  assert.ok(detected)
+  assert.equal(detected.polarity, 'light_on_dark')
+  assert.ok(Math.abs((detected.bounds[1] + detected.bounds[3]) / 2 - 1920) <= 20)
+})
 
 test('floating down-arrow fallback does not report a blank viewport', async () => {
   const blank = await sharp({ create: { width: 720, height: 1600, channels: 3, background: '#fff' } }).png().toBuffer()

@@ -223,6 +223,30 @@ function createCaptureStability({
       requiredStablePairs: regionFallback.requiredStablePairs,
     }, timeout)
   }
+
+  async function waitForStableReplyRegionDirect(bounds, timeout = 8_000) {
+    return captureStableSandwich({
+      capture: async () => cropImage(await screenshot(), bounds),
+      hierarchy: source,
+      framesStable: imageRegionsStable,
+      hierarchyLoading: hierarchyIsLoading,
+      interval: 80,
+    }, timeout)
+  }
+
+  async function captureReplyRegionSnapshot(bounds, { settleMs = 80 } = {}) {
+    if (settleMs > 0) await sleep(settleMs)
+    const xml = await source()
+    const frame = await cropImage(await screenshot(), bounds)
+    return {
+      frame,
+      xml,
+      stable: !hierarchyIsLoading(xml),
+      attempts: 1,
+      observer: false,
+      reason: hierarchyIsLoading(xml) ? 'hierarchy_loading' : null,
+    }
+  }
   
 
   return {
@@ -233,6 +257,8 @@ function createCaptureStability({
     swipeChat,
     waitForRegionPixelsStable,
     waitForStableReplyRegion,
+    waitForStableReplyRegionDirect,
+    captureReplyRegionSnapshot,
   }
 }
 

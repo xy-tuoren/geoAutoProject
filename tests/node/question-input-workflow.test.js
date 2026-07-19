@@ -29,6 +29,10 @@ const NEW_CONVERSATION_SMALL = `<hierarchy>
   </node>
 </hierarchy>`
 
+const SESSION_TRANSITION = `<hierarchy>
+  <node package="com.aurora.xiaohe.aidoctor" bounds="[0,0][1080,2400]" visible-to-user="true" />
+</hierarchy>`
+
 function workflowWithSource(source, {
   tap = async () => {},
   log = () => {},
@@ -57,7 +61,16 @@ test('点击新会话后旧对话层级没有变化时不得报告成功', async
   let taps = 0
   const workflow = workflowWithSource(async () => OLD_CONVERSATION, { tap: async () => { taps += 1 } })
   assert.equal(await workflow.tapNewSession({ timeout: 30 }), false)
-  assert.equal(taps, 2)
+  assert.equal(taps, 3)
+})
+
+test('新会话按钮前两次无响应时只在旧会话和入口仍完整存在后尝试第三次', async () => {
+  let taps = 0
+  const workflow = workflowWithSource(async () => (taps >= 3 ? NEW_CONVERSATION : OLD_CONVERSATION), {
+    tap: async () => { taps += 1 },
+  })
+  assert.equal(await workflow.tapNewSession({ timeout: 300 }), true)
+  assert.equal(taps, 3)
 })
 
 test('只有旧对话内容消失且新页面输入框稳定后才确认新会话', async () => {
@@ -65,6 +78,19 @@ test('只有旧对话内容消失且新页面输入框稳定后才确认新会�
   let taps = 0
   const workflow = workflowWithSource(async () => (++reads <= 1 ? OLD_CONVERSATION : NEW_CONVERSATION), { tap: async () => { taps += 1 } })
   assert.equal(await workflow.tapNewSession({ timeout: 300 }), true)
+  assert.equal(taps, 1)
+})
+
+test('新会话入口在转场中消失时继续等待干净页面而不重复点击', async () => {
+  let reads = 0
+  let taps = 0
+  const workflow = workflowWithSource(async () => {
+    reads += 1
+    if (reads === 1) return OLD_CONVERSATION
+    if (reads <= 3) return SESSION_TRANSITION
+    return NEW_CONVERSATION
+  }, { tap: async () => { taps += 1 } })
+  assert.equal(await workflow.tapNewSession({ timeout: 700 }), true)
   assert.equal(taps, 1)
 })
 

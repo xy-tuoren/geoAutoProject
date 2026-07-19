@@ -166,7 +166,7 @@ function createQuestionInputWorkflow({
     await tap(x, y)
   }
   
-  async function tapNewSession({ timeout = 5_000 } = {}) {
+  async function tapNewSession({ timeout = 8_000 } = {}) {
     // Compose exposes the icon's label on a non-clickable child while its
     // clickable hit target is the parent. Clicking the label works on some
     // devices but silently fails on others, so prefer the parent when present.
@@ -176,12 +176,7 @@ function createQuestionInputWorkflow({
       log('stage: 当前已经是无历史消息的新会话输入页，无需重复点击')
       return true
     }
-    for (let attempt = 1; attempt <= 2; attempt += 1) {
-      const currentXml = attempt === 1 ? beforeXml : await source()
-      const newSession = boundsForNodeAttribute(currentXml, 'content-desc', '开启新会话')
-      if (!newSession) return false
-      await tap((newSession[0] + newSession[2]) / 2, (newSession[1] + newSession[3]) / 2)
-      await waitForVisualQuiet({ timeout: 1_200, fallbackMs: 1_000 })
+    const waitForCleanSession = async (attempt, allowConfirmation) => {
       const deadline = Date.now() + timeout
       let confirmationHandled = false
       let lastChangedSignature = null
@@ -189,7 +184,7 @@ function createQuestionInputWorkflow({
       while (Date.now() < deadline) {
         checkCancelled()
         const xml = await source()
-        if (!confirmationHandled) {
+        if (allowConfirmation && !confirmationHandled) {
           for (const text of ['确定', '确认', '开始', '新会话']) {
             const button = visibleLabelBounds(xml, text)
             if (!button) continue
@@ -214,9 +209,24 @@ function createQuestionInputWorkflow({
         }
         await sleep(Math.min(200, Math.max(1, deadline - Date.now())))
       }
-      if (attempt < 2) log('stage: 第一次点击后旧会话仍完整存在，重新读取入口并安全重试一次')
+      return false
     }
-    log('stage: 两次点击新会话入口后，旧会话内容仍未确认消失')
+    const maxAttempts = 3
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      const currentXml = attempt === 1 ? beforeXml : await source()
+      const newSession = boundsForNodeAttribute(currentXml, 'content-desc', '开启新会话')
+      if (!newSession) {
+        if (attempt === 1) return false
+        log(`stage: 第${attempt - 1}次点击后新会话入口暂时消失，按界面转场继续等待，不盲目重点击`)
+        if (await waitForCleanSession(attempt - 1, false)) return true
+        break
+      }
+      await tap((newSession[0] + newSession[2]) / 2, (newSession[1] + newSession[3]) / 2)
+      await waitForVisualQuiet({ timeout: 1_200, fallbackMs: 1_000 })
+      if (await waitForCleanSession(attempt, true)) return true
+      if (attempt < maxAttempts) log(`stage: 第${attempt}次点击后旧会话仍完整存在，重新读取入口并安全尝试第${attempt + 1}次`)
+    }
+    log(`stage: 连续${maxAttempts}次点击新会话入口后，旧会话内容仍未确认消失`)
     return false
   }
   

@@ -6,6 +6,8 @@ const {
   replyCaptureBounds,
   replyTailOnScreen,
   estimateVerticalScrollShift,
+  hierarchyIsLoading,
+  floatingScrollControlBounds,
 } = require('./hierarchy')
 const {
   imageInfo,
@@ -13,12 +15,14 @@ const {
   imagesSimilar,
   imageRegionsStable,
   verifyFrameOverlap,
+  verifyReplyFrameOverlap,
   analyzeReplyScrollEvidence,
   detectFloatingDownArrow,
 } = require('./images')
 const {
   requireQuestionLocated,
   scrollSingleQuestionSessionToTop,
+  confirmPersistentScrollEnd,
   prepareEmbeddedEvidence,
   scrollEndConfirmed,
   captureStableSandwich,
@@ -70,6 +74,30 @@ function stableCaptureSummary(capture) {
   }
 }
 
+async function navigateReplyToBottomControl({
+  initialXml,
+  bounds,
+  source,
+  tap,
+  log = () => {},
+  delay = sleep,
+  maxClicks = 3,
+  settleMs = 650,
+}) {
+  let xml = initialXml
+  let target = floatingScrollControlBounds(xml, bounds)
+  let clicks = 0
+  while (target && clicks < maxClicks) {
+    clicks += 1
+    await tap((target[0] + target[2]) / 2, (target[1] + target[3]) / 2)
+    await delay(settleMs)
+    xml = await source()
+    target = floatingScrollControlBounds(xml, bounds)
+    if (target && clicks < maxClicks) log(`waiting: 固定到底按钮第${clicks}次点击后仍存在，已从最新层级重新定位后继续直达`)
+  }
+  return { clicks, targetCleared: !target, lastXml: xml }
+}
+
 function shouldDiscardUnprovenCandidate({ transition, reliableMeasuredShift, newContentEvidence, bottomContext }) {
   return Boolean(transition && !transition.verified
     && bottomContext
@@ -81,7 +109,8 @@ function createReplyCapture({
   source,
   swipeChat,
   windowSize,
-  waitForStableReplyRegion,
+  waitForStableReplyRegionDirect,
+  captureReplyRegionSnapshot,
   tap,
   log,
   captureReferenceProductsAtTrigger,
@@ -107,19 +136,58 @@ function createReplyCapture({
     const initialXml = await source()
     const navigationBounds = findChatScrollBounds(initialXml, size)
     validateCaptureViewport(size, navigationBounds)
+    let completionConfirmation = null
+    let completionNavigationMethod = 'not_required'
+    let completionNavigationClicks = 0
+    let completionNavigationTargetCleared = null
+    if (singleQuestionSession) {
+      log('waiting: 正在小荷回答底部确认内容已完整生成')
+      const jumpTarget = floatingScrollControlBounds(initialXml, navigationBounds)
+      if (jumpTarget) {
+        completionNavigationMethod = 'hierarchy_floating_control'
+        log('waiting: 层级已确认固定到底按钮，正在一次直达回答底部后执行持续稳定验证')
+        const navigation = await navigateReplyToBottomControl({
+          initialXml,
+          bounds: navigationBounds,
+          source,
+          tap,
+          log,
+        })
+        completionNavigationClicks = navigation.clicks
+        completionNavigationTargetCleared = navigation.targetCleared
+        log(navigation.targetCleared
+          ? `waiting: 固定到底按钮已消失，完成受控直达（点击=${navigation.clicks}次），继续执行持续稳定验证`
+          : `waiting: 固定到底按钮连续${navigation.clicks}次点击后仍存在，停止点击并改由滚动探测完成验证`)
+      } else completionNavigationMethod = 'verified_scroll_probes'
+      completionConfirmation = await confirmPersistentScrollEnd({
+        capture: () => jumpTarget
+          ? waitForStableReplyRegionDirect(navigationBounds, 8_000)
+          : captureReplyRegionSnapshot(navigationBounds, { settleMs: 0 }),
+        swipeDown: attempt => swipeChat(navigationBounds, 'down', 0.78, {
+          maxFraction: 0.82,
+          speed: 4_000,
+          settle: 60,
+          xFraction: attempt % 2 ? 0.68 : 0.84,
+        }),
+        settle: () => captureReplyRegionSnapshot(navigationBounds),
+        framesStable: replyBoundaryFramesStable,
+        hierarchyLoading: hierarchyIsLoading,
+      })
+      log(`waiting: 小荷回答底部已持续${Math.round(completionConfirmation.quietMs / 1000)}秒不可继续滚动且内容无变化，确认生成完成（探测=${completionConfirmation.probes}，重置=${completionConfirmation.resets}）`)
+    }
     const topNavigationStarted = Date.now()
     let topNavigationMethod = 'question_bubble'
     let topConfirmationSwipes = 0
     if (singleQuestionSession) {
       const topBoundary = await scrollSingleQuestionSessionToTop({
-        capture: () => waitForStableReplyRegion(navigationBounds),
-        swipeUp: attempt => swipeChat(navigationBounds, 'up', 0.65, {
-          speed: 3_200,
+        capture: () => waitForStableReplyRegionDirect(navigationBounds),
+        swipeUp: attempt => swipeChat(navigationBounds, 'up', 0.78, {
+          maxFraction: 0.82,
+          speed: 4_000,
           settle: 80,
-          eventDrivenSettle: true,
           xFraction: attempt % 2 ? 0.68 : 0.84,
         }),
-        settle: scroll => waitForStableReplyRegion(navigationBounds, 8_000, { settleSince: scroll.activityMark }),
+        settle: () => waitForStableReplyRegionDirect(navigationBounds, 8_000),
         framesStable: replyBoundaryFramesStable,
       })
       topConfirmationSwipes = topBoundary.swipes
@@ -143,12 +211,12 @@ function createReplyCapture({
       setLastOcrDiagnostic,
       tap,
       delay: sleep,
-      waitForStable: waitForStableReplyRegion,
+      waitForStable: waitForStableReplyRegionDirect,
       log,
     }, navigationBounds)
     if (!singleQuestionSession && !questionVisible(evidence.capture.xml || await source(), question, navigationBounds)) {
       requireQuestionLocated(await scrollQuestionIntoView(question, navigationBounds), question)
-      evidence.capture = await waitForStableReplyRegion(navigationBounds)
+      evidence.capture = await waitForStableReplyRegionDirect(navigationBounds)
       log('capture: 引用资料展开后已重新确认问题气泡完整位于首屏')
     }
     const topXml = await source()
@@ -193,7 +261,7 @@ function createReplyCapture({
           bounds[3] - navigationBounds[1],
         ]),
       }
-    } else initialCapture = await waitForStableReplyRegion(bounds)
+    } else initialCapture = await waitForStableReplyRegionDirect(bounds)
     const sequence = new CaptureSequence()
     const seamRecords = []
     const seamDiagnostics = []
@@ -248,11 +316,10 @@ function createReplyCapture({
       const screenBefore = capture.frame
       const before = sequence.lastFrame
       const scroll = await swipeChat(bounds, 'down', scrollFraction, {
-        eventDrivenSettle: true,
         xFraction: noProgress > 0 ? 0.68 : 0.84,
       })
       const shift = scroll.distance
-      let afterCapture = await waitForStableReplyRegion(bounds, 8_000, { settleSince: scroll.activityMark })
+      let afterCapture = await captureReplyRegionSnapshot(bounds)
       let after = afterCapture.frame
       if (await replyBoundaryFramesStable(screenBefore, after)) {
         noProgress += 1
@@ -297,11 +364,11 @@ function createReplyCapture({
         let transition
         try {
           if (!afterCapture.stable) throw new Error('滚动后的局部画面未稳定')
-          transition = { verified: true, overlap: await verifyFrameOverlap(before, after, expectedOverlap) }
+          transition = { verified: true, overlap: await verifyReplyFrameOverlap(before, after, expectedOverlap, { measuredShift: reliableMeasuredShift }) }
         } catch (error) {
           firstError = error
           recaptureCount += 1
-          afterCapture = await waitForStableReplyRegion(bounds, 3_000)
+          afterCapture = await waitForStableReplyRegionDirect(bounds, 3_000)
           after = afterCapture.frame
           afterXml = afterCapture.xml || await source()
           recaptureSnapshot = { ...stableCaptureSummary(afterCapture), frame: after, xml: afterXml }
@@ -318,7 +385,7 @@ function createReplyCapture({
           }
           try {
             if (!afterCapture.stable) throw new Error('重采后的局部画面仍未稳定')
-            transition = { verified: true, overlap: await verifyFrameOverlap(before, after, expectedOverlap) }
+            transition = { verified: true, overlap: await verifyReplyFrameOverlap(before, after, expectedOverlap, { measuredShift: reliableMeasuredShift }) }
           } catch (retryFailure) {
             const reason = retryFailure.message || error.message
             retryError = retryFailure
@@ -469,6 +536,14 @@ function createReplyCapture({
         reply_top_confirmation_swipes: topConfirmationSwipes,
         reply_floating_control_detection_method: floatingControlDetectionMethod,
         reply_floating_control_bounds: floatingControl,
+        reply_completion_confirmation_method: completionConfirmation ? 'persistent_scroll_end' : 'existing_answer_stability',
+        reply_completion_navigation_method: completionNavigationMethod,
+        reply_completion_navigation_clicks: completionNavigationClicks,
+        reply_completion_navigation_target_cleared: completionNavigationTargetCleared,
+        reply_completion_confirmed_before_capture: Boolean(completionConfirmation),
+        reply_completion_confirmation_probes: completionConfirmation?.probes ?? 0,
+        reply_completion_confirmation_resets: completionConfirmation?.resets ?? 0,
+        reply_completion_confirmation_quiet_ms: completionConfirmation?.quietMs ?? 0,
       },
     }
     if (fallbackReasons.length) log('capture: 不可靠接缝只做本屏局部重采；仍无法校验时保留完整下一视口并明确分隔，不再整题回滚')
@@ -668,4 +743,4 @@ function createReplyCapture({
   }
 }
 
-module.exports = { createReplyCapture, replyBoundaryFramesStable, shouldDiscardUnprovenCandidate }
+module.exports = { createReplyCapture, navigateReplyToBottomControl, replyBoundaryFramesStable, shouldDiscardUnprovenCandidate }
