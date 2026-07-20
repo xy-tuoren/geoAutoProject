@@ -42,7 +42,7 @@ test('小荷到底按钮未在首次点击后消失时只按最新层级受控�
   assert.match(logs[0], /最新层级重新定位/)
 })
 
-test('抖音全文正式采集前先持续确认到底，并记录成功接缝证据', async () => {
+test('抖音和头条全文正式采集前先持续确认到底，并记录成功接缝证据', async () => {
   const width = 240
   const frameHeight = 300
   const shift = 120
@@ -99,6 +99,17 @@ test('抖音全文正式采集前先持续确认到底，并记录成功接缝�
   assert.equal(result.seamRecords.length, 1)
   assert.equal(result.seamRecords[0].outcome, 'verified')
   assert.equal(result.scrollDecisions.filter(item => item.outcome === 'no_progress').length, 2)
+  assert.ok(directions.slice(0, 4).every(direction => direction === 'down'))
+  assert.ok(directions.includes('up'))
+
+  position = 'top'
+  directions.length = 0
+  const toutiao = await capture.captureToutiaoFullAnswerFrames('<hierarchy />', [0, 0, width, frameHeight])
+  assert.equal(toutiao.captureMetadata.reply_completion_confirmed_before_capture, true)
+  assert.ok(toutiao.captureMetadata.reply_completion_confirmation_probes >= 4)
+  assert.equal(toutiao.frames.length, 2)
+  assert.equal(toutiao.transitions.length, 1)
+  assert.equal(toutiao.seamRecords[0].outcome, 'verified')
   assert.ok(directions.slice(0, 4).every(direction => direction === 'down'))
   assert.ok(directions.includes('up'))
 })
@@ -733,7 +744,7 @@ test('抖音小程序回答尾部用无文字卡片结构定位参考药品箭�
   assert.equal(miniAppReferenceProductsTrigger(xml.replace('android.widget.ImageView', 'android.view.ViewGroup'), [0, 363, 1080, 2014]), null)
 })
 
-test('头条入口按真实搜索框和“查看更多”卡片结构定位', () => {
+test('头条入口按真实搜索框和“查看更多/查看全文”卡片结构定位', () => {
   assert.equal(TOUTIAO_SEARCH_SUMMARY_FILENAME, '回答_智能总结.png')
   const xml = `<hierarchy>
     <node package="com.ss.android.article.news" class="" resource-id="com.ss.android.article.news:id/cx" text="搜索框，腹泻脱水用什么药" clickable="true" visible-to-user="true" bounds="[245,102][792,222]" />
@@ -745,6 +756,7 @@ test('头条入口按真实搜索框和“查看更多”卡片结构定位', ()
   assert.equal(toutiaoSearchResultBelongsToQuestion(xml, '腹泻脱水用什么药'), true)
   assert.equal(toutiaoSearchResultBelongsToQuestion(xml, '旧问题'), false)
   assert.deepEqual(toutiaoViewMoreBounds(xml), [72, 1323, 1008, 1464])
+  assert.deepEqual(toutiaoViewMoreBounds(xml.replace('查看更多', '查看全文')), [72, 1323, 1008, 1464])
   assert.equal(toutiaoViewMoreBounds(xml.replace('小荷AI医生·智能总结', '普通搜索结果')), null)
 })
 
@@ -759,12 +771,12 @@ test('头条首页搜索入口兼容不同竖屏尺寸并拒绝非搜索框节�
   assert.equal(toutiaoHomeSearchBounds(home('[291,96][805,216]').replace(':id/kic', ':id/l23')), null)
 })
 
-test('头条WebView不暴露文字时以品牌标题和查看更多的OCR几何关系定位', () => {
-  const recognition = (width, height, scale = 1) => ({
+test('头条WebView不暴露文字时以品牌标题和全文入口的OCR几何关系定位', () => {
+  const recognition = (width, height, scale = 1, entryText = '查看更多') => ({
     image: { width, height },
     results: [
       { text: '小荷AI医生・智能总结', normalizedText: '小荷AI医生智能总结', confidence: 0.988, bounds: [156, 433, 630, 489].map(value => value * scale) },
-      { text: '查看更多>', normalizedText: '查看更多', confidence: 0.978, bounds: [420, 1254, 656, 1313].map(value => value * scale) },
+      { text: `${entryText}>`, normalizedText: entryText, confidence: 0.978, bounds: [420, 1254, 656, 1313].map(value => value * scale) },
       { text: '小荷AI医生', normalizedText: '小荷AI医生', confidence: 0.99, bounds: [68, 1681, 279, 1732].map(value => value * scale) },
     ],
   })
@@ -772,6 +784,9 @@ test('头条WebView不暴露文字时以品牌标题和查看更多的OCR几何�
   const full = toutiaoOcrViewMoreTarget(recognition(1080, 2400), { width: 1080, height: 2400 })
   assert.deepEqual(full.bounds, [420, 1254, 656, 1313])
   assert.equal(full.summaryConfidence, 0.988)
+
+  const currentHuawei = toutiaoOcrViewMoreTarget(recognition(1080, 2400, 1, '查看全文'), { width: 1080, height: 2400 })
+  assert.deepEqual(currentHuawei.bounds, [420, 1254, 656, 1313])
 
   const scaled = toutiaoOcrViewMoreTarget(recognition(720, 1600, 2 / 3), { width: 1080, height: 2400 })
   assert.deepEqual(scaled.bounds, [420, 1254, 656, 1313])
@@ -1752,8 +1767,32 @@ test('小荷正文局部样式整行变化时可用层级位移和图像候选�
   const changedRow = await sharp({ create: { width, height: 72, channels: 3, background: '#ff8a45' } }).png().toBuffer()
   const current = await sharp(currentBase).composite([{ input: changedRow, left: 0, top: 110 }]).png().toBuffer()
 
-  assert.equal(await verifyReplyFrameOverlap(previous, current, overlap), overlap)
+  await assert.rejects(() => verifyReplyFrameOverlap(previous, current, overlap), /局部内容发生变化|连续性/)
   assert.equal(await verifyReplyFrameOverlap(previous, current, overlap, { measuredShift: shift }), overlap)
+})
+
+test('小荷全文末屏实际滚动较短时仍在名义重叠上方找到真实接缝', async () => {
+  const width = 320
+  const height = 600
+  const shift = 90
+  const overlap = height - shift
+  const raw = Buffer.alloc(width * height * 3)
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const offset = (y * width + x) * 3
+      const value = 30 + ((y * 41 + x * 19 + (x * y) % 113) % 200)
+      raw[offset] = value
+      raw[offset + 1] = (value + 31) % 240
+      raw[offset + 2] = (value + 67) % 240
+    }
+  }
+  const previous = await sharp(raw, { raw: { width, height, channels: 3 } }).png().toBuffer()
+  const current = await sharp(previous)
+    .extract({ left: 0, top: shift, width, height: overlap })
+    .extend({ bottom: shift, background: '#f3f4f5' })
+    .png().toBuffer()
+
+  assert.equal(await verifyReplyFrameOverlap(previous, current, 180), overlap)
 })
 
 test('小荷正文三个区域在比例容差内一致时取最小重叠保留安全重复', async () => {

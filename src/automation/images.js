@@ -379,8 +379,14 @@ async function findReplyOverlapWithScore(previous, current, expected = null) {
   let low = minOverlap
   let high = maxOverlap
   if (expected !== null) {
-    low = Math.max(minOverlap, Math.round(expected) - 260)
-    high = Math.min(maxOverlap, Math.round(expected) + 260)
+    const expectedShift = Math.max(0, previousRaw.height - Math.round(expected))
+    const overscrollAllowance = Math.max(80, Math.round(expectedShift * 0.3))
+    low = Math.max(minOverlap, Math.round(expected) - overscrollAllowance)
+    // A final swipe can move less than requested when the page reaches its
+    // real bottom, so the true overlap may be much larger than the nominal
+    // overlap. Keep that safe half of the range available, but do not reopen
+    // the implausible near-zero matches that repeated cards can produce.
+    high = maxOverlap
     if (low >= high) { low = minOverlap; high = maxOverlap }
   }
   const results = REPLY_OVERLAP_BANDS.map(band => ({
@@ -403,16 +409,19 @@ async function findReplyOverlapWithScore(previous, current, expected = null) {
   }
   const validations = consensus.map(result => validateOverlapCandidate(previousRaw, currentRaw, overlap, [result.band]))
   const stableValidations = validations.filter(result => result.valid)
+  const nativeValidations = consensus.map(result => validateOverlapCandidate(previousRaw, currentRaw, result.overlap, [result.band]))
+  const stableNativeValidations = nativeValidations.filter(result => result.valid)
   const score = Math.max(...validations.map(result => result.score))
+  const valid = stableValidations.length >= required || stableNativeValidations.length >= required
   return {
     overlap,
     candidateOverlaps,
     score,
-    valid: stableValidations.length >= required,
+    valid,
     consensusCount: consensus.length,
     consensusRequired: required,
     consensusTolerance,
-    reason: stableValidations.length >= required ? null : '局部内容发生变化',
+    reason: valid ? null : '局部内容发生变化',
   }
 }
 
@@ -538,12 +547,7 @@ async function verifyReplyFrameOverlap(previous, current, expected, { measuredSh
   const result = await findReplyOverlapWithScore(previous, current, expected)
   if (result.valid) return result.overlap
 
-  if (result.consensusCount >= result.consensusRequired) return result.overlap
-
   const candidates = result.candidateOverlaps || []
-  if (candidates.length === REPLY_OVERLAP_BANDS.length
-    && Math.max(...candidates) - Math.min(...candidates) <= 3) return result.overlap
-
   if (Number.isFinite(measuredShift) && measuredShift >= 0) {
     const height = (await imageInfo(previous)).height
     const hierarchyOverlap = height - measuredShift

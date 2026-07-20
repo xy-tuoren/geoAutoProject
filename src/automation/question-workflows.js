@@ -191,13 +191,13 @@ function createQuestionWorkflows({
     })
     log('stage: 已找到头条小荷AI医生回答卡片，正在截取搜索结果智能总结')
     let summary = await captureToutiaoSearchSummary(card.size)
-    log('stage: 已找到头条小荷AI医生回答卡片，正在点击查看更多')
+    log('stage: 已找到头条小荷AI医生回答卡片，正在点击全文入口')
     const opened = await runToutiaoFullAnswerAttempts({
       initialTarget: { card, summary },
       canRepeat: card.attempt < 2,
       openFullAnswer: target => openToutiaoFullAnswer(target.summary.viewMore, target.card.size),
       repeatExactSearch: async () => {
-        log('stage: 头条“查看更多”未进入本题全文，正在重新搜索相同问题并执行唯一一次路由重试')
+        log('stage: 头条全文入口未进入本题全文，正在重新搜索相同问题并执行唯一一次路由重试')
         const retrySearch = await inputToutiaoQuestion(question)
         await tap((retrySearch[0] + retrySearch[2]) / 2, (retrySearch[1] + retrySearch[3]) / 2)
         const retryCard = await waitForToutiaoAnswerCard(payload.timeout * 1_000, question)

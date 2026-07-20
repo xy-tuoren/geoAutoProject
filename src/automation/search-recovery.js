@@ -50,7 +50,7 @@ async function runToutiaoAnswerCardAttempts({ waitForResult, repeatExactSearch }
   } catch (error) {
     if (!(error instanceof ToutiaoAnswerCardNotFoundError)) throw error
     throw new ToutiaoAnswerCardNotFoundError(
-      '头条使用相同问题受控重试后，搜索结果仍未出现小荷AI医生“查看更多”卡片。',
+      '头条使用相同问题受控重试后，搜索结果仍未出现小荷AI医生全文入口卡片。',
       { cause: error },
     )
   }
@@ -67,7 +67,7 @@ async function runToutiaoFullAnswerAttempts({ initialTarget, openFullAnswer, rep
     } catch (retryError) {
       if (!(retryError instanceof ToutiaoFullAnswerNotOpenedError)) throw retryError
       throw new ToutiaoFullAnswerNotOpenedError(
-        `头条使用相同问题重新搜索后，“查看更多”仍未进入可验证的本题全文页；最后一次原因：${retryError.message}`,
+        `头条使用相同问题重新搜索后，全文入口仍未进入可验证的本题全文页；最后一次原因：${retryError.message}`,
         { cause: retryError },
       )
     }

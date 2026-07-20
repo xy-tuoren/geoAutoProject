@@ -756,20 +756,11 @@ function createReplyCapture({
       let recaptureSnapshot = null
       try {
         if (!afterCapture.stable) throw new Error(`滚动后的${platformLabel}全文画面未稳定`)
-        try {
-          transition = {
-            verified: true,
-            overlap: useReplyOverlapConsensus
-              ? await verifyReplyFrameOverlap(before, after, expectedOverlap)
-              : await verifyFrameOverlap(before, after, expectedOverlap),
-          }
-        } catch {
-          transition = {
-            verified: true,
-            overlap: useReplyOverlapConsensus
-              ? await verifyReplyFrameOverlap(before, after, null)
-              : await verifyFrameOverlap(before, after, null),
-          }
+        transition = {
+          verified: true,
+          overlap: useReplyOverlapConsensus
+            ? await verifyReplyFrameOverlap(before, after, expectedOverlap)
+            : await verifyFrameOverlap(before, after, expectedOverlap),
         }
       } catch (error) {
         firstError = error
@@ -782,8 +773,8 @@ function createReplyCapture({
           transition = {
             verified: true,
             overlap: useReplyOverlapConsensus
-              ? await verifyReplyFrameOverlap(before, after, null)
-              : await verifyFrameOverlap(before, after, null),
+              ? await verifyReplyFrameOverlap(before, after, expectedOverlap)
+              : await verifyFrameOverlap(before, after, expectedOverlap),
           }
         } catch (retryFailure) {
           retryError = retryFailure
@@ -903,7 +894,10 @@ function createReplyCapture({
       platformLabel: '头条',
       metadataPrefix: 'toutiao',
       openedMetadataKey: 'toutiao_view_more_opened',
-      initialQuietMs: REPLY_STABLE_QUIET_MS,
+      confirmCompletionBeforeCapture: true,
+      useDirectCandidateSnapshots: true,
+      useReplyOverlapConsensus: true,
+      completionConfirmationOptions: miniAppCompletionConfirmationOptions,
     })
   }
   

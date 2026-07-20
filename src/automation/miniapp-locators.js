@@ -76,7 +76,7 @@ function toutiaoViewMoreBounds(xml) {
   if (!hasXiaoheSummary) return null
   const more = nodes.find(attrs => nodeIsVisible(attrs)
     && nodeAttr(attrs, 'package') === ENTRY_DEFINITIONS['toutiao-xiaohe-miniapp'].packageName
-    && nodeAttr(attrs, 'text') === '查看更多'
+    && /^查看(?:更多|全文)$/.test(nodeAttr(attrs, 'text'))
     && nodeAttr(attrs, 'clickable') === 'true')
   const rawBounds = more && nodeAttr(more, 'bounds')
   return rawBounds ? parseBounds(rawBounds) : null
@@ -100,7 +100,7 @@ function hierarchyLogicalSize(xml, fallback) {
 function toutiaoOcrViewMoreTarget(recognition, logicalSize) {
   const physicalSize = recognition.image
   const summaries = findOcrText(recognition, item => /^小荷AI医生(?:AI)?智能总结$/.test(item.normalizedText), { minConfidence: 0.85 })
-  const viewMoreItems = findOcrText(recognition, item => /^查看更多$/.test(item.normalizedText), { minConfidence: 0.85 })
+  const viewMoreItems = findOcrText(recognition, item => /^查看(?:更多|全文)$/.test(item.normalizedText), { minConfidence: 0.85 })
   const candidates = []
   for (const summary of summaries) {
     for (const viewMore of viewMoreItems) {

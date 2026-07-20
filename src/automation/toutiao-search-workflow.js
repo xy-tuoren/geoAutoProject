@@ -79,7 +79,7 @@ function createToutiaoSearchWorkflow({
           purpose: 'toutiao_answer_card',
           matcher: {
             summary_pattern: '^小荷AI医生(?:AI)?智能总结$',
-            view_more_pattern: '^查看更多$',
+            view_more_pattern: '^查看(?:更多|全文)$',
             minimum_confidence: 0.85,
             requires_summary_above_button: true,
             requires_horizontal_overlap: true,
@@ -100,7 +100,7 @@ function createToutiaoSearchWorkflow({
       }
       await sleep(500)
     }
-    throw new ToutiaoAnswerCardNotFoundError('头条搜索结果中未出现小荷AI医生“查看更多”卡片。')
+    throw new ToutiaoAnswerCardNotFoundError('头条搜索结果中未出现小荷AI医生全文入口卡片。')
   }
   
   async function captureToutiaoSearchSummary(size) {
@@ -126,7 +126,7 @@ function createToutiaoSearchWorkflow({
       purpose: 'toutiao_summary_recapture',
       matcher: {
         summary_pattern: '^小荷AI医生(?:AI)?智能总结$',
-        view_more_pattern: '^查看更多$',
+        view_more_pattern: '^查看(?:更多|全文)$',
         minimum_confidence: 0.85,
         requires_summary_above_button: true,
         requires_horizontal_overlap: true,
@@ -138,7 +138,7 @@ function createToutiaoSearchWorkflow({
     log(ocrTarget
       ? `ocr: purpose=toutiao_summary_recapture outcome=matched engine=${recognition.engine} elapsed=${Math.round(recognition.elapsedMs)}ms lines=${recognition.results.length} summary_confidence=${ocrTarget.summaryConfidence.toFixed(3)} view_more_confidence=${ocrTarget.viewMoreConfidence.toFixed(3)} physical_bounds=${ocrTarget.physicalBounds.join(',')} logical_bounds=${ocrTarget.bounds.join(',')}`
       : `ocr: purpose=toutiao_summary_recapture outcome=not_found engine=${recognition.engine} elapsed=${Math.round(recognition.elapsedMs)}ms lines=${recognition.results.length}`)
-    if (!ocrTarget) throw new Error('截取头条智能总结后，UI层级和OCR均未能再次确认小荷AI医生“查看更多”卡片，已停止点击。')
+    if (!ocrTarget) throw new Error('截取头条智能总结后，UI层级和OCR均未能再次确认小荷AI医生全文入口，已停止点击。')
     return { ...capture, viewMore: ocrTarget.bounds, size, detectionMethod: 'rapidocr', ocrTarget, recognition }
   }
   
@@ -165,19 +165,19 @@ function createToutiaoSearchWorkflow({
       if (hasMessageInput && !answerContentReady) {
         genericConsultationReads += 1
         if (genericConsultationReads >= 3) {
-          throw new ToutiaoFullAnswerNotOpenedError('头条“查看更多”已进入小程序，但连续三次未检测到回答正文像素。')
+          throw new ToutiaoFullAnswerNotOpenedError('头条全文入口已进入小程序，但连续三次未检测到回答正文像素。')
         }
       } else genericConsultationReads = 0
       const current = await ui.currentApp()
       if (current?.package && current.package !== getActivePackageName()) {
-        throw new Error(`头条“查看更多”点击后进入了错误应用：expected=${getActivePackageName()}, actual=${current.package}`)
+        throw new Error(`头条全文入口点击后进入了错误应用：expected=${getActivePackageName()}, actual=${current.package}`)
       }
       if (/MiniAppHostActivity/.test(current?.activity || '')) {
         if (!miniAppHostSeen) log('waiting: 已确认进入头条小程序宿主，正在等待全文UI层级就绪')
         miniAppHostSeen = true
       }
     }
-    throw new ToutiaoFullAnswerNotOpenedError('已点击头条小荷AI医生“查看更多”，但未能确认本题全文页打开。')
+    throw new ToutiaoFullAnswerNotOpenedError('已点击头条小荷AI医生全文入口，但未能确认本题全文页打开。')
   }
   
 
