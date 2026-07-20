@@ -99,7 +99,7 @@ function createQuestionWorkflows({
       log(`diagnostic: 抖音搜索超时现场已保存到 ${directory}`)
       throw error
     }
-    const searchCapture = await captureDouyinSearchTarget(card.size)
+    const searchCapture = await captureDouyinSearchTarget(card.size, card.target)
     await fs.mkdir(artifacts.deliveryDirectory, { recursive: true })
     let leadingScreenshotPath
     let full
@@ -123,8 +123,9 @@ function createQuestionWorkflows({
     } else {
       log('stage: 未出现智能总结，已识别小荷AI医生小程序入口卡片')
       leadingScreenshotPath = path.join(artifacts.deliveryDirectory, DOUYIN_MINIAPP_ENTRY_FILENAME)
-      await fs.writeFile(leadingScreenshotPath, searchCapture.frame)
-      log(`capture: 抖音小程序入口搜索页已保存 ${leadingScreenshotPath}`)
+      const diagnosticEntryScreenshotPath = path.join(artifacts.diagnosticDirectory, '搜索结果_小程序入口.png')
+      await fs.writeFile(diagnosticEntryScreenshotPath, searchCapture.frame)
+      log(`diagnostic: 抖音小程序入口搜索页已暂存 ${diagnosticEntryScreenshotPath}，通过本题上下文校验后才进入交付区`)
       log('stage: 正在通过独立入口卡片打开小荷AI医生小程序')
       full = await openDouyinMiniAppEntry(searchCapture.target, card.size)
       Object.assign(meta, {
@@ -137,7 +138,9 @@ function createQuestionWorkflows({
         douyin_miniapp_entry_activity: full.activity,
         douyin_question_logical_image_count: 2,
       })
-      full = await waitForDouyinMiniAppAnswer(full, payload.timeout * 1_000)
+      full = await waitForDouyinMiniAppAnswer(full, payload.timeout * 1_000, { question })
+      await fs.writeFile(leadingScreenshotPath, searchCapture.frame)
+      log(`capture: 抖音小程序入口搜索页已通过本题上下文校验并保存 ${leadingScreenshotPath}`)
       captureMethod = () => captureDouyinMiniAppEntryAnswerFrames(full.xml, full.bounds)
     }
     log('stage: 小荷AI医生全文页已打开且回答可截图，开始从上到下完整截图')

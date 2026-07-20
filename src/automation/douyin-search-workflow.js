@@ -1,6 +1,7 @@
 const { sleep } = require('./utils')
 const { cropImage, imageLooksLoaded, imageRegionsStable } = require('./images')
 const { captureStableSandwich } = require('./capture-primitives')
+const { normalizeOcrText } = require('./ocr')
 const {
   douyinSearchInput,
   hierarchyLogicalSize,
@@ -16,6 +17,57 @@ const DOUYIN_SUMMARY_PREFERENCE_MS = 3_000
 const DOUYIN_INITIAL_RESULT_WAIT_MS = 12_000
 const DOUYIN_SEARCH_SCAN_LIMIT = 3
 const DOUYIN_POST_SCAN_WAIT_MS = 5_000
+const DOUYIN_MINIAPP_CONTEXT_WAIT_MS = 15_000
+
+const GENERIC_QUESTION_BIGRAMS = new Set([
+  '什么', '怎么', '么办', '如何', '请问', '是否', '可以', '需要', '用什', '么药', '咋办',
+])
+
+function significantQuestionBigrams(question) {
+  const normalized = normalizeOcrText(question).replace(/[^\p{L}\p{N}]/gu, '')
+  const result = []
+  for (let index = 0; index < normalized.length - 1; index += 1) {
+    const bigram = normalized.slice(index, index + 2)
+    if (!GENERIC_QUESTION_BIGRAMS.has(bigram) && !result.includes(bigram)) result.push(bigram)
+  }
+  return { normalized, bigrams: result }
+}
+
+function douyinMiniAppAnswerContextEvidence(recognition, question) {
+  const { normalized, bigrams } = significantQuestionBigrams(question)
+  const recognizedText = (recognition?.results || [])
+    .filter(item => Number(item.confidence) >= 0.62)
+    .map(item => normalizeOcrText(item.normalizedText || item.text))
+    .join('')
+    .replace(/[^\p{L}\p{N}]/gu, '')
+  const matchedBigrams = bigrams.filter(item => recognizedText.includes(item))
+  const requiredBigramCount = bigrams.length <= 1 ? bigrams.length : 2
+  const exact = normalized.length >= 2 && recognizedText.includes(normalized)
+  return {
+    matched: Boolean(exact || (requiredBigramCount > 0 && matchedBigrams.length >= requiredBigramCount)),
+    exact,
+    normalizedQuestion: normalized,
+    requiredBigramCount,
+    matchedBigrams,
+    recognizedText,
+  }
+}
+
+function douyinSearchTargetStabilityBounds(target, size) {
+  if (target?.mode === 'miniapp_entry_card' && Array.isArray(target.cardBounds)) return target.cardBounds
+  if (target?.mode === 'smart_summary' && Array.isArray(target.viewFull)) {
+    const [left, top, right, bottom] = target.viewFull
+    const marginX = Math.round(size.width * 0.16)
+    const marginY = Math.round(size.height * 0.08)
+    return [
+      Math.max(0, left - marginX),
+      Math.max(0, top - marginY),
+      Math.min(size.width, right + marginX),
+      Math.min(size.height, bottom + marginY),
+    ]
+  }
+  return null
+}
 
 function createDouyinSearchWorkflow({
   source,
@@ -164,16 +216,27 @@ function createDouyinSearchWorkflow({
     log('stage: 当前搜索结果已刷新，开始第二轮入口识别与向下扫描')
   }
   
-  async function captureDouyinSearchTarget(size) {
+  async function captureDouyinSearchTarget(size, expectedTarget = null) {
     await waitForVisualQuiet({ timeout: 1_200, fallbackMs: 300 })
+    const stabilityBounds = douyinSearchTargetStabilityBounds(expectedTarget, size)
     const capture = await captureStableSandwich({
       capture: screenshot,
       hierarchy: source,
-      framesStable: imageRegionsStable,
+      framesStable: stabilityBounds
+        ? async (first, second) => {
+          const [firstTarget, secondTarget] = await Promise.all([
+            cropImage(first, stabilityBounds),
+            cropImage(second, stabilityBounds),
+          ])
+          return imageRegionsStable(firstTarget, secondTarget)
+        }
+        : imageRegionsStable,
       hierarchyLoading: () => false,
       interval: 120,
     }, 8_000)
-    if (!capture.stable) throw new Error('抖音搜索结果持续变化，无法取得稳定截图。')
+    if (!capture.stable) throw new Error(stabilityBounds
+      ? '抖音小荷AI目标卡片持续变化，无法取得稳定点击证据。'
+      : '抖音搜索结果持续变化，无法取得稳定截图。')
     const target = douyinSearchResultTarget(capture.xml, size)
     if (target) return { ...capture, target, detectionMethod: 'ui_hierarchy' }
     const logicalSize = hierarchyLogicalSize(capture.xml, size)
@@ -240,7 +303,7 @@ function createDouyinSearchWorkflow({
     throw new Error('小程序入口卡片已点击，但未能确认抖音小程序宿主页打开。')
   }
   
-  async function waitForDouyinMiniAppAnswer(full, timeout) {
+  async function waitForDouyinMiniAppAnswer(full, timeout, { question = '' } = {}) {
     const deadline = full.startedAt + timeout
     const contentHeight = full.bounds[3] - full.bounds[1]
     const readinessBounds = [
@@ -250,16 +313,60 @@ function createDouyinSearchWorkflow({
       full.bounds[3] - Math.max(12, Math.floor(contentHeight * 0.03)),
     ]
     let lastProgress = 0
+    let contextMismatchStartedAt = 0
+    let contextMismatchReads = 0
+    const recognizeQuestionContext = async (screen, phase) => {
+      const recognition = await ocr.recognize(screen, { minConfidence: 0.5 })
+      const context = douyinMiniAppAnswerContextEvidence(recognition, question)
+      setLastOcrDiagnostic({
+        created_at: new Date().toISOString(),
+        purpose: 'douyin_miniapp_answer_context',
+        phase,
+        matcher: {
+          question,
+          normalized_question: context.normalizedQuestion,
+          required_bigram_count: context.requiredBigramCount,
+          minimum_confidence: 0.62,
+        },
+        recognition,
+        target: context,
+      })
+      return context
+    }
     while (Date.now() < deadline) {
       checkCancelled()
-      const frame = await cropImage(await screenshot(), readinessBounds)
+      const screen = await screenshot()
+      const frame = await cropImage(screen, readinessBounds)
       if (await imageLooksLoaded(frame)) {
+        const context = await recognizeQuestionContext(screen, 'initial_loaded_frame')
+        if (!context.matched) {
+          contextMismatchStartedAt ||= Date.now()
+          contextMismatchReads += 1
+          if (Date.now() - contextMismatchStartedAt >= DOUYIN_MINIAPP_CONTEXT_WAIT_MS && contextMismatchReads >= 3) {
+            throw new Error(`抖音独立小程序入口打开后只检测到与本题无关的旧会话，${Math.round(DOUYIN_MINIAPP_CONTEXT_WAIT_MS / 1000)}秒内未出现当前问题上下文；已拒绝截取错误回答。`)
+          }
+          if (Date.now() - lastProgress >= 5_000) {
+            log(`waiting: 抖音小程序已有内容但尚未出现本题上下文，继续等待新回答（匹配片段=${context.matchedBigrams.join('|') || '无'}）`)
+            lastProgress = Date.now()
+          }
+          await sleep(1_000)
+          continue
+        }
         log('waiting: 抖音小程序回答正文已出现，继续等待画面稳定')
         const remaining = Math.max(1_000, deadline - Date.now())
         const stable = await waitForStableReply(remaining, { startedAt: full.startedAt })
         if (stable.status !== 'stable') throw new Error(`抖音小程序回答已出现，但等待稳定超时（${stable.status}）。`)
         const bounds = douyinMiniAppCaptureBounds(stable.xml, await windowSize())
         if (!bounds) throw new Error('抖音小程序回答稳定后未能重新确认正文截图区域。')
+        const confirmedScreen = await screenshot()
+        const confirmedContext = await recognizeQuestionContext(confirmedScreen, 'stable_frame_recheck')
+        if (!confirmedContext.matched) {
+          contextMismatchStartedAt ||= Date.now()
+          contextMismatchReads += 1
+          log('waiting: 抖音小程序稳定后未确认本题上下文，忽略进入过程残影并继续等待当前回答')
+          await sleep(1_000)
+          continue
+        }
         return { ...full, xml: stable.xml, bounds }
       }
       if (Date.now() - lastProgress >= 5_000) {
@@ -282,4 +389,10 @@ function createDouyinSearchWorkflow({
   }
 }
 
-module.exports = { createDouyinSearchWorkflow, DOUYIN_SEARCH_SCAN_LIMIT }
+module.exports = {
+  createDouyinSearchWorkflow,
+  DOUYIN_SEARCH_SCAN_LIMIT,
+  significantQuestionBigrams,
+  douyinMiniAppAnswerContextEvidence,
+  douyinSearchTargetStabilityBounds,
+}

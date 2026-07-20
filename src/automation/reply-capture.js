@@ -56,6 +56,53 @@ async function replyBoundaryFramesStable(first, second) {
   return comparisons.every(Boolean)
 }
 
+async function miniAppTopFramesStable(first, second) {
+  const firstInfo = await imageInfo(first)
+  const secondInfo = await imageInfo(second)
+  if (firstInfo.width !== secondInfo.width || firstInfo.height !== secondInfo.height) return false
+  const width = firstInfo.width
+  const height = firstInfo.height
+  const bounds = [
+    Math.floor(width * 0.04),
+    Math.floor(height * 0.06),
+    Math.ceil(width * 0.96),
+    Math.max(1, Math.floor(height * 0.54)),
+  ]
+  const [before, after] = await Promise.all([
+    cropImage(first, bounds),
+    cropImage(second, bounds),
+  ])
+  return imageRegionsStable(before, after)
+}
+
+async function confirmMiniAppTop({
+  initialCapture,
+  swipeUp,
+  settle,
+  framesStable = miniAppTopFramesStable,
+  requiredUnchanged = 2,
+  timeout = 90_000,
+  maxAttempts = 80,
+  now = Date.now,
+}) {
+  if (!initialCapture?.frame) throw new Error('小程序回顶确认缺少初始画面。')
+  const deadline = now() + timeout
+  let capture = initialCapture
+  let unchangedCount = 0
+  let attempts = 0
+  while (unchangedCount < requiredUnchanged && attempts < maxAttempts && now() < deadline) {
+    const before = capture.frame
+    const scroll = await swipeUp(attempts)
+    capture = await settle(scroll, attempts)
+    attempts += 1
+    unchangedCount = await framesStable(before, capture.frame) ? unchangedCount + 1 : 0
+  }
+  if (unchangedCount < requiredUnchanged) {
+    throw new Error(`小程序回答在${Math.round(timeout / 1000)}秒或${maxAttempts}次向上滚动内仍无法确认顶部；已停止继续滚动，避免无限刷新。`)
+  }
+  return { capture, attempts, confirmed: true }
+}
+
 function seamErrorSummary(error) {
   if (!error) return null
   return {
@@ -119,6 +166,7 @@ function createReplyCapture({
   waitForVisualQuiet,
   ocr,
   setLastOcrDiagnostic,
+  miniAppCompletionConfirmationOptions = {},
 }) {
   async function scrollQuestionIntoView(question, bounds, maxSwipes = 25) {
     for (let index = 0; index < maxSwipes; index += 1) {
@@ -556,7 +604,7 @@ function createReplyCapture({
       capture: async () => cropImage(await screenshot(), bounds),
       hierarchy: source,
       framesStable: imageRegionsStable,
-      hierarchyLoading: () => false,
+      hierarchyLoading: hierarchyIsLoading,
       interval: 120,
     }, timeout)
     if (!capture.stable) throw new Error(`${platformLabel}小荷AI全文正文区域持续变化，无法取得可验证的稳定截图。`)
@@ -568,8 +616,15 @@ function createReplyCapture({
     metadataPrefix,
     openedMetadataKey,
     initialQuietMs = 0,
+    confirmCompletionBeforeCapture = false,
+    useDirectCandidateSnapshots = false,
+    useReplyOverlapConsensus = false,
+    completionConfirmationOptions = {},
   }) {
     const sequence = new CaptureSequence()
+    const seamRecords = []
+    const seamDiagnostics = []
+    const scrollDecisions = []
     const fallbackReasons = []
     let recaptureCount = 0
     let unchangedCount = 0
@@ -585,6 +640,26 @@ function createReplyCapture({
     let capture = await waitForMiniAppStableRegion(initialBounds, platformLabel, 12_000)
     let bounds = douyinMiniAppCaptureBounds(capture.xml || initialXml, await windowSize()) || initialBounds
     if (bounds.join(',') !== initialBounds.join(',')) capture = await waitForMiniAppStableRegion(bounds, platformLabel, 8_000)
+
+    let completionConfirmation = null
+    if (confirmCompletionBeforeCapture) {
+      log(`waiting: 正在确认${platformLabel}小荷AI全文已持续到底且不再生成`)
+      completionConfirmation = await confirmPersistentScrollEnd({
+        capture: () => captureReplyRegionSnapshot(bounds, { settleMs: 0 }),
+        swipeDown: attempt => swipeChat(bounds, 'down', 0.68, {
+          maxFraction: 0.74,
+          speed: 3_200,
+          settle: 80,
+          xFraction: attempt % 2 ? 0.68 : 0.84,
+        }),
+        settle: () => captureReplyRegionSnapshot(bounds, { settleMs: 160 }),
+        framesStable: replyBoundaryFramesStable,
+        hierarchyLoading: hierarchyIsLoading,
+        ...completionConfirmationOptions,
+      })
+      capture = completionConfirmation.capture
+      log(`waiting: ${platformLabel}小荷AI全文底部已持续${Math.round(completionConfirmation.quietMs / 1000)}秒不可继续滚动且内容无变化，确认生成完成（探测=${completionConfirmation.probes}，重置=${completionConfirmation.resets}）`)
+    }
   
     const captureProductsIfVisible = async xml => {
       if (products) return true
@@ -621,17 +696,22 @@ function createReplyCapture({
       }
     }
   
-    let topUnchangedCount = 0
-    let topNavigationAttempts = 0
-    while (topUnchangedCount < 2) {
-      topNavigationAttempts += 1
-      const before = capture.frame
-      await swipeChat(bounds, 'up', 0.62, { maxFraction: 0.68, speed: 2_600 })
-      capture = await waitForMiniAppStableRegion(bounds, platformLabel, 6_000)
-      topUnchangedCount = await imagesSimilar(before, capture.frame, 3) ? topUnchangedCount + 1 : 0
-    }
-    log(`capture: ${platformLabel}小荷AI全文已确认位于顶部（回滚尝试=${topNavigationAttempts}）`)
+    const topNavigationStarted = Date.now()
+    const topBoundary = await confirmMiniAppTop({
+      initialCapture: capture,
+      swipeUp: () => swipeChat(bounds, 'up', 0.62, { maxFraction: 0.68, speed: 2_600 }),
+      settle: () => waitForMiniAppStableRegion(bounds, platformLabel, 6_000),
+    })
+    const topNavigationAttempts = topBoundary.attempts
+    // Douyin shows an animated “没有更多了” toast after an upward swipe at
+    // the real top. It is deliberately excluded from the boundary witness,
+    // then allowed to disappear before the first deliverable frame is kept.
+    await sleep(2_200)
+    capture = await waitForMiniAppStableRegion(bounds, platformLabel, 6_000)
+    const topNavigationMs = Date.now() - topNavigationStarted
+    log(`capture: ${platformLabel}小荷AI全文已确认位于顶部（回滚尝试=${topNavigationAttempts}，耗时=${topNavigationMs}ms）`)
     sequence.addInitial(capture.frame)
+    scrollDecisions.push({ attempt: 1, outcome: 'initial_frame_appended', frame_count: sequence.length })
     log(`capture: ${platformLabel}小荷AI全文 page 1`)
   
     let terminalSequence = await captureProductsIfVisible(capture.xml || await source())
@@ -640,42 +720,124 @@ function createReplyCapture({
       scrollAttempts += 1
       const before = sequence.lastFrame
       const scroll = await swipeChat(bounds, 'down', 0.5, { maxFraction: 0.58, speed: 1_600, eventDrivenSettle: true })
-      let afterCapture = await waitForMiniAppStableRegion(bounds, platformLabel, 8_000)
+      let afterCapture = useDirectCandidateSnapshots
+        ? await captureReplyRegionSnapshot(bounds, { settleMs: 180 })
+        : await waitForMiniAppStableRegion(bounds, platformLabel, 8_000)
       let after = afterCapture.frame
-      if (await imagesSimilar(before, after, 3)) {
+      if (await replyBoundaryFramesStable(before, after)) {
         unchangedCount += 1
+        scrollDecisions.push({
+          attempt: scrollAttempts,
+          page: sequence.length,
+          outcome: 'no_progress',
+          unchanged_count: unchangedCount,
+          scroll: { distance: scroll.distance, x: scroll.x ?? null, duration_ms: scroll.durationMs ?? null, can_scroll_more: scroll.canScrollMore },
+          capture: stableCaptureSummary(afterCapture),
+        })
         continue
       }
   
       unchangedCount = 0
       const frameHeight = (await imageInfo(before)).height
-      const expectedOverlap = Math.max(12, frameHeight - scroll.distance)
+      const logicalViewportHeight = Math.max(1, bounds[3] - bounds[1])
+      const expectedShift = scroll.distance * frameHeight / logicalViewportHeight
+      const expectedOverlap = Math.max(12, frameHeight - expectedShift)
+      const initialAfterCapture = afterCapture
+      const initialAfter = after
+      const initialAfterXml = afterCapture.xml || ''
+      const initialMeasurement = {
+        requested_scroll_distance: scroll.distance,
+        expected_physical_shift: expectedShift,
+        expected_overlap: expectedOverlap,
+      }
       let transition = null
+      let firstError = null
+      let retryError = null
+      let recaptureSnapshot = null
       try {
         if (!afterCapture.stable) throw new Error(`滚动后的${platformLabel}全文画面未稳定`)
         try {
-          transition = { verified: true, overlap: await verifyFrameOverlap(before, after, expectedOverlap) }
+          transition = {
+            verified: true,
+            overlap: useReplyOverlapConsensus
+              ? await verifyReplyFrameOverlap(before, after, expectedOverlap)
+              : await verifyFrameOverlap(before, after, expectedOverlap),
+          }
         } catch {
-          transition = { verified: true, overlap: await verifyFrameOverlap(before, after, null) }
+          transition = {
+            verified: true,
+            overlap: useReplyOverlapConsensus
+              ? await verifyReplyFrameOverlap(before, after, null)
+              : await verifyFrameOverlap(before, after, null),
+          }
         }
       } catch (error) {
+        firstError = error
         recaptureCount += 1
         afterCapture = await waitForMiniAppStableRegion(bounds, platformLabel, 3_000)
         after = afterCapture.frame
+        recaptureSnapshot = { ...stableCaptureSummary(afterCapture), frame: after, xml: afterCapture.xml || '' }
         try {
           if (!afterCapture.stable) throw new Error(`重采后的${platformLabel}全文画面仍未稳定`)
-          transition = { verified: true, overlap: await verifyFrameOverlap(before, after, null) }
-        } catch (retryError) {
-          const reason = retryError.message || error.message
+          transition = {
+            verified: true,
+            overlap: useReplyOverlapConsensus
+              ? await verifyReplyFrameOverlap(before, after, null)
+              : await verifyFrameOverlap(before, after, null),
+          }
+        } catch (retryFailure) {
+          retryError = retryFailure
+          const reason = retryFailure.message || error.message
           transition = { verified: false, fallbackOverlap: 0, reason }
           fallbackReasons.push(reason)
           log(`capture: ${platformLabel}全文接缝无法精确校验，保留下一屏完整视口和浅色留白：${reason}`)
         }
       }
       if (!(await imagesSimilar(sequence.lastFrame, after, 3))) {
+        const seamIndex = sequence.length
+        const record = {
+          index: seamIndex,
+          from_page: sequence.length,
+          to_page: sequence.length + 1,
+          outcome: transition.verified ? (firstError ? 'verified_after_recapture' : 'verified') : 'fallback',
+          scroll: { distance: scroll.distance, x: scroll.x ?? null, duration_ms: scroll.durationMs ?? null, can_scroll_more: scroll.canScrollMore },
+          initial_measurement: initialMeasurement,
+          retry_measurement: null,
+          first_error: seamErrorSummary(firstError),
+          retry_error: seamErrorSummary(retryError),
+          new_content_evidence: null,
+          transition,
+        }
+        seamRecords.push(record)
+        if (firstError) {
+          seamDiagnostics.push({
+            index: seamIndex,
+            createdAt: new Date().toISOString(),
+            fromPage: sequence.length,
+            toPage: sequence.length + 1,
+            scroll: record.scroll,
+            initialMeasurement,
+            retryMeasurement: null,
+            firstError,
+            retryError,
+            transition,
+            newContentEvidence: null,
+            previous: { frame: before, xml: capture.xml || '', stable: capture.stable ?? null },
+            afterScroll: { ...stableCaptureSummary(initialAfterCapture), frame: initialAfter, xml: initialAfterXml },
+            recapture: recaptureSnapshot,
+          })
+        }
         sequence.append(after, transition)
+        scrollDecisions.push({
+          attempt: scrollAttempts,
+          page: sequence.length,
+          outcome: 'candidate_appended',
+          seam_index: seamIndex,
+          transition: record.outcome,
+        })
         log(`capture: ${platformLabel}小荷AI全文 page ${sequence.length}`)
-      }
+      } else scrollDecisions.push({ attempt: scrollAttempts, page: sequence.length, outcome: 'candidate_discarded_as_duplicate' })
+      capture = afterCapture
       terminalSequence = await captureProductsIfVisible(afterCapture.xml || await source())
     }
     if (!terminalSequence) log(`capture: ${platformLabel}小荷AI全文连续两次滚动无变化，已确认到底`)
@@ -683,11 +845,14 @@ function createReplyCapture({
     return {
       frames: captured.frames,
       transitions: captured.transitions,
+      seamRecords,
+      seamDiagnostics,
+      scrollDecisions,
       bounds,
       recaptureCount,
       fullRetryCount: 0,
       fallbackReasons,
-      topNavigationMs: 0,
+      topNavigationMs,
       evidenceEmbedded: false,
       evidenceExpanded: false,
       productDetected,
@@ -700,6 +865,11 @@ function createReplyCapture({
         [`${metadataPrefix}_full_page_top_navigation_attempts`]: topNavigationAttempts,
         [`${metadataPrefix}_full_page_confirmed_end`]: true,
         [`${metadataPrefix}_full_page_scroll_attempts`]: scrollAttempts,
+        reply_completion_confirmation_method: completionConfirmation ? 'persistent_scroll_end' : 'initial_visual_quiet',
+        reply_completion_confirmed_before_capture: Boolean(completionConfirmation),
+        reply_completion_confirmation_probes: completionConfirmation?.probes ?? 0,
+        reply_completion_confirmation_resets: completionConfirmation?.resets ?? 0,
+        reply_completion_confirmation_quiet_ms: completionConfirmation?.quietMs ?? 0,
       },
     }
   }
@@ -709,7 +879,10 @@ function createReplyCapture({
       platformLabel: '抖音',
       metadataPrefix: 'douyin',
       openedMetadataKey: 'douyin_view_full_opened',
-      initialQuietMs: REPLY_STABLE_QUIET_MS,
+      confirmCompletionBeforeCapture: true,
+      useDirectCandidateSnapshots: true,
+      useReplyOverlapConsensus: true,
+      completionConfirmationOptions: miniAppCompletionConfirmationOptions,
     })
   }
   
@@ -718,7 +891,10 @@ function createReplyCapture({
       platformLabel: '抖音',
       metadataPrefix: 'douyin',
       openedMetadataKey: 'douyin_miniapp_entry_opened',
-      initialQuietMs: REPLY_STABLE_QUIET_MS,
+      confirmCompletionBeforeCapture: true,
+      useDirectCandidateSnapshots: true,
+      useReplyOverlapConsensus: true,
+      completionConfirmationOptions: miniAppCompletionConfirmationOptions,
     })
   }
   
@@ -743,4 +919,11 @@ function createReplyCapture({
   }
 }
 
-module.exports = { createReplyCapture, navigateReplyToBottomControl, replyBoundaryFramesStable, shouldDiscardUnprovenCandidate }
+module.exports = {
+  createReplyCapture,
+  navigateReplyToBottomControl,
+  replyBoundaryFramesStable,
+  miniAppTopFramesStable,
+  confirmMiniAppTop,
+  shouldDiscardUnprovenCandidate,
+}

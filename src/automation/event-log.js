@@ -21,11 +21,17 @@ function classifyAutomationLog(message) {
   if (/^capture: 推荐药品采集未完成/.test(text)) return { event: 'reference_products_capture_retry', category: 'capture', details: {} }
   if (/^capture: 推荐药品已按回答尾部顺序完整采集/.test(text)) return { event: 'reference_products_terminal_sequence_completed', category: 'capture', details: {} }
   if (/^capture: 推荐药品.*(?:确认到底|连续.*无变化)/.test(text)) return { event: 'reference_products_end_confirmed', category: 'capture', details: {} }
-  const replyCompletion = text.match(/^waiting: 小荷回答底部已持续(\d+)秒不可继续滚动且内容无变化，确认生成完成（探测=(\d+)，重置=(\d+)）$/)
+  const replyCompletion = text.match(/^waiting: (?:(抖音|头条)小荷AI全文|小荷回答)底部已持续(\d+)秒不可继续滚动且内容无变化，确认生成完成（探测=(\d+)，重置=(\d+)）$/)
   if (replyCompletion) return {
     event: 'reply_completion_confirmed',
     category: 'waiting',
-    details: { quiet_seconds: Number(replyCompletion[1]), probes: Number(replyCompletion[2]), resets: Number(replyCompletion[3]), method: 'persistent_scroll_end' },
+    details: {
+      platform: replyCompletion[1] || '小荷App',
+      quiet_seconds: Number(replyCompletion[2]),
+      probes: Number(replyCompletion[3]),
+      resets: Number(replyCompletion[4]),
+      method: 'persistent_scroll_end',
+    },
   }
   const ocr = text.match(/^ocr: purpose=([^ ]+) outcome=([^ ]+) engine=([^ ]+) elapsed=(\d+)ms lines=(\d+)(.*)$/)
   if (ocr) {
@@ -39,7 +45,7 @@ function classifyAutomationLog(message) {
     return { event: 'ocr_recognition', category: 'diagnostic', details }
   }
   if (/^capture: 引用资料/.test(text) || /^capture: 在回答截图前展开引用资料/.test(text)) return { event: 'evidence_capture', category: 'capture', details: {} }
-  if (/^capture: 抖音小程序入口搜索页已保存/.test(text)) return { event: 'douyin_miniapp_entry_captured', category: 'capture', details: {} }
+  if (/^capture: 抖音小程序入口搜索页.*(?:已保存|并保存)/.test(text)) return { event: 'douyin_miniapp_entry_captured', category: 'capture', details: {} }
   const seamSummary = text.match(/^capture: 接缝汇总已保存 (.+)（帧=(\d+)，接缝=(\d+)\/(\d+)，异常证据=(\d+)组）$/)
   if (seamSummary) return {
     event: 'reply_seam_diagnostics_saved',

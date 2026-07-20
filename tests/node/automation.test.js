@@ -15,7 +15,8 @@ const { toutiaoAddToHomeScreenCancelBounds } = require('../../src/automation/min
 const { automationEntries, ENTRY_DEFINITIONS, entryHierarchyStartupTimeout, hierarchyBelongsToPackage, normalizeAutomationEntries } = require('../../src/automation/entry-catalog')
 const { DouyinSearchResultNotFoundError, ToutiaoAnswerCardNotFoundError, ToutiaoFullAnswerNotOpenedError, runDouyinSearchResultAttempts, runToutiaoAnswerCardAttempts, runToutiaoFullAnswerAttempts } = require('../../src/automation/search-recovery')
 const { createQuestionWorkflows } = require('../../src/automation/question-workflows')
-const { createReplyCapture, navigateReplyToBottomControl } = require('../../src/automation/reply-capture')
+const { createReplyCapture, navigateReplyToBottomControl, miniAppTopFramesStable, confirmMiniAppTop } = require('../../src/automation/reply-capture')
+const { douyinMiniAppAnswerContextEvidence, douyinSearchTargetStabilityBounds } = require('../../src/automation/douyin-search-workflow')
 const { recoverTimedOutExistingReply } = require('../../src/automation/existing-reply-recovery')
 const { toutiaoAnswerRegionLooksReady } = require('../../src/automation/toutiao-search-workflow')
 
@@ -41,21 +42,134 @@ test('小荷到底按钮未在首次点击后消失时只按最新层级受控�
   assert.match(logs[0], /最新层级重新定位/)
 })
 
-test('抖音全文截图进入共享的回答稳定等待，不引用未定义常量', async () => {
-  let quietOptions = null
+test('抖音全文正式采集前先持续确认到底，并记录成功接缝证据', async () => {
+  const width = 240
+  const frameHeight = 300
+  const shift = 120
+  const contentHeight = frameHeight + shift
+  const raw = Buffer.alloc(width * contentHeight * 3)
+  for (let y = 0; y < contentHeight; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const offset = (y * width + x) * 3
+      const value = 35 + ((y * 31 + x * 17 + (x * y) % 101) % 190)
+      raw[offset] = value
+      raw[offset + 1] = (value + 37) % 240
+      raw[offset + 2] = (value + 73) % 240
+    }
+  }
+  const content = sharp(raw, { raw: { width, height: contentHeight, channels: 3 } })
+  const top = await content.clone().extract({ left: 0, top: 0, width, height: frameHeight }).png().toBuffer()
+  const bottom = await content.clone().extract({ left: 0, top: shift, width, height: frameHeight }).png().toBuffer()
+  let position = 'top'
+  let visualQuietCalled = false
+  const directions = []
   const capture = createReplyCapture({
     log: () => {},
-    waitForFinalVisualQuiet: async options => {
-      quietOptions = options
-      throw new Error('quiet-probe')
+    source: async () => '<hierarchy />',
+    screenshot: async () => top,
+    windowSize: async () => ({ width, height: frameHeight }),
+    waitForVisualQuiet: async () => {},
+    waitForFinalVisualQuiet: async () => { visualQuietCalled = true },
+    captureReplyRegionSnapshot: async () => ({
+      frame: position === 'top' ? top : bottom,
+      xml: '<hierarchy />',
+      stable: true,
+      attempts: 1,
+    }),
+    swipeChat: async (_bounds, direction) => {
+      directions.push(direction)
+      position = direction === 'up' ? 'top' : 'bottom'
+      return { distance: shift, canScrollMore: null, x: 204, durationMs: 75 }
+    },
+    captureReferenceProductsAtTrigger: async () => { throw new Error('不应采集药品') },
+    miniAppCompletionConfirmationOptions: {
+      quietMs: 0,
+      probeInterval: 0,
+      timeout: 1_000,
+      delay: async () => {},
     },
   })
 
-  await assert.rejects(
-    capture.captureDouyinFullAnswerFrames('<hierarchy />', CHAT_BOUNDS),
-    /quiet-probe/,
+  const result = await capture.captureDouyinFullAnswerFrames('<hierarchy />', [0, 0, width, frameHeight])
+  assert.equal(visualQuietCalled, false)
+  assert.equal(result.captureMetadata.reply_completion_confirmed_before_capture, true)
+  assert.ok(result.captureMetadata.reply_completion_confirmation_probes >= 4)
+  assert.equal(result.frames.length, 2)
+  assert.equal(result.transitions.length, 1)
+  assert.equal(result.seamRecords.length, 1)
+  assert.equal(result.seamRecords[0].outcome, 'verified')
+  assert.equal(result.scrollDecisions.filter(item => item.outcome === 'no_progress').length, 2)
+  assert.ok(directions.slice(0, 4).every(direction => direction === 'down'))
+  assert.ok(directions.includes('up'))
+})
+
+test('抖音回顶忽略下半部没有更多Toast，但正文移动仍会重置确认', async () => {
+  const width = 360
+  const height = 640
+  const base = await sharp({ create: { width, height, channels: 3, background: '#f5f5f5' } })
+    .composite([
+      { input: Buffer.from('<svg width="300" height="180"><path d="M0 20H270M0 70H240M0 120H280" stroke="black" stroke-width="12"/></svg>'), left: 30, top: 45 },
+    ])
+    .png().toBuffer()
+  const toastOnly = await sharp(base).composite([{
+    input: await sharp({ create: { width: 210, height: 72, channels: 3, background: '#303030' } }).png().toBuffer(),
+    left: 75,
+    top: 430,
+  }]).png().toBuffer()
+  const movedContent = await sharp(base).composite([{
+    input: await sharp({ create: { width: 280, height: 80, channels: 3, background: '#78d9cc' } }).png().toBuffer(),
+    left: 40,
+    top: 110,
+  }]).png().toBuffer()
+
+  assert.equal(await miniAppTopFramesStable(base, toastOnly), true)
+  assert.equal(await miniAppTopFramesStable(base, movedContent), false)
+})
+
+test('抖音回顶无法确认时按上限停止，不再无限向上滑动', async () => {
+  let now = 0
+  let swipes = 0
+  await assert.rejects(() => confirmMiniAppTop({
+    initialCapture: { frame: 'initial' },
+    swipeUp: async () => { swipes += 1; now += 100; return {} },
+    settle: async () => ({ frame: `changed-${swipes}` }),
+    framesStable: async () => false,
+    maxAttempts: 3,
+    timeout: 10_000,
+    now: () => now,
+  }), /停止继续滚动，避免无限刷新/)
+  assert.equal(swipes, 3)
+})
+
+test('抖音独立入口必须识别本题上下文，不能把旧会话当作新回答', () => {
+  const recognition = lines => ({ results: lines.map(text => ({ text, normalizedText: text, confidence: 0.99 })) })
+  const oldReply = douyinMiniAppAnswerContextEvidence(
+    recognition(['咖啡因刺激交感神经，导致心悸心慌', '喝咖啡后出现心悸']),
+    '畅莱舒普济痔疮栓',
   )
-  assert.deepEqual(quietOptions, { quietMs: 3_000, timeout: 25_000 })
+  const currentReply = douyinMiniAppAnswerContextEvidence(
+    recognition(['畅莱舒普济痔疮栓用于缓解痔疮相关症状']),
+    '畅莱舒普济痔疮栓',
+  )
+  const paraphrasedReply = douyinMiniAppAnswerContextEvidence(
+    recognition(['腹泻后发生脱水，应及时补充液体']),
+    '腹泻脱水用什么药',
+  )
+
+  assert.equal(oldReply.matched, false)
+  assert.equal(currentReply.matched, true)
+  assert.equal(paraphrasedReply.matched, true)
+})
+
+test('抖音独立入口只用小荷卡片确认点击稳定，不受旁边自动播放视频影响', () => {
+  assert.deepEqual(douyinSearchTargetStabilityBounds({
+    mode: 'miniapp_entry_card',
+    cardBounds: [12, 910, 626, 2290],
+  }, { width: 1272, height: 2800 }), [12, 910, 626, 2290])
+  assert.deepEqual(douyinSearchTargetStabilityBounds({
+    mode: 'miniapp_entry_card',
+    cardBounds: [8, 520, 360, 1320],
+  }, { width: 720, height: 1600 }), [8, 520, 360, 1320])
 })
 
 test('只允许目标App层级进入UI操作流程', () => {
@@ -592,6 +706,14 @@ test('抖音小荷AI全文页排除固定顶部、工具栏和输入区', () => 
   </hierarchy>`
   assert.deepEqual(douyinMiniAppCaptureBounds(xml, { width: 1080, height: 2408 }), [0, 363, 1080, 1785])
   assert.equal(douyinMiniAppCaptureBounds(`${xml}<node package="com.ss.android.ugc.aweme" class="android.widget.EditText" resource-id="com.ss.android.ugc.aweme:id/et_search_kw" visible-to-user="true" bounds="[1,1][2,2]" />`, { width: 1080, height: 2408 }), null)
+
+  const scaledXml = xml
+    .replaceAll('1080', '720')
+    .replaceAll('2408', '1605')
+    .replaceAll('944', '629').replaceAll('1056', '704')
+    .replaceAll('111', '74').replaceAll('207', '138')
+    .replaceAll('363', '242').replaceAll('1785', '1190').replaceAll('1940', '1293')
+  assert.deepEqual(douyinMiniAppCaptureBounds(scaledXml, { width: 720, height: 1605 }), [0, 242, 720, 1190])
 })
 
 test('抖音小程序回答尾部用无文字卡片结构定位参考药品箭头', () => {
@@ -799,6 +921,17 @@ test('正式截图前以持续不可滚动和画面稳定确认回答已完整�
   assert.equal(result.resets, 2)
   assert.ok(result.probes >= 5)
   assert.ok(result.quietMs >= 900)
+})
+
+test('抖音回答完成事件记录平台、稳定时长和探测重置次数', () => {
+  assert.deepEqual(
+    classifyAutomationLog('waiting: 抖音小荷AI全文底部已持续6秒不可继续滚动且内容无变化，确认生成完成（探测=18，重置=2）'),
+    {
+      event: 'reply_completion_confirmed',
+      category: 'waiting',
+      details: { platform: '抖音', quiet_seconds: 6, probes: 18, resets: 2, method: 'persistent_scroll_end' },
+    },
+  )
 })
 
 test('稳定帧夹心校验首轮只需要两次截图', async () => {

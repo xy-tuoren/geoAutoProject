@@ -136,7 +136,7 @@ Windows 打包成功后，`dist/` 中应至少包含：
 git status --short
 npm run check
 npm test
-uv run --project python --locked pytest -q
+uv run --project python --locked pytest -q python
 git diff --check
 ```
 
@@ -245,7 +245,7 @@ macOS 包会自动进 Release 吗？
 - 本地功能改动已经完成。
 - `npm run check` 通过。
 - `npm test` 通过。
-- `uv run --project python --locked pytest -q` 通过。
+- `uv run --project python --locked pytest -q python` 通过。
 - 涉及真机流程时已经完成 `--capture-current-answer` 验收。
 - 没有提交 `captures/`、截图、XML、健康问题或设备隐私信息。
 - `package.json` 版本号已递增。
