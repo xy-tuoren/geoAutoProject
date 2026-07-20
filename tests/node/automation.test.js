@@ -906,8 +906,10 @@ test('定位不到刚发送的问题时拒绝截取旧回答', () => {
 test('新会话不判断问题气泡，连续两次向上无变化才确认顶部', async () => {
   const frames = ['中部', '顶部', '顶部', '顶部']
   const touchpoints = []
+  let initialCaptureCalls = 0
   const result = await scrollSingleQuestionSessionToTop({
-    capture: async () => ({ frame: '底部' }),
+    initialCapture: { frame: '底部' },
+    capture: async () => { initialCaptureCalls += 1; return { frame: '不应读取' } },
     swipeUp: async attempt => { touchpoints.push(attempt % 2 ? 0.68 : 0.84); return {} },
     settle: async () => ({ frame: frames.shift() }),
     framesStable: async (before, after) => before === after,
@@ -915,7 +917,90 @@ test('新会话不判断问题气泡，连续两次向上无变化才确认顶�
 
   assert.equal(result.confirmed, true)
   assert.equal(result.swipes, 4)
+  assert.equal(initialCaptureCalls, 0)
   assert.deepEqual(touchpoints, [0.84, 0.68, 0.84, 0.68])
+})
+
+test('小荷新会话复用到底确认帧并用事件驱动稳定截图回顶', async () => {
+  const width = 240
+  const viewportHeight = 360
+  const shift = 120
+  const raw = Buffer.alloc(width * (viewportHeight + shift) * 3)
+  for (let y = 0; y < viewportHeight + shift; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const offset = (y * width + x) * 3
+      const value = 35 + ((y * 31 + x * 17 + (x * y) % 101) % 190)
+      raw[offset] = value
+      raw[offset + 1] = (value + 37) % 240
+      raw[offset + 2] = (value + 73) % 240
+    }
+  }
+  const content = sharp(raw, { raw: { width, height: viewportHeight + shift, channels: 3 } })
+  const top = await content.clone().extract({ left: 0, top: 0, width, height: viewportHeight }).png().toBuffer()
+  const bottom = await content.clone().extract({ left: 0, top: shift, width, height: viewportHeight }).png().toBuffer()
+  const full = await sharp({ create: { width, height: 500, channels: 3, background: '#f4f4f4' } }).png().toBuffer()
+  const xml = '<hierarchy><node class="android.view.View" scrollable="true" visible-to-user="true" bounds="[0,80][240,440]" /></hierarchy>'
+  let position = 'top'
+  let observedStableCaptures = 0
+  let strictStableCaptures = 0
+  const upwardOptions = []
+  const capture = createReplyCapture({
+    log: () => {},
+    source: async () => xml,
+    screenshot: async () => full,
+    windowSize: async () => ({ width, height: 500 }),
+    waitForVisualQuiet: async () => {},
+    waitForFinalVisualQuiet: async () => {},
+    waitForStableReplyRegion: async (_bounds, _timeout, options = {}) => {
+      observedStableCaptures += 1
+      if (position === 'top' && upwardOptions.length > 0) assert.ok(options.settleSince || observedStableCaptures > 3)
+      return { frame: position === 'top' ? top : bottom, xml, stable: true, attempts: 1, observer: true }
+    },
+    waitForStableReplyRegionDirect: async () => {
+      strictStableCaptures += 1
+      throw new Error('正常回顶不应使用双PNG直接夹心')
+    },
+    captureReplyRegionSnapshot: async () => ({
+      frame: position === 'top' ? top : bottom,
+      xml,
+      stable: true,
+      attempts: 1,
+    }),
+    swipeChat: async (_bounds, direction, _fraction, options = {}) => {
+      position = direction === 'up' ? 'top' : 'bottom'
+      if (direction === 'up') upwardOptions.push(options)
+      return {
+        distance: shift,
+        canScrollMore: null,
+        activityMark: options.eventDrivenSettle ? { frameCount: upwardOptions.length } : null,
+        x: 204,
+        durationMs: 75,
+      }
+    },
+    tap: async () => {},
+    captureReferenceProductsAtTrigger: async () => { throw new Error('不应采集药品') },
+    ocr: {
+      recognize: async () => ({ image: { width, height: 500 }, results: [], engine: 'test', elapsedMs: 0 }),
+    },
+    setLastOcrDiagnostic: () => {},
+    xiaoheCompletionConfirmationOptions: {
+      quietMs: 0,
+      probeInterval: 0,
+      timeout: 1_000,
+      delay: async () => {},
+    },
+  })
+
+  const result = await capture.captureFullReplyFrames('测试问题', 30, { singleQuestionSession: true })
+
+  assert.equal(result.frames.length, 2)
+  assert.equal(result.transitions.length, 1)
+  assert.equal(result.captureMetadata.reply_completion_confirmed_before_capture, true)
+  assert.equal(result.captureMetadata.reply_top_navigation_method, 'new_session_scroll_boundary')
+  assert.equal(strictStableCaptures, 0)
+  assert.ok(observedStableCaptures >= 4)
+  assert.ok(upwardOptions.length >= 3)
+  assert.ok(upwardOptions.every(options => options.eventDrivenSettle === true))
 })
 
 test('正式截图前以持续不可滚动和画面稳定确认回答已完整生成', async () => {

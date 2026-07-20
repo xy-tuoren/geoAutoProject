@@ -157,6 +157,7 @@ function createReplyCapture({
   swipeChat,
   windowSize,
   waitForStableReplyRegionDirect,
+  waitForStableReplyRegion = waitForStableReplyRegionDirect,
   captureReplyRegionSnapshot,
   tap,
   log,
@@ -166,6 +167,7 @@ function createReplyCapture({
   waitForVisualQuiet,
   ocr,
   setLastOcrDiagnostic,
+  xiaoheCompletionConfirmationOptions = {},
   miniAppCompletionConfirmationOptions = {},
 }) {
   async function scrollQuestionIntoView(question, bounds, maxSwipes = 25) {
@@ -208,9 +210,11 @@ function createReplyCapture({
           : `waiting: 固定到底按钮连续${navigation.clicks}次点击后仍存在，停止点击并改由滚动探测完成验证`)
       } else completionNavigationMethod = 'verified_scroll_probes'
       completionConfirmation = await confirmPersistentScrollEnd({
-        capture: () => jumpTarget
-          ? waitForStableReplyRegionDirect(navigationBounds, 8_000)
-          : captureReplyRegionSnapshot(navigationBounds, { settleMs: 0 }),
+        // The jump-control click has already settled and the following three
+        // persistent probes are the authoritative completion witness. Start
+        // from one snapshot instead of paying for a separate two-PNG sandwich;
+        // an unsettled frame simply resets the probe counter and cannot pass.
+        capture: () => captureReplyRegionSnapshot(navigationBounds, { settleMs: 0 }),
         swipeDown: attempt => swipeChat(navigationBounds, 'down', 0.78, {
           maxFraction: 0.82,
           speed: 4_000,
@@ -220,6 +224,7 @@ function createReplyCapture({
         settle: () => captureReplyRegionSnapshot(navigationBounds),
         framesStable: replyBoundaryFramesStable,
         hierarchyLoading: hierarchyIsLoading,
+        ...xiaoheCompletionConfirmationOptions,
       })
       log(`waiting: 小荷回答底部已持续${Math.round(completionConfirmation.quietMs / 1000)}秒不可继续滚动且内容无变化，确认生成完成（探测=${completionConfirmation.probes}，重置=${completionConfirmation.resets}）`)
     }
@@ -228,14 +233,20 @@ function createReplyCapture({
     let topConfirmationSwipes = 0
     if (singleQuestionSession) {
       const topBoundary = await scrollSingleQuestionSessionToTop({
-        capture: () => waitForStableReplyRegionDirect(navigationBounds),
+        // Completion confirmation already owns a stable bottom snapshot. Reuse
+        // it so return-to-top does not capture the same state twice.
+        initialCapture: completionConfirmation?.capture || null,
+        capture: () => waitForStableReplyRegion(navigationBounds),
         swipeUp: attempt => swipeChat(navigationBounds, 'up', 0.78, {
           maxFraction: 0.82,
           speed: 4_000,
           settle: 80,
           xFraction: attempt % 2 ? 0.68 : 0.84,
+          eventDrivenSettle: true,
         }),
-        settle: () => waitForStableReplyRegionDirect(navigationBounds, 8_000),
+        settle: scroll => waitForStableReplyRegion(navigationBounds, 8_000, {
+          settleSince: scroll.activityMark,
+        }),
         framesStable: replyBoundaryFramesStable,
       })
       topConfirmationSwipes = topBoundary.swipes
@@ -259,12 +270,12 @@ function createReplyCapture({
       setLastOcrDiagnostic,
       tap,
       delay: sleep,
-      waitForStable: waitForStableReplyRegionDirect,
+      waitForStable: waitForStableReplyRegion,
       log,
     }, navigationBounds)
     if (!singleQuestionSession && !questionVisible(evidence.capture.xml || await source(), question, navigationBounds)) {
       requireQuestionLocated(await scrollQuestionIntoView(question, navigationBounds), question)
-      evidence.capture = await waitForStableReplyRegionDirect(navigationBounds)
+      evidence.capture = await waitForStableReplyRegion(navigationBounds)
       log('capture: 引用资料展开后已重新确认问题气泡完整位于首屏')
     }
     const topXml = await source()
@@ -309,7 +320,7 @@ function createReplyCapture({
           bounds[3] - navigationBounds[1],
         ]),
       }
-    } else initialCapture = await waitForStableReplyRegionDirect(bounds)
+    } else initialCapture = await waitForStableReplyRegion(bounds)
     const sequence = new CaptureSequence()
     const seamRecords = []
     const seamDiagnostics = []

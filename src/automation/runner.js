@@ -685,6 +685,7 @@ function createRunner(options) {
     source,
     swipeChat,
     windowSize,
+    waitForStableReplyRegion,
     waitForStableReplyRegionDirect,
     captureReplyRegionSnapshot,
     tap,

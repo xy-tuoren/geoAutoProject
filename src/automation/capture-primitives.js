@@ -52,6 +52,7 @@ function requireQuestionLocated(found, question) {
 
 async function scrollSingleQuestionSessionToTop({
   capture,
+  initialCapture = null,
   swipeUp,
   settle,
   framesStable = imageRegionsStable,
@@ -59,7 +60,7 @@ async function scrollSingleQuestionSessionToTop({
   now = Date.now,
 }) {
   const deadline = now() + timeout
-  let current = await capture()
+  let current = initialCapture ?? await capture()
   let unchangedCount = 0
   let swipes = 0
   while (now() < deadline) {
