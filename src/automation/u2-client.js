@@ -266,6 +266,20 @@ class U2Client {
     return this.request("foreground_window", {}, { retryRead: true });
   }
 
+  prepareDevicePower() {
+    return this.request("prepare_device_power", {}, { timeout: 15_000 });
+  }
+
+  deviceLockState() {
+    return this.request("device_lock_state", {}, { retryRead: true });
+  }
+
+  restoreDevicePower(stayAwakeOriginal) {
+    return this.request("restore_device_power", {
+      stay_awake_original: stayAwakeOriginal ?? null
+    });
+  }
+
   ocrRecognize(image, {
     region,
     minConfidence = 0,

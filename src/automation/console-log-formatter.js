@@ -88,6 +88,7 @@ class ConsoleLogFormatter {
     if (text.startsWith('retry failed:')) return `  失败  ${text.slice('retry failed:'.length).trim()}`
     if (text.startsWith('recovery:')) return `  恢复  ${text.slice('recovery:'.length).trim()}`
     if (text.startsWith('diagnostic:')) return `  诊断  ${text.slice('diagnostic:'.length).trim()}`
+    if (text.startsWith('device:')) return `  设备  ${text.slice('device:'.length).trim()}`
     if (text.startsWith('capture:')) return `  截图  ${text.slice('capture:'.length).trim()}`
     return text
   }

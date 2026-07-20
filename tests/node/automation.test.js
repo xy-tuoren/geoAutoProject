@@ -10,7 +10,7 @@ const { stackFramesInGroups, verifyFrameOverlap, verifyReplyFrameOverlap, verify
 const { createBatchDirectory, questionArtifactDirectory, batchArtifactDirectories, entryArtifactDirectories, questionArtifactDirectories } = require('../../src/automation/utils')
 const { EventLog, classifyAutomationLog } = require('../../src/automation/event-log')
 const { loadQuestionFile } = require('../../src/questions')
-const { adbConnectionLost, captureFailureDiagnostics, captureStableObserved, captureStableSandwich, calibratedProductFallbackOverlap, chatSwipePlan, conservativeFallbackOverlap, buildReplyImages, CancelledError, confirmPersistentScrollEnd, DOUYIN_MINIAPP_ENTRY_FILENAME, DOUYIN_SEARCH_SUMMARY_FILENAME, TOUTIAO_SEARCH_SUMMARY_FILENAME, douyinGenericAiAnswerBounds, douyinMiniAppCaptureBounds, douyinMiniAppEntryBounds, douyinOcrViewFullTarget, douyinSearchInput, douyinSearchResultTarget, douyinSearchResultsBounds, douyinViewFullBounds, failedRetryItems, fillQuestionInput, historyOnboardingVisible, maxLongImageHeight, miniAppReferenceProductsTrigger, observerRegionFallbackOptions, prepareEmbeddedEvidence, referenceProductDrawerBounds, referenceProductsCaptureComplete, referenceProductSheetExpanded, referenceProductsTrigger, referenceProductViewportReadiness, refreshedReferenceProductsTrigger, requireQuestionLocated, retryAttemptCount, runQuestionsWithRecovery, scrollEndConfirmed, scrollSingleQuestionSessionToTop, toutiaoGenericConsultationPage, toutiaoHomeSearchBounds, toutiaoOcrViewMoreTarget, toutiaoSearchInput, toutiaoSearchResultBelongsToQuestion, toutiaoViewMoreBounds, waitForPackageHierarchy } = require('../../src/automation/runner')
+const { adbConnectionLost, captureFailureDiagnostics, captureStableObserved, captureStableSandwich, calibratedProductFallbackOverlap, chatSwipePlan, conservativeFallbackOverlap, buildReplyImages, CancelledError, confirmPersistentScrollEnd, DOUYIN_MINIAPP_ENTRY_FILENAME, DOUYIN_SEARCH_SUMMARY_FILENAME, TOUTIAO_SEARCH_SUMMARY_FILENAME, douyinGenericAiAnswerBounds, douyinMiniAppCaptureBounds, douyinMiniAppEntryBounds, douyinOcrViewFullTarget, douyinSearchInput, douyinSearchResultTarget, douyinSearchResultsBounds, douyinViewFullBounds, failedRetryItems, fillQuestionInput, historyOnboardingVisible, maxLongImageHeight, miniAppReferenceProductsTrigger, observerRegionFallbackOptions, prepareDeviceForAutomation, prepareEmbeddedEvidence, referenceProductDrawerBounds, referenceProductsCaptureComplete, referenceProductSheetExpanded, referenceProductsTrigger, referenceProductViewportReadiness, refreshedReferenceProductsTrigger, requireQuestionLocated, retryAttemptCount, runQuestionsWithRecovery, scrollEndConfirmed, scrollSingleQuestionSessionToTop, toutiaoGenericConsultationPage, toutiaoHomeSearchBounds, toutiaoOcrViewMoreTarget, toutiaoSearchInput, toutiaoSearchResultBelongsToQuestion, toutiaoViewMoreBounds, waitForPackageHierarchy } = require('../../src/automation/runner')
 const { toutiaoAddToHomeScreenCancelBounds } = require('../../src/automation/miniapp-locators')
 const { automationEntries, ENTRY_DEFINITIONS, entryHierarchyStartupTimeout, hierarchyBelongsToPackage, normalizeAutomationEntries } = require('../../src/automation/entry-catalog')
 const { DouyinSearchResultNotFoundError, ToutiaoAnswerCardNotFoundError, ToutiaoFullAnswerNotOpenedError, runDouyinSearchResultAttempts, runToutiaoAnswerCardAttempts, runToutiaoFullAnswerAttempts } = require('../../src/automation/search-recovery')
@@ -21,6 +21,68 @@ const { recoverTimedOutExistingReply } = require('../../src/automation/existing-
 const { toutiaoAnswerRegionLooksReady } = require('../../src/automation/toutiao-search-workflow')
 
 const CHAT_BOUNDS = [0, 200, 1080, 1800]
+
+test('执行前唤醒并设置常亮，锁屏时提示用户且解锁后继续', async () => {
+  let now = 0
+  const lockStates = [
+    { locked: true, method: 'trust' },
+    { locked: false, method: 'trust' },
+  ]
+  const logs = []
+  const events = []
+  const preparation = await prepareDeviceForAutomation({
+    ui: {
+      prepareDevicePower: async () => ({
+        screen_was_on: false,
+        screen_on: true,
+        wake_performed: true,
+        stay_awake_original: '7',
+        stay_awake_applied: '2',
+        lock_state: { locked: true, method: 'trust' },
+      }),
+      deviceLockState: async () => lockStates.shift(),
+    },
+    log: message => logs.push(message),
+    record: async (event, details) => events.push({ event, details }),
+    delay: async milliseconds => { now += milliseconds },
+    now: () => now,
+    unlockTimeout: 5_000,
+    unlockPollMs: 1_000,
+  })
+
+  assert.equal(preparation.stay_awake_original, '7')
+  assert.match(logs.join('\n'), /请先在设备上完成解锁/)
+  assert.match(logs.join('\n'), /已确认手机解锁/)
+  assert.deepEqual(events.map(item => item.event), [
+    'device_power_prepared',
+    'device_unlock_required',
+    'device_unlocked',
+  ])
+})
+
+test('手机持续锁屏超过等待窗口时在任何入口操作前明确停止', async () => {
+  let now = 0
+  let registeredPreparation = null
+  await assert.rejects(prepareDeviceForAutomation({
+    ui: {
+      prepareDevicePower: async () => ({
+        screen_was_on: true,
+        screen_on: true,
+        wake_performed: false,
+        stay_awake_original: null,
+        stay_awake_applied: '2',
+        lock_state: { locked: true, method: 'trust' },
+      }),
+      deviceLockState: async () => ({ locked: true, method: 'trust' }),
+    },
+    delay: async milliseconds => { now += milliseconds },
+    now: () => now,
+    onPrepared: preparation => { registeredPreparation = preparation },
+    unlockTimeout: 2_000,
+    unlockPollMs: 1_000,
+  }), /手机仍处于锁屏状态/)
+  assert.equal(registeredPreparation.stay_awake_original, null)
+})
 
 test('小荷到底按钮未在首次点击后消失时只按最新层级受控重试', async () => {
   const control = '<hierarchy><node class="android.view.View" clickable="true" visible-to-user="true" bounds="[475,1500][607,1632]" /></hierarchy>'

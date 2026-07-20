@@ -1,5 +1,6 @@
 const fs = require('node:fs/promises')
 const path = require('node:path')
+const { execFileSync } = require('node:child_process')
 const { sleep, createBatchDirectory, batchArtifactDirectories, entryArtifactDirectories, questionArtifactDirectories } = require('./utils')
 const { EventLog } = require('./event-log')
 const { iterNodes, nodeAttr, nodeIsVisible, parseBounds, currentQuestionText, findChatScrollBounds, validateCaptureViewport, visibleLabelBounds, boundsForNodeAttribute, responseTimeoutRetryTarget } = require('./hierarchy')
@@ -100,6 +101,58 @@ async function waitForPackageHierarchy({
   throw new Error(`当前前台页面不是${packageLabel}（层级中缺少 ${packageName}），已停止UI操作。`)
 }
 
+const DEVICE_UNLOCK_TIMEOUT_MS = 60_000
+const DEVICE_UNLOCK_POLL_MS = 1_000
+
+async function prepareDeviceForAutomation({
+  ui,
+  log = () => {},
+  record = async () => {},
+  onPrepared = () => {},
+  checkCancelled = () => {},
+  delay = sleep,
+  now = Date.now,
+  unlockTimeout = DEVICE_UNLOCK_TIMEOUT_MS,
+  unlockPollMs = DEVICE_UNLOCK_POLL_MS,
+}) {
+  const preparation = await ui.prepareDevicePower()
+  onPrepared(preparation)
+  await record('device_power_prepared', {
+    wake_performed: Boolean(preparation.wake_performed),
+    screen_was_on: Boolean(preparation.screen_was_on),
+    screen_on: Boolean(preparation.screen_on),
+    stay_awake_applied: preparation.stay_awake_applied,
+    lock_detection_method: preparation.lock_state?.method || 'unknown',
+  })
+  if (!preparation.screen_on) throw new Error('无法确认手机屏幕已经唤醒，已停止执行。')
+
+  let lockState = preparation.lock_state || { locked: null, method: 'unknown' }
+  if (lockState.locked === null || lockState.locked === undefined) {
+    throw new Error('无法可靠判断手机是否已经解锁，已停止执行；请先人工解锁手机后重试。')
+  }
+  log(`device: 手机已唤醒并设置为USB连接期间常亮${preparation.wake_performed ? '（本次已自动亮屏）' : ''}`)
+  if (!lockState.locked) return preparation
+
+  log(`waiting: 手机仍处于锁屏状态，请先在设备上完成解锁；将在${Math.round(unlockTimeout / 1_000)}秒内自动继续检测`)
+  await record('device_unlock_required', {
+    timeout_ms: unlockTimeout,
+    detection_method: lockState.method,
+  })
+  const deadline = now() + unlockTimeout
+  while (now() < deadline) {
+    checkCancelled()
+    await delay(Math.min(unlockPollMs, Math.max(0, deadline - now())))
+    checkCancelled()
+    lockState = await ui.deviceLockState()
+    if (lockState.locked === false) {
+      log('device: 已确认手机解锁，继续执行自动化任务')
+      await record('device_unlocked', { detection_method: lockState.method })
+      return preparation
+    }
+  }
+  throw new Error(`手机仍处于锁屏状态；已等待${Math.round(unlockTimeout / 1_000)}秒，请先解锁手机后重新开始任务。`)
+}
+
 function seamDiagnosticsForError(error) {
   const value = error?.replySeamDiagnostics
   if (!value) return {}
@@ -135,6 +188,7 @@ function createRunner(options) {
   let activeQuestionArtifacts = null
   let lastOcrDiagnostic = null
   let currentStage = null
+  let preparedDevicePower = null
   const consoleLogFormatter = new ConsoleLogFormatter()
   const telemetry = new OperationTelemetry({
     record: item => {
@@ -172,6 +226,9 @@ function createRunner(options) {
     health: 'ui.health',
     currentApp: 'ui.current_app',
     foregroundWindow: 'ui.foreground_window',
+    prepareDevicePower: 'ui.prepare_device_power',
+    deviceLockState: 'ui.device_lock_state',
+    restoreDevicePower: 'ui.restore_device_power',
     ocrRecognize: 'ui.ocr_recognize',
     click: 'ui.click',
     sendKeys: 'ui.send_keys',
@@ -222,6 +279,44 @@ function createRunner(options) {
     return telemetry.measure('adb.wait_for_device', () => waitForAdbDevice(options.adbPath, activeSerial, timeout), {
       backend: 'adb',
       details: { timeout_ms: timeout },
+    })
+  }
+
+  async function prepareConnectedDevice() {
+    await prepareDeviceForAutomation({
+      ui,
+      log,
+      checkCancelled,
+      onPrepared: preparation => { preparedDevicePower = preparation },
+      record: (event, details) => batchEventLog?.record(event, { category: 'device', details }),
+    })
+  }
+
+  async function restoreConnectedDevice() {
+    const preparation = preparedDevicePower
+    preparedDevicePower = null
+    if (!preparation) return
+    let method = 'uiautomator2_sidecar'
+    try {
+      await ui.restoreDevicePower(preparation.stay_awake_original)
+    } catch (sidecarError) {
+      // Ctrl+C reaches the CLI and its Python child simultaneously. The
+      // sidecar may already be gone, so use ADB only for this idempotent system
+      // setting cleanup; never as a click/input/hierarchy fallback.
+      const settingArgs = preparation.stay_awake_original === null
+        ? ['shell', 'settings', 'delete', 'global', 'stay_on_while_plugged_in']
+        : ['shell', 'settings', 'put', 'global', 'stay_on_while_plugged_in', String(preparation.stay_awake_original)]
+      await telemetry.measure('adb.restore_device_power', () => adbCommandWithReconnect(options.adbPath, activeSerial, settingArgs), {
+        backend: 'adb',
+        details: { reason: 'uiautomator2_sidecar_unavailable_during_cleanup' },
+      })
+      method = 'adb_cleanup_fallback'
+      log(`device: uiautomator2退出前未能恢复常亮设置，已通过ADB清理路径恢复（${sidecarError.message}）`)
+    }
+    log('device: 已恢复任务开始前的屏幕常亮设置')
+    await batchEventLog?.record('device_power_restored', {
+      category: 'device',
+      details: { stay_awake_original: preparation.stay_awake_original, method },
     })
   }
 
@@ -803,6 +898,7 @@ function createRunner(options) {
       try {
         await waitForDevice()
         await ui.start(payload.serial)
+        await prepareConnectedDevice()
         try {
           await observer.start(payload.serial)
         } catch (error) {
@@ -989,6 +1085,7 @@ function createRunner(options) {
         throw error
       } finally {
         await observer.stop().catch(() => {})
+        await restoreConnectedDevice().catch(error => log(`device: 恢复屏幕常亮设置失败：${error.message}`))
         await ui.stop().catch(() => {})
         await flushArtifactLogs().catch(() => {})
       }
@@ -1005,6 +1102,7 @@ function createRunner(options) {
       try {
         await waitForDevice()
         await ui.start(payload.serial)
+        await prepareConnectedDevice()
         try {
           await observer.start(payload.serial)
         } catch (error) {
@@ -1174,6 +1272,7 @@ function createRunner(options) {
         throw error
       } finally {
         await observer.stop().catch(() => {})
+        await restoreConnectedDevice().catch(error => log(`device: 恢复屏幕常亮设置失败：${error.message}`))
         await ui.stop().catch(() => {})
         await flushArtifactLogs().catch(() => {})
       }
@@ -1214,6 +1313,7 @@ function createRunner(options) {
       try {
         await waitForDevice()
         await ui.start(payload.serial)
+        await prepareConnectedDevice()
         try {
           await observer.start(payload.serial)
         } catch (error) {
@@ -1360,6 +1460,7 @@ function createRunner(options) {
         throw error
       } finally {
         await observer.stop().catch(() => {})
+        await restoreConnectedDevice().catch(error => log(`device: 恢复屏幕常亮设置失败：${error.message}`))
         await ui.stop().catch(() => {})
         await flushArtifactLogs().catch(() => {})
       }
@@ -1367,7 +1468,22 @@ function createRunner(options) {
     async stop() {
       cancelled = true
       await observer.stop().catch(() => {})
+      await restoreConnectedDevice().catch(error => log(`device: 恢复屏幕常亮设置失败：${error.message}`))
       await ui.stop().catch(() => {})
+    },
+    restoreDevicePowerOnProcessExit() {
+      const preparation = preparedDevicePower
+      preparedDevicePower = null
+      if (!preparation || !activeSerial) return false
+      const settingArgs = preparation.stay_awake_original === null
+        ? ['shell', 'settings', 'delete', 'global', 'stay_on_while_plugged_in']
+        : ['shell', 'settings', 'put', 'global', 'stay_on_while_plugged_in', String(preparation.stay_awake_original)]
+      execFileSync(options.adbPath, ['-s', activeSerial, ...settingArgs], {
+        encoding: 'utf8',
+        timeout: 5_000,
+        windowsHide: true,
+      })
+      return true
     },
   }
 }
@@ -1395,6 +1511,9 @@ module.exports = {
   toutiaoViewMoreBounds,
   toutiaoOcrViewMoreTarget,
   waitForPackageHierarchy,
+  prepareDeviceForAutomation,
+  DEVICE_UNLOCK_TIMEOUT_MS,
+  DEVICE_UNLOCK_POLL_MS,
   buildReplyImages,
   conservativeFallbackOverlap,
   chatSwipePlan,

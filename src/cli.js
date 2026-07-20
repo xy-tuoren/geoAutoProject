@@ -1,8 +1,30 @@
 #!/usr/bin/env node
 
-const { createRunner } = require('./automation/runner')
+const { createRunner, CancelledError } = require('./automation/runner')
 const { bundledAdbPath, projectRoot } = require('./runtime-paths')
 const { loadQuestionFile } = require('./questions')
+
+let activeRunner = null
+let interruptedSignal = null
+let stoppingPromise = null
+
+async function stopForSignal(signal) {
+  if (interruptedSignal) return stoppingPromise
+  interruptedSignal = signal
+  process.stderr.write(`\n收到 ${signal}，正在停止任务并恢复设备设置…\n`)
+  try {
+    if (activeRunner?.restoreDevicePowerOnProcessExit()) {
+      process.stderr.write('已恢复任务开始前的屏幕常亮设置。\n')
+    }
+  } catch (error) {
+    process.stderr.write(`立即恢复屏幕常亮设置失败：${error.message}\n`)
+  }
+  stoppingPromise = activeRunner?.stop() || Promise.resolve()
+  await stoppingPromise
+}
+
+process.once('SIGINT', () => { void stopForSignal('SIGINT') })
+process.once('SIGTERM', () => { void stopForSignal('SIGTERM') })
 
 function usage() {
   console.log('用法：npm run run:android -- --serial <设备序列号> --output-dir <目录> [--entry <入口ID>] [--questions-file <TXT/CSV/JSON/XLSX>] [--timeout <秒>] [--max-long-image-height <像素>] [--new-session] [问题...]')
@@ -43,11 +65,17 @@ async function main() {
     adbPath: adb,
     log: text => process.stdout.write(text),
   })
-  if (payload.captureCurrentAnswer) console.log(JSON.stringify(await runner.captureCurrentAnswer(payload)))
-  else await runner.run(payload)
+  activeRunner = runner
+  try {
+    if (interruptedSignal) throw new CancelledError()
+    if (payload.captureCurrentAnswer) console.log(JSON.stringify(await runner.captureCurrentAnswer(payload)))
+    else await runner.run(payload)
+  } finally {
+    activeRunner = null
+  }
 }
 
 main().catch(error => {
-  console.error(error.stack || error.message)
-  process.exitCode = 1
+  if (!(error instanceof CancelledError) && !interruptedSignal) console.error(error.stack || error.message)
+  process.exitCode = error instanceof CancelledError || interruptedSignal ? 130 : 1
 })

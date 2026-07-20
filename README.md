@@ -210,6 +210,7 @@ tests/node/      # Node 内置 test runner 测试
 ## 使用前检查
 
 - 手机必须完成 USB 调试授权（打包版已内置 adb，无需本机安装）。
+- 每次开始普通批次、当前回答采集或失败题重试前，程序都会先通过 uiautomator2 唤醒屏幕，并在任务期间开启“USB 连接时保持唤醒”。若设备仍处于锁屏状态，控制台会提示用户先在手机上解锁并最多等待 60 秒；确认解锁前不会启动入口、点击、输入或发送。任务成功、失败或用户停止时都会恢复任务开始前的常亮设置，但不会在结束后主动熄屏。密码、PIN、图案和生物识别仍必须由用户本人完成，程序不会尝试绕过锁屏。
 - 仓库内置 macOS 与 Windows 两套 Android Platform Tools；打包命令 `npm run dist` 会使用目标平台的ADB，并内置PyInstaller生成的Python uiautomator2 sidecar及校验过的官方scrcpy server。运营不需要安装Node、Python、uv、ADB或scrcpy客户端。
 - UI层没有ADB降级：uiautomator2层级读取失败时只允许重启sidecar并重试一次；点击或输入失败会立即终止当前题且不重放该操作，下一题只能在重新启动并校验入口后继续。
 - 正式截图始终使用ADB原始PNG，不使用uiautomator2截图接口。

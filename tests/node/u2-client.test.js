@@ -103,6 +103,25 @@ test('OCR通过通用只读请求传输图片和选项', async () => {
   assert.equal(OCR_TIMEOUT_MS, 60_000)
 })
 
+test('设备电源准备、锁屏读取和常亮恢复全部通过uiautomator2 sidecar', async () => {
+  const client = new U2Client({ root, adbPath: '/bundled/adb', log: () => {} })
+  const calls = []
+  client.request = async (method, params, options) => {
+    calls.push({ method, params, options })
+    return true
+  }
+
+  await client.prepareDevicePower()
+  await client.deviceLockState()
+  await client.restoreDevicePower('7')
+
+  assert.deepEqual(calls, [
+    { method: 'prepare_device_power', params: {}, options: { timeout: 15_000 } },
+    { method: 'device_lock_state', params: {}, options: { retryRead: true } },
+    { method: 'restore_device_power', params: { stay_awake_original: '7' }, options: undefined },
+  ])
+})
+
 test('uiautomator2客户端使用长驻进程获取层级', async () => {
   const client = fixtureClient()
   try {

@@ -35,6 +35,9 @@ class FakeDevice:
         self.device_info = {"model": "test"}
         self.info = {"currentPackageName": "example.app"}
         self.current_package = "example.app"
+        self.screen_on_state = False
+        self.stay_awake_value = "7"
+        self.device_locked = True
         self.events = []
 
     def __call__(self, **selector):
@@ -59,6 +62,21 @@ class FakeDevice:
 
     def shell(self, args):
         self.events.append(("shell", args))
+        if args == ["settings", "get", "global", "stay_on_while_plugged_in"]:
+            return type("ShellResult", (), {"output": self.stay_awake_value})()
+        if args[:4] == ["settings", "put", "global", "stay_on_while_plugged_in"]:
+            self.stay_awake_value = args[4]
+            return type("ShellResult", (), {"output": ""})()
+        if args == ["settings", "delete", "global", "stay_on_while_plugged_in"]:
+            self.stay_awake_value = "null"
+            return type("ShellResult", (), {"output": "Deleted 1 rows"})()
+        if args == ["dumpsys", "trust"]:
+            locked = 1 if self.device_locked else 0
+            return type(
+                "ShellResult",
+                (),
+                {"output": f'User "Owner" (id=0) (current): deviceLocked={locked}'},
+            )()
         if args == ["dumpsys", "window", "windows"]:
             return type(
                 "ShellResult",
@@ -67,6 +85,23 @@ class FakeDevice:
                     "output": "mObscuringWindow=Window{123 u0 example.app/example.app.MiniAppHostActivity0}"
                 },
             )()
+        return type("ShellResult", (), {"output": ""})()
+
+    def screen_on(self):
+        self.events.append(("screen_on",))
+        self.screen_on_state = True
+
+    @property
+    def info(self):
+        return {
+            "currentPackageName": "example.app",
+            "screenOn": self.screen_on_state,
+        }
+
+    @info.setter
+    def info(self, value):
+        # Preserve compatibility with the simple fake's existing assignment.
+        self._info = value
 
     def press(self, key):
         self.events.append(("press", key))
@@ -127,6 +162,57 @@ def test_bridge_configures_dynamic_ui_timeouts_and_dispatches_commands():
     assert ("press", "back") in device.events
     assert ("app_start", "example.app", True, False) in device.events
     assert ("app_wait", "example.app", 8.0, True) in device.events
+
+
+def test_bridge_wakes_device_sets_usb_stay_awake_and_restores_original_value():
+    device = FakeDevice()
+    bridge = U2Bridge(lambda serial: device)
+    bridge.dispatch("connect", {"serial": "SERIAL"})
+
+    prepared = bridge.dispatch("prepare_device_power", {})
+
+    assert prepared == {
+        "screen_was_on": False,
+        "screen_on": True,
+        "wake_performed": True,
+        "stay_awake_original": "7",
+        "stay_awake_applied": "2",
+        "lock_state": {
+            "locked": True,
+            "method": "dumpsys_trust_device_locked",
+        },
+    }
+    assert ("screen_on",) in device.events
+    assert device.stay_awake_value == "2"
+
+    device.device_locked = False
+    assert bridge.dispatch("device_lock_state", {})["locked"] is False
+    assert bridge.dispatch(
+        "restore_device_power", {"stay_awake_original": prepared["stay_awake_original"]}
+    ) is True
+    assert device.stay_awake_value == "7"
+
+
+def test_visible_keyguard_is_locked_even_when_trust_reports_device_unlocked():
+    class TrustedLockscreenDevice(FakeDevice):
+        def shell(self, args):
+            if args == ["dumpsys", "window", "policy"]:
+                return type(
+                    "ShellResult",
+                    (),
+                    {"output": "KeyguardServiceDelegate\n  showing=true\n  secure=false"},
+                )()
+            return super().shell(args)
+
+    device = TrustedLockscreenDevice()
+    device.device_locked = False
+    bridge = U2Bridge(lambda serial: device)
+    bridge.dispatch("connect", {"serial": "SERIAL"})
+
+    assert bridge.dispatch("device_lock_state", {}) == {
+        "locked": True,
+        "method": "window_policy_keyguard_delegate",
+    }
 
 
 def test_app_start_rejects_silent_launch_failure():

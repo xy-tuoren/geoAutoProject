@@ -18,6 +18,55 @@ class BridgeError(RuntimeError):
     """Raised when a bridge request is invalid or the device is unavailable."""
 
 
+def _shell_output(device: Any, args: list[str]) -> str:
+    result = device.shell(args)
+    return str(getattr(result, "output", result) or "").strip()
+
+
+def _device_lock_state(device: Any) -> dict[str, Any]:
+    trust = _shell_output(device, ["dumpsys", "trust"])
+    # The first deviceLocked value belongs to the current Android user. Ignore
+    # later managed-profile values, which may stay locked independently.
+    trust_match = re.search(r"\bdeviceLocked=(true|false|1|0)\b", trust, re.IGNORECASE)
+    trust_locked = (
+        trust_match.group(1).lower() in {"true", "1"} if trust_match else None
+    )
+
+    policy = _shell_output(device, ["dumpsys", "window", "policy"])
+    patterns = (
+        (r"\bmShowingLockscreen=(true|false)\b", "window_policy_showing_lockscreen"),
+        (r"KeyguardServiceDelegate[\s\S]*?\bshowing=(true|false)\b", "window_policy_keyguard_delegate"),
+        (r"\bmIsShowing=(true|false)\b", "window_policy_keyguard_monitor"),
+    )
+    policy_locked = None
+    policy_method = None
+    for pattern, method in patterns:
+        match = re.search(pattern, policy, re.IGNORECASE)
+        if match:
+            policy_locked = match.group(1).lower() == "true"
+            policy_method = method
+            break
+    # A trusted/non-secure keyguard may report deviceLocked=0 while its visible
+    # lockscreen still covers every app. Treat either positive signal as locked.
+    if policy_locked is True:
+        return {"locked": True, "method": policy_method}
+    if trust_locked is not None:
+        return {"locked": trust_locked, "method": "dumpsys_trust_device_locked"}
+    if policy_locked is not None:
+        return {"locked": policy_locked, "method": policy_method}
+    return {"locked": None, "method": "unknown"}
+
+
+def _restore_stay_awake(device: Any, original_value: Any) -> None:
+    if original_value is None or str(original_value).strip().lower() in {"", "null", "none"}:
+        _shell_output(device, ["settings", "delete", "global", "stay_on_while_plugged_in"])
+    else:
+        _shell_output(
+            device,
+            ["settings", "put", "global", "stay_on_while_plugged_in", str(original_value).strip()],
+        )
+
+
 def configure_utf8_standard_streams(*streams: TextIO | None) -> None:
     """Keep the JSON-lines protocol UTF-8 on Windows redirected pipes."""
     for stream in streams:
@@ -84,6 +133,38 @@ class U2Bridge:
             if not match:
                 raise BridgeError("无法从系统窗口状态读取当前前台 Activity")
             return {"package": match.group(1), "activity": match.group(2)}
+        if method == "prepare_device_power":
+            original_raw = _shell_output(
+                device, ["settings", "get", "global", "stay_on_while_plugged_in"]
+            )
+            original_value = None if original_raw.lower() in {"", "null", "none"} else original_raw
+            info = device.info
+            screen_was_on = bool(info.get("screenOn"))
+            try:
+                if not screen_was_on:
+                    device.screen_on()
+                # Android bitmask: AC=1, USB=2. Keep the device awake while it
+                # is connected to the workstation without changing timeout.
+                _shell_output(
+                    device,
+                    ["settings", "put", "global", "stay_on_while_plugged_in", "2"],
+                )
+                return {
+                    "screen_was_on": screen_was_on,
+                    "screen_on": bool(device.info.get("screenOn")),
+                    "wake_performed": not screen_was_on,
+                    "stay_awake_original": original_value,
+                    "stay_awake_applied": "2",
+                    "lock_state": _device_lock_state(device),
+                }
+            except Exception:
+                _restore_stay_awake(device, original_value)
+                raise
+        if method == "device_lock_state":
+            return _device_lock_state(device)
+        if method == "restore_device_power":
+            _restore_stay_awake(device, params.get("stay_awake_original"))
+            return True
         if method == "dump_hierarchy":
             return device.dump_hierarchy(
                 compressed=bool(params.get("compressed", False)),
