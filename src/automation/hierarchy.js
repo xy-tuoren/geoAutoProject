@@ -155,6 +155,24 @@ function questionVisible(xml, question, chatBounds) {
   })
 }
 
+function normalizeQuestionText(value) {
+  return String(value || '')
+    .normalize('NFKC')
+    .replace(/\s+/g, '')
+    .replace(/[?？]+$/, '')
+}
+
+function questionVisibleExact(xml, question, chatBounds) {
+  const expected = normalizeQuestionText(question)
+  if (!expected) return false
+  const verticalInset = Math.max(12, Math.floor((chatBounds[3] - chatBounds[1]) * 0.02))
+  return userQuestionCandidates(xml, chatBounds).some(({ label, bubbleBounds }) => {
+    return normalizeQuestionText(label) === expected
+      && bubbleBounds[1] >= chatBounds[1] + verticalInset
+      && bubbleBounds[3] <= chatBounds[3] - verticalInset
+  })
+}
+
 function userQuestionCandidates(xml, chatBounds) {
   const chatWidth = chatBounds[2] - chatBounds[0]
   const candidates = []
@@ -188,7 +206,7 @@ function userQuestionCandidates(xml, chatBounds) {
         && parentBounds[2] - parentBounds[0] <= (rowBounds[2] - rowBounds[0]) * 0.86
         && Math.abs(parentBounds[0] - bounds[0]) <= chatWidth * 0.04
         && Math.abs(parentBounds[2] - bounds[2]) <= chatWidth * 0.04) {
-        candidates.push({ label, bounds, bottom: bounds[3] })
+        candidates.push({ label, bounds, bubbleBounds: parentBounds, bottom: bounds[3] })
       }
     }
     for (const child of node.children) visit(child, [...ancestors, node])
@@ -451,8 +469,6 @@ function referenceProductImageBounds(xml, listBounds) {
     const height = bounds[3] - bounds[1]
     return boundsIntersect(bounds, listBounds) && width >= 60 && height >= 45
   })
-  if (explicit.length) return { mode: 'explicit_images', bounds: explicit }
-
   const inferred = []
   const seen = new Set()
   for (const node of scopedNodes) {
@@ -469,7 +485,10 @@ function referenceProductImageBounds(xml, listBounds) {
       card[0] + marginX,
       card[1] + Math.round(height * 0.03),
       card[2] - marginX,
-      card[1] + Math.round(height * 0.55),
+      // Keep the inferred crop inside the artwork band.  Extending into the
+      // title/price rows makes a blank image slot look non-empty because the
+      // product text itself contributes edges and contrast.
+      card[1] + Math.round(height * 0.42),
     ]
     const visible = [
       Math.max(listBounds[0], artwork[0]),
@@ -481,7 +500,36 @@ function referenceProductImageBounds(xml, listBounds) {
     const key = visible.join(',')
     if (!seen.has(key)) { seen.add(key); inferred.push(visible) }
   }
-  return { mode: inferred.length ? 'inferred_card_artwork' : 'viewport_content', bounds: inferred }
+  if (!inferred.length) {
+    return {
+      mode: explicit.length ? 'explicit_images' : 'viewport_content',
+      bounds: explicit,
+      expectedCards: explicit.length,
+      explicitImages: explicit.length,
+    }
+  }
+
+  const unusedExplicit = new Set(explicit.map((_, index) => index))
+  let matchedExplicit = 0
+  const bounds = inferred.map(artwork => {
+    let match = null
+    let bestOverlap = 0
+    for (const index of unusedExplicit) {
+      const image = explicit[index]
+      const overlapWidth = Math.max(0, Math.min(artwork[2], image[2]) - Math.max(artwork[0], image[0]))
+      const overlapHeight = Math.max(0, Math.min(artwork[3], image[3]) - Math.max(artwork[1], image[1]))
+      const overlap = overlapWidth * overlapHeight
+      if (overlap > bestOverlap) { match = index; bestOverlap = overlap }
+    }
+    if (match === null) return artwork
+    unusedExplicit.delete(match)
+    matchedExplicit += 1
+    return explicit[match]
+  })
+  const mode = matchedExplicit === bounds.length
+    ? 'explicit_card_artwork'
+    : (matchedExplicit ? 'mixed_card_artwork' : 'inferred_card_artwork')
+  return { mode, bounds, expectedCards: inferred.length, explicitImages: explicit.length }
 }
 
-module.exports = { LOADING_TEXT_MARKERS, iterNodes, nodeAttr, nodeIsVisible, parseBounds, boundsIntersect, boundsCenterY, estimateVerticalScrollShift, sharedTextSeam, hierarchyIsLoading, visibleNodesWithLabel, replyTailOnScreen, questionVisible, currentQuestionText, findChatScrollBounds, validateCaptureViewport, floatingScrollControlBounds, replyCaptureBounds, visibleLabelBounds, visibleLabelBoundsList, responseTimeoutRetryTarget, boundsForNodeAttribute, boundsListForNodeAttribute, evidencePanelBounds, panelIsClipped, evidenceMinimumHeight, parseNodeTree, referenceProductsSection, referenceProductImageBounds }
+module.exports = { LOADING_TEXT_MARKERS, iterNodes, nodeAttr, nodeIsVisible, parseBounds, boundsIntersect, boundsCenterY, estimateVerticalScrollShift, sharedTextSeam, hierarchyIsLoading, visibleNodesWithLabel, replyTailOnScreen, questionVisible, questionVisibleExact, currentQuestionText, findChatScrollBounds, validateCaptureViewport, floatingScrollControlBounds, replyCaptureBounds, visibleLabelBounds, visibleLabelBoundsList, responseTimeoutRetryTarget, boundsForNodeAttribute, boundsListForNodeAttribute, evidencePanelBounds, panelIsClipped, evidenceMinimumHeight, parseNodeTree, referenceProductsSection, referenceProductImageBounds }

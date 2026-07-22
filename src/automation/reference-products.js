@@ -224,15 +224,19 @@ async function referenceProductViewportReadiness(frame, xml, listBounds) {
   ]).filter(bounds => bounds[2] - bounds[0] >= 60 && bounds[3] - bounds[1] >= 45)
   const loadedFlags = await Promise.all(relativeBounds.map(async bounds => imageLooksLoaded(await cropImage(frame, bounds))))
   const loaded = loadedFlags.filter(Boolean).length
+  const labelledCards = visibleLabelBoundsList(xml, '查看说明书').filter(bounds => boundsIntersect(bounds, listBounds)).length
+  const cards = Math.max(candidates.expectedCards || 0, labelledCards, relativeBounds.length)
   const viewportLoaded = relativeBounds.length ? true : await imageLooksLoaded(frame)
-  const ready = relativeBounds.length ? loaded === relativeBounds.length : viewportLoaded
+  const ready = cards
+    ? relativeBounds.length >= cards && loaded === relativeBounds.length
+    : viewportLoaded
   return {
     ready,
     mode: candidates.mode,
-    cards: visibleLabelBoundsList(xml, '查看说明书').filter(bounds => boundsIntersect(bounds, listBounds)).length || relativeBounds.length,
+    cards,
     images: relativeBounds.length,
     loaded,
-    unloaded: relativeBounds.length ? relativeBounds.length - loaded : (ready ? 0 : 1),
+    unloaded: cards ? Math.max(cards, relativeBounds.length) - loaded : (ready ? 0 : 1),
   }
 }
 

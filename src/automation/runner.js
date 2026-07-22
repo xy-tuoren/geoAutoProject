@@ -56,6 +56,7 @@ const {
   chatSwipePlan,
   scrollEndConfirmed,
   requireQuestionLocated,
+  confirmQuestionAtTop,
   scrollSingleQuestionSessionToTop,
   confirmPersistentScrollEnd,
   buildReplyImages,
@@ -222,6 +223,7 @@ function createRunner(options) {
   const uiOperations = {
     start: 'ui.start',
     stop: 'ui.stop',
+    restart: 'ui.restart',
     dumpHierarchy: 'ui.dump_hierarchy',
     health: 'ui.health',
     currentApp: 'ui.current_app',
@@ -603,6 +605,12 @@ function createRunner(options) {
     throw new Error(`当前前台页面不是${activePackageLabel()}（层级中缺少 ${activePackageName()}），已停止UI操作。`)
   }
 
+  async function recoverHierarchySource() {
+    checkCancelled()
+    await ui.restart()
+    return source()
+  }
+
   async function tap(x, y) {
     checkCancelled()
     await ui.click(x, y)
@@ -778,6 +786,7 @@ function createRunner(options) {
 
   const replyCapture = createReplyCapture({
     source,
+    recoverHierarchySource,
     swipeChat,
     windowSize,
     waitForStableReplyRegion,
@@ -1518,6 +1527,7 @@ module.exports = {
   conservativeFallbackOverlap,
   chatSwipePlan,
   scrollEndConfirmed,
+  confirmQuestionAtTop,
   scrollSingleQuestionSessionToTop,
   confirmPersistentScrollEnd,
   referenceProductsTrigger,

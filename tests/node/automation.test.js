@@ -5,12 +5,12 @@ const os = require('node:os')
 const path = require('node:path')
 const sharp = require('sharp')
 const XLSX = require('xlsx')
-const { questionVisible, currentQuestionText, replyTailOnScreen, findChatScrollBounds, validateCaptureViewport, floatingScrollControlBounds, replyCaptureBounds, estimateVerticalScrollShift, sharedTextSeam, evidencePanelBounds, visibleLabelBounds, visibleLabelBoundsList, boundsListForNodeAttribute, responseTimeoutRetryTarget, referenceProductsSection, referenceProductImageBounds } = require('../../src/automation/hierarchy')
+const { questionVisible, questionVisibleExact, currentQuestionText, replyTailOnScreen, findChatScrollBounds, validateCaptureViewport, floatingScrollControlBounds, replyCaptureBounds, estimateVerticalScrollShift, sharedTextSeam, evidencePanelBounds, visibleLabelBounds, visibleLabelBoundsList, boundsListForNodeAttribute, responseTimeoutRetryTarget, referenceProductsSection, referenceProductImageBounds } = require('../../src/automation/hierarchy')
 const { stackFramesInGroups, verifyFrameOverlap, verifyReplyFrameOverlap, verifyProductGridOverlap, imageInfo, imageLooksLoaded, imagesSimilar, imageRegionsStable, alignCropToWhitespace, stitchFramesWithOverlaps, composeLongImages, cropFramesAtTextSeams } = require('../../src/automation/images')
 const { createBatchDirectory, questionArtifactDirectory, batchArtifactDirectories, entryArtifactDirectories, questionArtifactDirectories } = require('../../src/automation/utils')
 const { EventLog, classifyAutomationLog } = require('../../src/automation/event-log')
 const { loadQuestionFile } = require('../../src/questions')
-const { adbConnectionLost, captureFailureDiagnostics, captureStableObserved, captureStableSandwich, calibratedProductFallbackOverlap, chatSwipePlan, conservativeFallbackOverlap, buildReplyImages, CancelledError, confirmPersistentScrollEnd, DOUYIN_MINIAPP_ENTRY_FILENAME, DOUYIN_SEARCH_SUMMARY_FILENAME, TOUTIAO_SEARCH_SUMMARY_FILENAME, douyinGenericAiAnswerBounds, douyinMiniAppCaptureBounds, douyinMiniAppEntryBounds, douyinOcrViewFullTarget, douyinSearchInput, douyinSearchResultTarget, douyinSearchResultsBounds, douyinViewFullBounds, failedRetryItems, fillQuestionInput, historyOnboardingVisible, maxLongImageHeight, miniAppReferenceProductsTrigger, observerRegionFallbackOptions, prepareDeviceForAutomation, prepareEmbeddedEvidence, referenceProductDrawerBounds, referenceProductsCaptureComplete, referenceProductSheetExpanded, referenceProductsTrigger, referenceProductViewportReadiness, refreshedReferenceProductsTrigger, requireQuestionLocated, retryAttemptCount, runQuestionsWithRecovery, scrollEndConfirmed, scrollSingleQuestionSessionToTop, toutiaoGenericConsultationPage, toutiaoHomeSearchBounds, toutiaoOcrViewMoreTarget, toutiaoSearchInput, toutiaoSearchResultBelongsToQuestion, toutiaoViewMoreBounds, waitForPackageHierarchy } = require('../../src/automation/runner')
+const { adbConnectionLost, captureFailureDiagnostics, captureStableObserved, captureStableSandwich, calibratedProductFallbackOverlap, chatSwipePlan, conservativeFallbackOverlap, buildReplyImages, CancelledError, confirmPersistentScrollEnd, confirmQuestionAtTop, DOUYIN_MINIAPP_ENTRY_FILENAME, DOUYIN_SEARCH_SUMMARY_FILENAME, TOUTIAO_SEARCH_SUMMARY_FILENAME, douyinGenericAiAnswerBounds, douyinMiniAppCaptureBounds, douyinMiniAppEntryBounds, douyinOcrViewFullTarget, douyinSearchInput, douyinSearchResultTarget, douyinSearchResultsBounds, douyinViewFullBounds, failedRetryItems, fillQuestionInput, historyOnboardingVisible, maxLongImageHeight, miniAppReferenceProductsTrigger, observerRegionFallbackOptions, prepareDeviceForAutomation, prepareEmbeddedEvidence, referenceProductDrawerBounds, referenceProductsCaptureComplete, referenceProductSheetExpanded, referenceProductsTrigger, referenceProductViewportReadiness, refreshedReferenceProductsTrigger, requireQuestionLocated, retryAttemptCount, runQuestionsWithRecovery, scrollEndConfirmed, scrollSingleQuestionSessionToTop, toutiaoGenericConsultationPage, toutiaoHomeSearchBounds, toutiaoOcrViewMoreTarget, toutiaoSearchInput, toutiaoSearchResultBelongsToQuestion, toutiaoViewMoreBounds, waitForPackageHierarchy } = require('../../src/automation/runner')
 const { toutiaoAddToHomeScreenCancelBounds } = require('../../src/automation/miniapp-locators')
 const { automationEntries, ENTRY_DEFINITIONS, entryHierarchyStartupTimeout, hierarchyBelongsToPackage, normalizeAutomationEntries } = require('../../src/automation/entry-catalog')
 const { DouyinSearchResultNotFoundError, ToutiaoAnswerCardNotFoundError, ToutiaoFullAnswerNotOpenedError, runDouyinSearchResultAttempts, runToutiaoAnswerCardAttempts, runToutiaoFullAnswerAttempts } = require('../../src/automation/search-recovery')
@@ -19,6 +19,7 @@ const { createReplyCapture, navigateReplyToBottomControl, miniAppTopFramesStable
 const { douyinMiniAppAnswerContextEvidence, douyinSearchTargetStabilityBounds } = require('../../src/automation/douyin-search-workflow')
 const { recoverTimedOutExistingReply } = require('../../src/automation/existing-reply-recovery')
 const { toutiaoAnswerRegionLooksReady } = require('../../src/automation/toutiao-search-workflow')
+const { createReferenceProductCapture } = require('../../src/automation/reference-product-capture')
 
 const CHAT_BOUNDS = [0, 200, 1080, 1800]
 
@@ -965,7 +966,7 @@ test('定位不到刚发送的问题时拒绝截取旧回答', () => {
   assert.throws(() => requireQuestionLocated(false, '新问题'), /避免截取旧回答/)
 })
 
-test('新会话不判断问题气泡，连续两次向上无变化才确认顶部', async () => {
+test('新会话连续两次向上无变化且本题问题气泡完整可见才确认顶部', async () => {
   const frames = ['中部', '顶部', '顶部', '顶部']
   const touchpoints = []
   let initialCaptureCalls = 0
@@ -973,14 +974,100 @@ test('新会话不判断问题气泡，连续两次向上无变化才确认顶�
     initialCapture: { frame: '底部' },
     capture: async () => { initialCaptureCalls += 1; return { frame: '不应读取' } },
     swipeUp: async attempt => { touchpoints.push(attempt % 2 ? 0.68 : 0.84); return {} },
-    settle: async () => ({ frame: frames.shift() }),
+    settle: async () => ({ frame: frames.shift(), xml: '<question text="本题" />' }),
     framesStable: async (before, after) => before === after,
+    verifyTop: capture => capture.xml.includes('text="本题"'),
   })
 
   assert.equal(result.confirmed, true)
   assert.equal(result.swipes, 4)
   assert.equal(initialCaptureCalls, 0)
   assert.deepEqual(touchpoints, [0.84, 0.68, 0.84, 0.68])
+})
+
+test('新会话画面连续无变化但未看到本题问题气泡时拒绝误判到顶', async () => {
+  await assert.rejects(scrollSingleQuestionSessionToTop({
+    initialCapture: { frame: '回答尾部', xml: '<tail />' },
+    capture: async () => ({ frame: '回答尾部', xml: '<tail />' }),
+    swipeUp: async () => ({}),
+    settle: async () => ({ frame: '回答尾部', xml: '<tail />' }),
+    framesStable: async (before, after) => before === after,
+    verifyTop: () => false,
+  }), /未确认完整问题气泡/)
+})
+
+test('回顶画面已静止但Compose层级暂时稀疏时有限重读确认本题气泡', async () => {
+  const sparse = '<hierarchy><node text="在这里查看「历史对话」" bounds="[0,300][1080,400]" /></hierarchy>'
+  const complete = '<hierarchy><node class="android.view.View" bounds="[0,333][1080,2001]">'
+    + '<node class="android.view.View" bounds="[55,549][1025,687]"><node class="android.view.View" bounds="[549,552][981,684]">'
+    + '<node class="android.widget.TextView" text="体重超重吃什么药" content-desc="体重超重吃什么药" visible-to-user="true" bounds="[549,582][981,654]" />'
+    + '</node></node></node></hierarchy>'
+  const capture = { frame: '顶部画面', xml: sparse }
+  const reads = [sparse, complete]
+  let delays = 0
+
+  const verified = await confirmQuestionAtTop({
+    capture,
+    question: '体重超重吃什么药',
+    chatBounds: [0, 333, 1080, 2001],
+    source: async () => reads.shift(),
+    delay: async () => { delays += 1 },
+  })
+
+  assert.equal(verified, true)
+  assert.equal(delays, 2)
+  assert.equal(capture.xml, complete)
+})
+
+test('有限重读仍为稀疏层级时只重启一次sidecar再确认本题气泡', async () => {
+  const sparse = '<hierarchy><node package="com.aurora.xiaohe.aidoctor" text="在这里查看「历史对话」" bounds="[0,300][1080,400]" /></hierarchy>'
+  const complete = '<hierarchy><node class="android.view.View" bounds="[0,333][1080,2001]">'
+    + '<node class="android.view.View" bounds="[55,549][1025,687]"><node class="android.view.View" bounds="[549,552][981,684]">'
+    + '<node class="android.widget.TextView" text="体重超重吃什么药" content-desc="体重超重吃什么药" visible-to-user="true" bounds="[549,582][981,654]" />'
+    + '</node></node></node></hierarchy>'
+  const capture = { frame: '顶部画面', xml: sparse }
+  let reads = 0
+  let recoveries = 0
+
+  const verified = await confirmQuestionAtTop({
+    capture,
+    question: '体重超重吃什么药',
+    chatBounds: [0, 333, 1080, 2001],
+    source: async () => { reads += 1; return sparse },
+    recoverSource: async () => { recoveries += 1; return complete },
+    delay: async () => {},
+  })
+
+  assert.equal(verified, true)
+  assert.equal(reads, 3)
+  assert.equal(recoveries, 1)
+  assert.equal(capture.xml, complete)
+})
+
+test('sidecar重启后的稀疏首帧继续有限轮询直到问题气泡恢复', async () => {
+  const sparse = '<hierarchy><node package="com.aurora.xiaohe.aidoctor" bounds="[0,0][1080,2400]" /></hierarchy>'
+  const complete = '<hierarchy><node class="android.view.View" bounds="[0,333][1080,2001]">'
+    + '<node class="android.view.View" bounds="[55,549][1025,687]"><node class="android.view.View" bounds="[549,552][981,684]">'
+    + '<node class="android.widget.TextView" text="体重超重吃什么药" content-desc="体重超重吃什么药" visible-to-user="true" bounds="[549,582][981,654]" />'
+    + '</node></node></node></hierarchy>'
+  const capture = { frame: '顶部画面', xml: sparse }
+  const normalReads = [sparse, sparse, sparse, sparse, complete]
+  let recoveries = 0
+  let delays = 0
+
+  const verified = await confirmQuestionAtTop({
+    capture,
+    question: '体重超重吃什么药',
+    chatBounds: [0, 333, 1080, 2001],
+    source: async () => normalReads.shift(),
+    recoverSource: async () => { recoveries += 1; return sparse },
+    delay: async () => { delays += 1 },
+  })
+
+  assert.equal(verified, true)
+  assert.equal(recoveries, 1)
+  assert.equal(delays, 5)
+  assert.equal(capture.xml, complete)
 })
 
 test('小荷新会话复用到底确认帧并用事件驱动稳定截图回顶', async () => {
@@ -1001,14 +1088,19 @@ test('小荷新会话复用到底确认帧并用事件驱动稳定截图回顶',
   const top = await content.clone().extract({ left: 0, top: 0, width, height: viewportHeight }).png().toBuffer()
   const bottom = await content.clone().extract({ left: 0, top: shift, width, height: viewportHeight }).png().toBuffer()
   const full = await sharp({ create: { width, height: 500, channels: 3, background: '#f4f4f4' } }).png().toBuffer()
-  const xml = '<hierarchy><node class="android.view.View" scrollable="true" visible-to-user="true" bounds="[0,80][240,440]" /></hierarchy>'
+  const bottomXml = '<hierarchy><node class="android.view.View" scrollable="true" visible-to-user="true" bounds="[0,80][240,440]" /></hierarchy>'
+  const topXml = '<hierarchy><node class="android.view.View" scrollable="true" visible-to-user="true" bounds="[0,80][240,440]">'
+    + '<node class="android.view.View" bounds="[12,120][228,200]"><node class="android.view.View" bounds="[120,122][220,198]">'
+    + '<node class="android.widget.TextView" text="测试问题" content-desc="测试问题" visible-to-user="true" bounds="[122,140][218,180]" />'
+    + '</node></node></node></hierarchy>'
+  const currentXml = () => position === 'top' ? topXml : bottomXml
   let position = 'top'
   let observedStableCaptures = 0
   let strictStableCaptures = 0
   const upwardOptions = []
   const capture = createReplyCapture({
     log: () => {},
-    source: async () => xml,
+    source: async () => currentXml(),
     screenshot: async () => full,
     windowSize: async () => ({ width, height: 500 }),
     waitForVisualQuiet: async () => {},
@@ -1016,7 +1108,7 @@ test('小荷新会话复用到底确认帧并用事件驱动稳定截图回顶',
     waitForStableReplyRegion: async (_bounds, _timeout, options = {}) => {
       observedStableCaptures += 1
       if (position === 'top' && upwardOptions.length > 0) assert.ok(options.settleSince || observedStableCaptures > 3)
-      return { frame: position === 'top' ? top : bottom, xml, stable: true, attempts: 1, observer: true }
+      return { frame: position === 'top' ? top : bottom, xml: currentXml(), stable: true, attempts: 1, observer: true }
     },
     waitForStableReplyRegionDirect: async () => {
       strictStableCaptures += 1
@@ -1024,7 +1116,7 @@ test('小荷新会话复用到底确认帧并用事件驱动稳定截图回顶',
     },
     captureReplyRegionSnapshot: async () => ({
       frame: position === 'top' ? top : bottom,
-      xml,
+      xml: currentXml(),
       stable: true,
       attempts: 1,
     }),
@@ -1058,7 +1150,8 @@ test('小荷新会话复用到底确认帧并用事件驱动稳定截图回顶',
   assert.equal(result.frames.length, 2)
   assert.equal(result.transitions.length, 1)
   assert.equal(result.captureMetadata.reply_completion_confirmed_before_capture, true)
-  assert.equal(result.captureMetadata.reply_top_navigation_method, 'new_session_scroll_boundary')
+  assert.equal(result.captureMetadata.reply_top_navigation_method, 'new_session_scroll_boundary_and_exact_question_bubble')
+  assert.equal(result.captureMetadata.reply_question_structure_validation_required, true)
   assert.equal(strictStableCaptures, 0)
   assert.ok(observedStableCaptures >= 4)
   assert.ok(upwardOptions.length >= 3)
@@ -1360,6 +1453,32 @@ test('只有完整进入聊天截图区域的问题才视为已定位', () => {
   assert.equal(questionVisible(hidden, '这是一个很长的问题', CHAT_BOUNDS), false)
   assert.equal(questionVisible(clipped, '这是一个很长的问题', CHAT_BOUNDS), false)
   assert.equal(questionVisible(visible, '这是一个很长的问题', CHAT_BOUNDS), true)
+})
+
+test('新会话顶部问题必须规范化后完整相等，不能只匹配公共前缀', () => {
+  const bubble = (text, bounds = '[700,260][1020,340]') => '<hierarchy><node class="android.view.View" bounds="[0,200][1080,1800]">'
+    + `<node class="android.view.View" bounds="[0,240][1080,460]"><node class="android.view.View" bounds="[690,240][1030,460]"><node class="android.widget.TextView" text="${text}" content-desc="${text}" visible-to-user="true" bounds="${bounds}" />`
+    + '</node></node></node></hierarchy>'
+  assert.equal(questionVisibleExact(bubble('奥利司他有副作用吗？'), '奥利司他有副作用吗', CHAT_BOUNDS), true)
+  assert.equal(questionVisibleExact(bubble('奥利司他有副作用吗，需要停药吗'), '奥利司他有副作用吗', CHAT_BOUNDS), false)
+})
+
+test('720宽竖屏中完整可见且精确匹配的问题气泡可以确认顶部', () => {
+  const bounds = [0, 240, 720, 1320]
+  const xml = '<hierarchy><node class="android.view.View" bounds="[0,240][720,1320]">'
+    + '<node class="android.view.View" bounds="[36,360][684,480]"><node class="android.view.View" bounds="[366,360][654,480]">'
+    + '<node class="android.widget.TextView" text="体重超重吃什么药" content-desc="体重超重吃什么药" visible-to-user="true" bounds="[366,386][654,454]" />'
+    + '</node></node></node></hierarchy>'
+  assert.equal(questionVisibleExact(xml, '体重超重吃什么药', bounds), true)
+})
+
+test('问题文字完整但气泡父容器被聊天区裁切时不能确认顶部', () => {
+  const bounds = [0, 240, 720, 1320]
+  const xml = '<hierarchy><node class="android.view.View" bounds="[0,240][720,1320]">'
+    + '<node class="android.view.View" bounds="[36,220][684,390]"><node class="android.view.View" bounds="[366,220][654,390]">'
+    + '<node class="android.widget.TextView" text="体重超重吃什么药" content-desc="体重超重吃什么药" visible-to-user="true" bounds="[366,280][654,350]" />'
+    + '</node></node></node></hierarchy>'
+  assert.equal(questionVisibleExact(xml, '体重超重吃什么药', bounds), false)
 })
 
 test('左侧回答标题包含完整问题文字时不能冒充用户问题气泡', () => {
@@ -2172,7 +2291,7 @@ test('新版药品抽屉无图片节点时从卡片上半部推断药品图片�
     + '</node></hierarchy>'
   const result = referenceProductImageBounds(xml, list)
   assert.equal(result.mode, 'inferred_card_artwork')
-  assert.deepEqual(result.bounds, [[73, 1454, 529, 1968], [619, 1454, 1075, 1968]])
+  assert.deepEqual(result.bounds, [[73, 1454, 529, 1839], [619, 1454, 1075, 1839]])
 })
 
 test('药品图片只从列表子树识别，不把抽屉后的输入按钮当成商品图', () => {
@@ -2187,7 +2306,52 @@ test('药品图片只从列表子树识别，不把抽屉后的输入按钮当�
 
   const result = referenceProductImageBounds(xml, list)
   assert.equal(result.mode, 'inferred_card_artwork')
-  assert.deepEqual(result.bounds, [[63, 783, 453, 1194]])
+  assert.deepEqual(result.bounds, [[63, 783, 453, 1091]])
+})
+
+test('两张药品卡片只有一张暴露ImageView时缺图卡仍必须参与就绪检查', async () => {
+  const frame = await sharp({ create: { width: 400, height: 500, channels: 3, background: '#fff' } })
+    .composite([{ input: await sharp({ create: { width: 140, height: 120, channels: 3, background: '#d71945' } }).png().toBuffer(), left: 20, top: 20 }])
+    .png().toBuffer()
+  const xml = '<hierarchy><node class="androidx.recyclerview.widget.RecyclerView" bounds="[0,100][400,600]">'
+    + '<node class="android.view.ViewGroup" bounds="[10,110][190,450]">'
+    + '<node class="android.widget.ImageView" bounds="[20,120][180,260]" />'
+    + '<node class="android.widget.TextView" text="查看说明书" bounds="[30,400][170,440]" /></node>'
+    + '<node class="android.view.ViewGroup" bounds="[210,110][390,450]">'
+    + '<node class="android.widget.TextView" text="查看说明书" bounds="[230,400][370,440]" /></node>'
+    + '</node></hierarchy>'
+
+  const result = await referenceProductViewportReadiness(frame, xml, [0, 100, 400, 600])
+  assert.equal(result.ready, false)
+  assert.equal(result.cards, 2)
+  assert.equal(result.images, 2)
+  assert.equal(result.loaded, 1)
+  assert.equal(result.unloaded, 1)
+})
+
+test('药品当前视口仍有缺图时不允许继续向下滚动', async () => {
+  let swipes = 0
+  const capture = createReferenceProductCapture({
+    checkCancelled: () => {},
+    observer: { active: false },
+    screenshot: async () => Buffer.alloc(0),
+    source: async () => '<hierarchy />',
+    recoverObserver: async () => false,
+    waitForVisualQuiet: async () => {},
+    swipe: async () => { swipes += 1 },
+    log: () => {},
+    tap: async () => {},
+    ui: { press: async () => {} },
+    getMaxLongImageHeight: () => 12_000,
+    incrementObserverRegionFallbacks: () => {},
+  })
+
+  await assert.rejects(capture.captureScrollingRegion([0, 0, 400, 500], {
+    frame: await sharp({ create: { width: 400, height: 500, channels: 3, background: '#fff' } }).png().toBuffer(),
+    xml: '<hierarchy />',
+    readiness: { ready: false, cards: 2, images: 2, loaded: 1, unloaded: 1 },
+  }), /逐卡图片仅确认 1\/2/)
+  assert.equal(swipes, 0)
 })
 
 test('药品稳定截图直接复用完成图片就绪判断', async () => {

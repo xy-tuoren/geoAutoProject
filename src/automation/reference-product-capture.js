@@ -37,6 +37,7 @@ function createReferenceProductCapture({
   async function captureProductViewport(listBounds, timeout = 4_000, { settleSince = null } = {}) {
     const deadline = Date.now() + timeout
     let latest = null
+    let lastReadinessSignature = null
     while (Date.now() < deadline) {
       checkCancelled()
       const remaining = Math.max(250, deadline - Date.now())
@@ -68,6 +69,13 @@ function createReferenceProductCapture({
       }
       const readiness = await referenceProductViewportReadiness(capture.frame, capture.xml, listBounds)
       latest = { ...capture, readiness }
+      if (!readiness.ready) {
+        const signature = `${readiness.loaded}/${readiness.cards}:${readiness.images}:${readiness.mode}`
+        if (signature !== lastReadinessSignature) {
+          log(`waiting: 推荐药品当前视口逐卡图片仅确认 ${readiness.loaded}/${readiness.cards}（候选区域=${readiness.images}，模式=${readiness.mode}），继续等待缺图加载`)
+          lastReadinessSignature = signature
+        }
+      }
       if (capture.stable && readiness.ready) {
         if (!observer.active) return latest
         const confirmMark = observer.mark()
@@ -100,9 +108,12 @@ function createReferenceProductCapture({
     const readiness = []
     const initial = initialCapture || await captureProductViewport(bounds)
     if (!initial) throw new Error('推荐药品首屏未能完成稳定截图')
+    if (!initial.readiness?.ready) {
+      throw new Error(`推荐药品第 1 屏逐卡图片仅确认 ${initial.readiness?.loaded || 0}/${initial.readiness?.cards || 0}，缺图未加载完成，已停止滚动`)
+    }
     readiness.push(initial.readiness)
     const frames = [initial.frame]
-    log('capture: 推荐药品 page 1')
+    log(`capture: 推荐药品 page 1，逐卡图片 ${initial.readiness.loaded}/${initial.readiness.cards} 已确认加载`)
     let confirmedEnd = false
     const transitions = []
     let unchangedCount = 0
@@ -123,6 +134,9 @@ function createReferenceProductCapture({
       await swipe(x, top + height * 0.82, top + height * 0.18, unchangedCount ? 800 : 520)
       let capture = await captureProductViewport(bounds, 4_000, { settleSince: activityMark })
       if (!capture) throw new Error('推荐药品滚动后未能完成稳定截图')
+      if (!capture.readiness?.ready) {
+        throw new Error(`推荐药品第 ${frames.length + 1} 屏逐卡图片仅确认 ${capture.readiness?.loaded || 0}/${capture.readiness?.cards || 0}，缺图未加载完成，已停止滚动`)
+      }
       readiness.push(capture.readiness)
       let frame = capture.frame
       if (await imagesSimilar(frames.at(-1), frame, 3)) {
@@ -175,7 +189,7 @@ function createReferenceProductCapture({
         }
         transitions.push(transition || { verified: true, overlap })
         frames.push(frame)
-        log(`capture: 推荐药品 page ${frames.length}`)
+        log(`capture: 推荐药品 page ${frames.length}，逐卡图片 ${capture.readiness.loaded}/${capture.readiness.cards} 已确认加载`)
       }
     }
     const calibratedSeams = transitions.filter(item => item.calibrated).length
@@ -295,4 +309,3 @@ function createReferenceProductCapture({
 }
 
 module.exports = { createReferenceProductCapture }
-

@@ -1,5 +1,5 @@
 const { sleep } = require('./utils')
-const { evidencePanelBounds, evidenceMinimumHeight } = require('./hierarchy')
+const { evidencePanelBounds, evidenceMinimumHeight, questionVisibleExact } = require('./hierarchy')
 const { imageRegionsStable, composeLongImages } = require('./images')
 const { findOcrText, mapPhysicalBoundsToLogical } = require('./ocr')
 
@@ -50,15 +50,60 @@ function requireQuestionLocated(found, question) {
   if (!found) throw new Error(`未能在当前会话中定位刚发送的问题“${question}”，为避免截取旧回答已停止本题`)
 }
 
+async function confirmQuestionAtTop({
+  capture,
+  question,
+  chatBounds,
+  source,
+  recoverSource,
+  delay = sleep,
+  maxReadAttempts = 3,
+  interval = 250,
+  maxRecoveryReadAttempts = 8,
+  recoveryInterval = 500,
+  log = () => {},
+}) {
+  if (questionVisibleExact(capture?.xml || '', question, chatBounds)) return true
+  if (typeof source !== 'function') return false
+  log('waiting: 回顶画面已静止，但层级暂未暴露本题问题气泡，正在有限只读复核')
+  for (let attempt = 1; attempt <= maxReadAttempts; attempt += 1) {
+    await delay(interval)
+    const xml = await source()
+    capture.xml = xml
+    if (questionVisibleExact(xml || '', question, chatBounds)) {
+      log(`capture: 第${attempt}次只读层级复核已确认完整问题气泡与本题严格一致`)
+      return true
+    }
+  }
+  if (typeof recoverSource === 'function') {
+    log('waiting: 连续只读复核仍为稀疏层级，正在重启一次uiautomator2 sidecar后做最终确认')
+    let xml = await recoverSource()
+    for (let attempt = 1; attempt <= maxRecoveryReadAttempts; attempt += 1) {
+      capture.xml = xml
+      if (questionVisibleExact(xml || '', question, chatBounds)) {
+        log(`capture: sidecar只读恢复后第${attempt}次层级确认已识别完整问题气泡与本题严格一致`)
+        return true
+      }
+      if (attempt < maxRecoveryReadAttempts) {
+        await delay(recoveryInterval)
+        xml = await source()
+      }
+    }
+  }
+  return false
+}
+
 async function scrollSingleQuestionSessionToTop({
   capture,
   initialCapture = null,
   swipeUp,
   settle,
   framesStable = imageRegionsStable,
+  verifyTop,
   timeout = 120_000,
   now = Date.now,
 }) {
+  if (typeof verifyTop !== 'function') throw new Error('新会话回顶必须提供当前问题气泡校验。')
   const deadline = now() + timeout
   let current = initialCapture ?? await capture()
   let unchangedCount = 0
@@ -70,7 +115,12 @@ async function scrollSingleQuestionSessionToTop({
     if (await framesStable(current.frame, next.frame)) unchangedCount += 1
     else unchangedCount = 0
     current = next
-    if (unchangedCount >= 2) return { capture: current, swipes, confirmed: true }
+    if (unchangedCount >= 2) {
+      if (!await verifyTop(current)) {
+        throw new Error('新会话回顶画面已连续两次无变化，但未确认完整问题气泡且文字与本题一致；为避免把回答尾部误判为顶部，已停止截图。')
+      }
+      return { capture: current, swipes, confirmed: true, questionVerified: true }
+    }
   }
   throw new Error(`新会话已创建，但${Math.round(timeout / 1000)}秒内未能通过连续两次无变化确认到达会话顶部。`)
 }
@@ -396,6 +446,7 @@ module.exports = {
   chatSwipePlan,
   scrollEndConfirmed,
   requireQuestionLocated,
+  confirmQuestionAtTop,
   scrollSingleQuestionSessionToTop,
   confirmPersistentScrollEnd,
   buildReplyImages,

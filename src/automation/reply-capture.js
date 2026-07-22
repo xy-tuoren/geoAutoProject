@@ -1,6 +1,7 @@
 const { sleep } = require('./utils')
 const {
   questionVisible,
+  questionVisibleExact,
   findChatScrollBounds,
   validateCaptureViewport,
   replyCaptureBounds,
@@ -21,6 +22,7 @@ const {
 } = require('./images')
 const {
   requireQuestionLocated,
+  confirmQuestionAtTop,
   scrollSingleQuestionSessionToTop,
   confirmPersistentScrollEnd,
   prepareEmbeddedEvidence,
@@ -154,6 +156,7 @@ function shouldDiscardUnprovenCandidate({ transition, reliableMeasuredShift, new
 
 function createReplyCapture({
   source,
+  recoverHierarchySource,
   swipeChat,
   windowSize,
   waitForStableReplyRegionDirect,
@@ -170,12 +173,12 @@ function createReplyCapture({
   xiaoheCompletionConfirmationOptions = {},
   miniAppCompletionConfirmationOptions = {},
 }) {
-  async function scrollQuestionIntoView(question, bounds, maxSwipes = 25) {
+  async function scrollQuestionIntoView(question, bounds, maxSwipes = 25, matcher = questionVisible) {
     for (let index = 0; index < maxSwipes; index += 1) {
-      if (questionVisible(await source(), question, bounds)) return true
+      if (matcher(await source(), question, bounds)) return true
       await swipeChat(bounds, 'up', 0.65, { speed: 3200, settle: 80 })
     }
-    return questionVisible(await source(), question, bounds)
+    return matcher(await source(), question, bounds)
   }
 
   async function captureFullReplyFrames(question, _maxPages = 30, {
@@ -231,6 +234,7 @@ function createReplyCapture({
     const topNavigationStarted = Date.now()
     let topNavigationMethod = 'question_bubble'
     let topConfirmationSwipes = 0
+    const questionMatcher = singleQuestionSession ? questionVisibleExact : questionVisible
     if (singleQuestionSession) {
       const topBoundary = await scrollSingleQuestionSessionToTop({
         // Completion confirmation already owns a stable bottom snapshot. Reuse
@@ -248,9 +252,17 @@ function createReplyCapture({
           settleSince: scroll.activityMark,
         }),
         framesStable: replyBoundaryFramesStable,
+        verifyTop: capture => confirmQuestionAtTop({
+          capture,
+          question,
+          chatBounds: navigationBounds,
+          source,
+          recoverSource: recoverHierarchySource,
+          log,
+        }),
       })
       topConfirmationSwipes = topBoundary.swipes
-      topNavigationMethod = 'new_session_scroll_boundary'
+      topNavigationMethod = 'new_session_scroll_boundary_and_exact_question_bubble'
     } else {
       let questionLocated = questionVisible(initialXml, question, navigationBounds)
       if (!questionLocated) {
@@ -261,7 +273,7 @@ function createReplyCapture({
     }
     const topNavigationMs = Date.now() - topNavigationStarted
     log(singleQuestionSession
-      ? `capture: 已连续两次向上滚动无变化，确认到达本题顶部（向上滚动=${topConfirmationSwipes}，耗时=${topNavigationMs}ms）`
+      ? `capture: 已连续两次向上滚动无变化，并确认完整问题气泡与本题严格一致（向上滚动=${topConfirmationSwipes}，耗时=${topNavigationMs}ms）`
       : `capture: 当前已有回答已定位问题顶部（耗时=${topNavigationMs}ms）`)
     const evidence = await prepareEmbeddedEvidence({
       screenshot,
@@ -273,8 +285,8 @@ function createReplyCapture({
       waitForStable: waitForStableReplyRegion,
       log,
     }, navigationBounds)
-    if (!singleQuestionSession && !questionVisible(evidence.capture.xml || await source(), question, navigationBounds)) {
-      requireQuestionLocated(await scrollQuestionIntoView(question, navigationBounds), question)
+    if (!questionMatcher(evidence.capture.xml || await source(), question, navigationBounds)) {
+      requireQuestionLocated(await scrollQuestionIntoView(question, navigationBounds, 25, questionMatcher), question)
       evidence.capture = await waitForStableReplyRegion(navigationBounds)
       log('capture: 引用资料展开后已重新确认问题气泡完整位于首屏')
     }
@@ -591,7 +603,7 @@ function createReplyCapture({
       captureMetadata: {
         reply_top_confirmed: true,
         reply_top_navigation_method: topNavigationMethod,
-        reply_question_structure_validation_required: !singleQuestionSession,
+        reply_question_structure_validation_required: true,
         reply_top_confirmation_swipes: topConfirmationSwipes,
         reply_floating_control_detection_method: floatingControlDetectionMethod,
         reply_floating_control_bounds: floatingControl,
