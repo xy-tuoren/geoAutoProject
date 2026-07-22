@@ -249,7 +249,7 @@ start.addEventListener('click', async () => {
       serial: device.value,
       outputDir: $('#output-dir').value.trim(),
       timeout,
-      newSession: $('#new-session').checked,
+      newSession: true,
       maxLongImageHeight,
     })
     updateRetryFailedAvailability()
@@ -269,7 +269,7 @@ retryFailed.addEventListener('click', async () => {
       serial: device.value,
       batchDirectory: retryBatchDirectory,
       timeout,
-      newSession: $('#new-session').checked,
+      newSession: true,
       maxLongImageHeight,
     })
     start.disabled = true; retryFailed.disabled = true; stop.disabled = false

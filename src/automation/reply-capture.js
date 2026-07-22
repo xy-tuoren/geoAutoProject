@@ -19,6 +19,7 @@ const {
   verifyReplyFrameOverlap,
   analyzeReplyScrollEvidence,
   detectFloatingDownArrow,
+  detectXiaoheUserQuestionBubble,
 } = require('./images')
 const {
   requireQuestionLocated,
@@ -29,10 +30,13 @@ const {
   scrollEndConfirmed,
   captureStableSandwich,
 } = require('./capture-primitives')
-const { referenceProductsTrigger, miniAppReferenceProductsTrigger } = require('./reference-products')
+const {
+  referenceProductsTrigger,
+  miniAppReferenceProductsTrigger,
+} = require('./reference-products')
 const { douyinMiniAppCaptureBounds } = require('./miniapp-locators')
 const { hierarchyLogicalSize } = require('./miniapp-locators')
-const { mapPhysicalBoundsToLogical } = require('./ocr')
+const { mapPhysicalBoundsToLogical, normalizeOcrText } = require('./ocr')
 const { REPLY_STABLE_QUIET_MS } = require('./capture-stability')
 const { CaptureSequence } = require('./capture-sequence')
 
@@ -79,6 +83,41 @@ async function miniAppTopFramesStable(first, second) {
     cropImage(second, bounds),
   ])
   return imageRegionsStable(before, after)
+}
+
+function miniAppQuestionOcrTarget(recognition, question, logicalSize) {
+  const physicalSize = recognition?.image
+  if (!physicalSize?.width || !physicalSize?.height || !logicalSize?.width || !logicalSize?.height) return null
+  const expected = normalizeOcrText(question).replace(/[^\p{L}\p{N}]/gu, '')
+  if (expected.length < 2) return null
+  const candidates = (recognition.results || []).flatMap(item => {
+    if (Number(item.confidence) < 0.85 || !Array.isArray(item.bounds)) return []
+    const text = normalizeOcrText(item.normalizedText || item.text).replace(/[^\p{L}\p{N}]/gu, '')
+    if (text !== expected) return []
+    const bounds = mapPhysicalBoundsToLogical(item.bounds, physicalSize, logicalSize)
+    const centerX = (bounds[0] + bounds[2]) / 2
+    const centerY = (bounds[1] + bounds[3]) / 2
+    if (centerX < logicalSize.width * 0.58
+      || bounds[0] < logicalSize.width * 0.42
+      || centerY < logicalSize.height * 0.03
+      || centerY > logicalSize.height * 0.72) return []
+    return [{ bounds, physicalBounds: item.bounds, confidence: Number(item.confidence), text }]
+  })
+  candidates.sort((first, second) => first.bounds[1] - second.bounds[1] || second.confidence - first.confidence)
+  return candidates[0] || null
+}
+
+function miniAppQuestionFirstFrameCropBounds(target, physicalSize) {
+  const width = Number(physicalSize?.width)
+  const height = Number(physicalSize?.height)
+  const top = Number(target?.physicalBounds?.[1])
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= width
+    || !Number.isFinite(top) || top < 0 || top >= height) return null
+  return [0, Math.max(0, Math.floor(top - height * 0.03)), width, height]
+}
+
+function miniAppQuestionFirstFrameReacquisitionAllowed(completedSwipes) {
+  return Number.isInteger(completedSwipes) && completedSwipes >= 0 && completedSwipes < 2
 }
 
 async function confirmMiniAppTop({
@@ -238,6 +277,7 @@ function createReplyCapture({
     const topNavigationStarted = Date.now()
     let topNavigationMethod = 'question_bubble'
     let topConfirmationSwipes = 0
+    let visualQuestionBubble = null
     const questionMatcher = singleQuestionSession ? questionVisibleExact : questionVisible
     if (singleQuestionSession) {
       const feedbackPromptVisibleAtBottom = feedbackPromptOverlaysChat(completionConfirmation?.capture?.xml || '')
@@ -261,21 +301,29 @@ function createReplyCapture({
           settleSince: scroll.activityMark,
         }),
         framesStable: replyBoundaryFramesStable,
+        verifyVisibleTop: async capture => {
+          visualQuestionBubble = await detectXiaoheUserQuestionBubble(capture.frame, navigationBounds, size)
+          if (!visualQuestionBubble) return false
+          log(`capture: ADB原图已确认聊天区右侧用户问题气泡（physical_bounds=${visualQuestionBubble.physicalBounds.join(',')}）`)
+          return true
+        },
         verifyTop: capture => confirmQuestionAtTop({
-          capture,
-          question,
-          chatBounds: navigationBounds,
-          source,
-          recoverSource: topHierarchyRecoveryUsed ? undefined : async () => {
-            topHierarchyRecoveryUsed = true
-            return recoverHierarchySource()
-          },
-          log,
-        }),
+            capture,
+            question,
+            chatBounds: navigationBounds,
+            source,
+            recoverSource: topHierarchyRecoveryUsed ? undefined : async () => {
+              topHierarchyRecoveryUsed = true
+              return recoverHierarchySource()
+            },
+            log,
+          }),
         log,
       })
       topConfirmationSwipes = topBoundary.swipes
-      topNavigationMethod = 'new_session_scroll_boundary_and_exact_question_bubble'
+      topNavigationMethod = visualQuestionBubble
+        ? 'new_session_scroll_boundary_and_visual_question_bubble'
+        : 'new_session_scroll_boundary_and_exact_question_bubble'
     } else {
       let questionLocated = questionVisible(initialXml, question, navigationBounds)
       if (!questionLocated) {
@@ -285,8 +333,12 @@ function createReplyCapture({
       requireQuestionLocated(questionLocated, question)
     }
     const topNavigationMs = Date.now() - topNavigationStarted
+    const questionBubbleVerified = true
+    let questionBubbleFullyVisible = visualQuestionBubble ? visualQuestionBubble.fullyVisible : true
     log(singleQuestionSession
-      ? `capture: 已连续两次向上滚动无变化，并确认完整问题气泡与本题严格一致（向上滚动=${topConfirmationSwipes}，耗时=${topNavigationMs}ms）`
+      ? (topNavigationMethod === 'new_session_scroll_boundary_and_exact_question_bubble'
+          ? `capture: 已连续两次向上滚动无变化，并确认完整问题气泡与本题严格一致（向上滚动=${topConfirmationSwipes}，耗时=${topNavigationMs}ms）`
+          : `capture: 已从ADB原图确认聊天区右侧用户问题气泡并结束回顶（向上滚动=${topConfirmationSwipes}，耗时=${topNavigationMs}ms）`)
       : `capture: 当前已有回答已定位问题顶部（耗时=${topNavigationMs}ms）`)
     const evidence = await prepareEmbeddedEvidence({
       screenshot,
@@ -298,7 +350,16 @@ function createReplyCapture({
       waitForStable: waitForStableReplyRegion,
       log,
     }, navigationBounds)
-    if (!questionMatcher(evidence.capture.xml || await source(), question, navigationBounds)) {
+    if (visualQuestionBubble && !questionBubbleFullyVisible) {
+      const finalVisualQuestionBubble = await detectXiaoheUserQuestionBubble(evidence.capture.frame, navigationBounds, size)
+      if (finalVisualQuestionBubble?.fullyVisible) {
+        visualQuestionBubble = finalVisualQuestionBubble
+        questionBubbleFullyVisible = true
+        log(`capture: 引用资料处理后ADB原图已确认用户问题气泡完整露出（physical_bounds=${visualQuestionBubble.physicalBounds.join(',')}）`)
+      }
+    }
+    if (topNavigationMethod === 'new_session_scroll_boundary_and_exact_question_bubble'
+      && !questionMatcher(evidence.capture.xml || await source(), question, navigationBounds)) {
       requireQuestionLocated(await scrollQuestionIntoView(question, navigationBounds, 25, questionMatcher), question)
       evidence.capture = await waitForStableReplyRegion(navigationBounds)
       log('capture: 引用资料展开后已重新确认问题气泡完整位于首屏')
@@ -605,8 +666,8 @@ function createReplyCapture({
       fullRetryCount: 0,
       fallbackReasons,
       topNavigationMs,
-      questionLocated: true,
-      questionFullyVisible: true,
+      questionLocated: questionBubbleVerified,
+      questionFullyVisible: questionBubbleFullyVisible,
       evidenceEmbedded: evidence.found,
       evidenceExpanded: evidence.expanded,
       productDetected,
@@ -616,7 +677,8 @@ function createReplyCapture({
       captureMetadata: {
         reply_top_confirmed: true,
         reply_top_navigation_method: topNavigationMethod,
-        reply_question_structure_validation_required: true,
+        reply_question_structure_validation_required: topNavigationMethod === 'new_session_scroll_boundary_and_exact_question_bubble',
+        reply_submitted_question_boundary_verified: false,
         reply_top_confirmation_swipes: topConfirmationSwipes,
         reply_floating_control_detection_method: floatingControlDetectionMethod,
         reply_floating_control_bounds: floatingControl,
@@ -656,6 +718,7 @@ function createReplyCapture({
     useDirectCandidateSnapshots = false,
     useReplyOverlapConsensus = false,
     completionConfirmationOptions = {},
+    questionStart = '',
   }) {
     const sequence = new CaptureSequence()
     const seamRecords = []
@@ -673,9 +736,22 @@ function createReplyCapture({
       log(`waiting: 正在等待${platformLabel}小荷AI全文连续${Math.round(initialQuietMs / 1000)}秒无画面活动`)
       await waitForFinalVisualQuiet({ quietMs: initialQuietMs, timeout: 25_000 })
     }
-    let capture = await waitForMiniAppStableRegion(initialBounds, platformLabel, 12_000)
+    // A newly opened miniapp answer may still be generating or lazily loading
+    // recommendation images. Requiring a stable whole viewport before the
+    // persistent bottom probe creates a circular dependency: the probe is the
+    // authoritative mechanism that waits for generation to finish. Start from
+    // one lossless snapshot, then let the bottom confirmation reset whenever
+    // the answer or an image changes. Strict stable-frame checks still apply to
+    // every deliverable frame after completion has been confirmed.
+    let capture = confirmCompletionBeforeCapture
+      ? await captureReplyRegionSnapshot(initialBounds, { settleMs: 0 })
+      : await waitForMiniAppStableRegion(initialBounds, platformLabel, 12_000)
     let bounds = douyinMiniAppCaptureBounds(capture.xml || initialXml, await windowSize()) || initialBounds
-    if (bounds.join(',') !== initialBounds.join(',')) capture = await waitForMiniAppStableRegion(bounds, platformLabel, 8_000)
+    if (bounds.join(',') !== initialBounds.join(',')) {
+      capture = confirmCompletionBeforeCapture
+        ? await captureReplyRegionSnapshot(bounds, { settleMs: 0 })
+        : await waitForMiniAppStableRegion(bounds, platformLabel, 8_000)
+    }
 
     let completionConfirmation = null
     if (confirmCompletionBeforeCapture) {
@@ -733,20 +809,92 @@ function createReplyCapture({
     }
   
     const topNavigationStarted = Date.now()
-    const topBoundary = await confirmMiniAppTop({
-      initialCapture: capture,
-      swipeUp: () => swipeChat(bounds, 'up', 0.62, { maxFraction: 0.68, speed: 2_600 }),
-      settle: () => waitForMiniAppStableRegion(bounds, platformLabel, 6_000),
-    })
+    const topBoundary = questionStart
+      ? await (async () => {
+          let candidate = capture
+          for (let attempts = 0; attempts < 80; attempts += 1) {
+            const recognition = await ocr.recognize(candidate.frame, { minConfidence: 0.5 })
+            const target = miniAppQuestionOcrTarget(recognition, questionStart, {
+              width: bounds[2] - bounds[0],
+              height: bounds[3] - bounds[1],
+            })
+            setLastOcrDiagnostic({
+              created_at: new Date().toISOString(),
+              purpose: 'douyin_miniapp_current_question_top',
+              matcher: { question: questionStart, exact: true, right_aligned: true },
+              recognition,
+              target,
+            })
+            if (target) return { capture: candidate, attempts, confirmed: true, target }
+            await swipeChat(bounds, 'up', 0.42, { maxFraction: 0.48, speed: 2_200 })
+            candidate = await waitForMiniAppStableRegion(bounds, platformLabel, 6_000)
+          }
+          throw new Error(`抖音独立小程序回答在80次向上滚动内仍未定位到与本题完全一致的右侧问题气泡：${questionStart}`)
+        })()
+      : await confirmMiniAppTop({
+          initialCapture: capture,
+          swipeUp: () => swipeChat(bounds, 'up', 0.62, { maxFraction: 0.68, speed: 2_600 }),
+          settle: () => waitForMiniAppStableRegion(bounds, platformLabel, 6_000),
+        })
     const topNavigationAttempts = topBoundary.attempts
     // Douyin shows an animated “没有更多了” toast after an upward swipe at
     // the real top. It is deliberately excluded from the boundary witness,
     // then allowed to disappear before the first deliverable frame is kept.
     await sleep(2_200)
     capture = await waitForMiniAppStableRegion(bounds, platformLabel, 6_000)
+    let questionFirstFrameCrop = null
+    let questionFirstFramePositioningSwipes = 0
+    let questionFirstFrameReacquisitionSwipes = 0
+    if (questionStart) {
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        const recognition = await ocr.recognize(capture.frame, { minConfidence: 0.5 })
+        const target = miniAppQuestionOcrTarget(recognition, questionStart, {
+          width: bounds[2] - bounds[0],
+          height: bounds[3] - bounds[1],
+        })
+        setLastOcrDiagnostic({
+          created_at: new Date().toISOString(),
+          purpose: 'douyin_miniapp_current_question_first_frame',
+          matcher: { question: questionStart, exact: true, right_aligned: true },
+          recognition,
+          target,
+        })
+        if (!target) {
+          // The “没有更多了” toast can disappear together with a small
+          // WebView rebound.  The question was already confirmed by the
+          // top-navigation witness, so allow only a bounded upward recovery
+          // before rejecting the frame.  This is scroll-only and cannot send
+          // or switch the current question.
+          if (!miniAppQuestionFirstFrameReacquisitionAllowed(questionFirstFrameReacquisitionSwipes)) {
+            throw new Error(`抖音独立小程序正式首帧无法再次确认本题问题气泡：${questionStart}`)
+          }
+          await swipeChat(bounds, 'up', 0.12, {
+            maxFraction: 0.16,
+            speed: 1_600,
+            eventDrivenSettle: true,
+            xFraction: questionFirstFrameReacquisitionSwipes ? 0.68 : 0.84,
+          })
+          capture = await waitForMiniAppStableRegion(bounds, platformLabel, 6_000)
+          questionFirstFrameReacquisitionSwipes += 1
+          continue
+        }
+        const targetTopRatio = target.physicalBounds[1] / recognition.image.height
+        if (targetTopRatio <= 0.2) {
+          questionFirstFrameCrop = miniAppQuestionFirstFrameCropBounds(target, recognition.image)
+          break
+        }
+        const fraction = Math.min(0.24, Math.max(0.08, targetTopRatio - 0.12))
+        await swipeChat(bounds, 'down', fraction, { maxFraction: 0.28, speed: 1_800, eventDrivenSettle: true })
+        capture = await waitForMiniAppStableRegion(bounds, platformLabel, 6_000)
+        questionFirstFramePositioningSwipes += 1
+      }
+      if (!questionFirstFrameCrop) throw new Error(`抖音独立小程序无法把本题问题气泡定位到正式首帧顶部：${questionStart}`)
+    }
     const topNavigationMs = Date.now() - topNavigationStarted
-    log(`capture: ${platformLabel}小荷AI全文已确认位于顶部（回滚尝试=${topNavigationAttempts}，耗时=${topNavigationMs}ms）`)
-    sequence.addInitial(capture.frame)
+    log(questionStart
+      ? `capture: ${platformLabel}独立小程序已定位当前问题气泡并从本题开始截图（回滚尝试=${topNavigationAttempts}，首帧定位=${questionFirstFramePositioningSwipes}，耗时=${topNavigationMs}ms）`
+      : `capture: ${platformLabel}小荷AI全文已确认位于顶部（回滚尝试=${topNavigationAttempts}，耗时=${topNavigationMs}ms）`)
+    sequence.addInitial(questionFirstFrameCrop ? await cropImage(capture.frame, questionFirstFrameCrop) : capture.frame)
     scrollDecisions.push({ attempt: 1, outcome: 'initial_frame_appended', frame_count: sequence.length })
     log(`capture: ${platformLabel}小荷AI全文 page 1`)
   
@@ -890,6 +1038,11 @@ function createReplyCapture({
         [openedMetadataKey]: true,
         [`${metadataPrefix}_full_page_confirmed_top`]: true,
         [`${metadataPrefix}_full_page_top_navigation_attempts`]: topNavigationAttempts,
+        ...(questionStart ? {
+          [`${metadataPrefix}_current_question_first_frame_positioning_swipes`]: questionFirstFramePositioningSwipes,
+          [`${metadataPrefix}_current_question_first_frame_reacquisition_swipes`]: questionFirstFrameReacquisitionSwipes,
+          [`${metadataPrefix}_current_question_first_frame_crop`]: questionFirstFrameCrop,
+        } : {}),
         [`${metadataPrefix}_full_page_confirmed_end`]: true,
         [`${metadataPrefix}_full_page_scroll_attempts`]: scrollAttempts,
         reply_completion_confirmation_method: completionConfirmation ? 'persistent_scroll_end' : 'initial_visual_quiet',
@@ -913,7 +1066,7 @@ function createReplyCapture({
     })
   }
   
-  function captureDouyinMiniAppEntryAnswerFrames(initialXml, initialBounds) {
+  function captureDouyinMiniAppEntryAnswerFrames(initialXml, initialBounds, question) {
     return captureMiniAppFullAnswerFrames(initialXml, initialBounds, {
       platformLabel: '抖音',
       metadataPrefix: 'douyin',
@@ -922,6 +1075,7 @@ function createReplyCapture({
       useDirectCandidateSnapshots: true,
       useReplyOverlapConsensus: true,
       completionConfirmationOptions: miniAppCompletionConfirmationOptions,
+      questionStart: question,
     })
   }
   
@@ -954,6 +1108,9 @@ module.exports = {
   navigateReplyToBottomControl,
   replyBoundaryFramesStable,
   miniAppTopFramesStable,
+  miniAppQuestionOcrTarget,
+  miniAppQuestionFirstFrameCropBounds,
+  miniAppQuestionFirstFrameReacquisitionAllowed,
   confirmMiniAppTop,
   shouldDiscardUnprovenCandidate,
 }

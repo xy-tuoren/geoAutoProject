@@ -109,6 +109,9 @@ class FakeDevice:
     def app_start(self, package, wait=False, use_monkey=False):
         self.events.append(("app_start", package, wait, use_monkey))
 
+    def app_stop(self, package):
+        self.events.append(("app_stop", package))
+
     def app_wait(self, package, timeout=20.0, front=False):
         self.events.append(("app_wait", package, timeout, front))
         return 123 if self.current_package == package else 0
@@ -153,6 +156,7 @@ def test_bridge_configures_dynamic_ui_timeouts_and_dispatches_commands():
     bridge.dispatch("set_focused_text", {"text": "腹泻怎么办"})
     bridge.dispatch("press", {"key": "back"})
     bridge.dispatch("app_start", {"package": "example.app"})
+    bridge.dispatch("app_stop", {"package": "example.app"})
 
     assert ("click", 10.0, 20.0) in device.events
     assert ("set_input_ime", True) in device.events
@@ -162,6 +166,7 @@ def test_bridge_configures_dynamic_ui_timeouts_and_dispatches_commands():
     assert ("press", "back") in device.events
     assert ("app_start", "example.app", True, False) in device.events
     assert ("app_wait", "example.app", 8.0, True) in device.events
+    assert ("app_stop", "example.app") in device.events
 
 
 def test_bridge_wakes_device_sets_usb_stay_awake_and_restores_original_value():

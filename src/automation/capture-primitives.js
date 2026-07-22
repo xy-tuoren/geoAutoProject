@@ -99,6 +99,7 @@ async function scrollSingleQuestionSessionToTop({
   swipeUp,
   settle,
   framesStable = imageRegionsStable,
+  verifyVisibleTop = null,
   verifyTop,
   timeout = 120_000,
   maxUnverifiedBoundaries = 2,
@@ -106,6 +107,7 @@ async function scrollSingleQuestionSessionToTop({
   now = Date.now,
 }) {
   if (typeof verifyTop !== 'function') throw new Error('新会话回顶必须提供当前问题气泡校验。')
+  if (verifyVisibleTop !== null && typeof verifyVisibleTop !== 'function') throw new Error('可见问题气泡校验必须是函数。')
   if (!Number.isInteger(maxUnverifiedBoundaries) || maxUnverifiedBoundaries < 1) {
     throw new Error('回顶候选边界复核次数必须是正整数。')
   }
@@ -121,6 +123,9 @@ async function scrollSingleQuestionSessionToTop({
     if (await framesStable(current.frame, next.frame)) unchangedCount += 1
     else unchangedCount = 0
     current = next
+    if (verifyVisibleTop && await verifyVisibleTop(current)) {
+      return { capture: current, swipes, confirmed: true, questionVerified: true, visibleQuestionBubbleVerified: true }
+    }
     if (unchangedCount >= 2) {
       if (!await verifyTop(current)) {
         unverifiedBoundaries += 1

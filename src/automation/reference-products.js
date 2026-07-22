@@ -45,7 +45,7 @@ function miniAppReferenceProductsTrigger(xml, viewportBounds) {
     if (!boundsIntersect(panel, viewportBounds)
       || panelWidth < viewportWidth * 0.84
       || panelHeight < viewportHeight * 0.12
-      || panelHeight > viewportHeight * 0.34) continue
+      || panelHeight > viewportHeight * 0.55) continue
     const descendants = treeNodes(node)
     const arrow = descendants.find(child => {
       if (nodeAttr(child.attrs, 'class') !== 'android.widget.ImageView') return false

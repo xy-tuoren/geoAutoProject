@@ -214,6 +214,12 @@ class U2Bridge:
                     f"应用启动后前台应用不正确：expected={package}, actual={actual}"
                 )
             return current
+        if method == "app_stop":
+            package = str(params.get("package") or "").strip()
+            if not package:
+                raise BridgeError("app_stop requires a package")
+            device.app_stop(package)
+            return True
         raise BridgeError(f"unknown bridge method: {method}")
 
     @staticmethod

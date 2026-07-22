@@ -324,6 +324,14 @@ class U2Client {
     );
   }
 
+  appStop(packageName) {
+    return this.request(
+      "app_stop",
+      { package: packageName },
+      { timeout: 10_000 }
+    );
+  }
+
   async stop() {
     const child = this.process;
     if (!child) return;

@@ -32,7 +32,7 @@ async function runDouyinSearchResultAttempts({ waitForResult, refreshResults }) 
   } catch (error) {
     if (!(error instanceof DouyinSearchResultNotFoundError)) throw error
     throw new DouyinSearchResultNotFoundError(
-      '抖音当前搜索结果刷新后再次扫描，仍未出现小荷AI医生智能总结或可验证的小程序入口卡片。',
+      '抖音当前搜索结果刷新后再次检查首屏，仍未出现小荷AI医生智能总结或可验证的小程序入口卡片。',
       { cause: error, scanScrolls: error.scanScrolls },
     )
   }

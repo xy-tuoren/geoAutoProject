@@ -9,6 +9,7 @@ const {
   runToutiaoAnswerCardAttempts,
   runToutiaoFullAnswerAttempts,
 } = require('./search-recovery')
+const { DouyinMiniAppNetworkError } = require('./douyin-search-workflow')
 
 const SEARCH_SUMMARY_FILENAME = '回答_智能总结.png'
 const DOUYIN_SEARCH_SUMMARY_FILENAME = SEARCH_SUMMARY_FILENAME
@@ -47,6 +48,7 @@ function createQuestionWorkflows({
   captureFullReplyFrames,
   getActiveEntry,
   getActivePackageName,
+  restartDouyinEntry,
 }) {
   function activeEntryMetadata() {
     const entry = getActiveEntry()
@@ -59,7 +61,7 @@ function createQuestionWorkflows({
     }
   }
 
-  async function askOnceDouyin(payload, artifacts, question, index) {
+  async function askOnceDouyinAttempt(payload, artifacts, question, index) {
     const observerBaseline = typeof observer.snapshot === 'function' ? observer.snapshot() : {}
     const recoveryBaseline = recoverySnapshot()
     log('stage: 正在打开抖音搜索框并输入问题')
@@ -83,7 +85,7 @@ function createQuestionWorkflows({
     try {
       card = await runDouyinSearchResultAttempts({
         waitForResult: attempt => waitForDouyinSearchResult(payload.timeout * 1_000, { attempt }),
-        refreshResults: error => refreshDouyinSearchResults(question, error.scanScrolls),
+        refreshResults: () => refreshDouyinSearchResults(question),
       })
       Object.assign(meta, {
         douyin_search_attempts: card.attempt,
@@ -141,7 +143,7 @@ function createQuestionWorkflows({
       full = await waitForDouyinMiniAppAnswer(full, payload.timeout * 1_000, { question })
       await fs.writeFile(leadingScreenshotPath, searchCapture.frame)
       log(`capture: 抖音小程序入口搜索页已通过本题上下文校验并保存 ${leadingScreenshotPath}`)
-      captureMethod = () => captureDouyinMiniAppEntryAnswerFrames(full.xml, full.bounds)
+      captureMethod = () => captureDouyinMiniAppEntryAnswerFrames(full.xml, full.bounds, question)
     }
     log('stage: 小荷AI医生全文页已打开且回答可截图，开始从上到下完整截图')
     const result = await saveArtifacts({
@@ -158,6 +160,20 @@ function createQuestionWorkflows({
     return searchCapture.target.mode === 'smart_summary'
       ? { summaryScreenshot: leadingScreenshotPath, ...result }
       : { entryScreenshot: leadingScreenshotPath, ...result }
+  }
+
+  async function askOnceDouyin(payload, artifacts, question, index) {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        return await askOnceDouyinAttempt(payload, artifacts, question, index)
+      } catch (error) {
+        if (!(error instanceof DouyinMiniAppNetworkError) || attempt > 0) throw error
+        log('recovery: 抖音小程序出现网络不稳定，正在退出并重新打开抖音，然后重试当前题（1/1）')
+        await restartDouyinEntry()
+        log(`recovery: 抖音已重新打开，正在从当前题重新执行：${question}`)
+      }
+    }
+    throw new Error('抖音当前题网络重启恢复流程异常结束。')
   }
   
   async function askOnceToutiao(payload, artifacts, question, index) {
@@ -252,12 +268,10 @@ function createQuestionWorkflows({
     const observerBaseline = typeof observer.snapshot === 'function' ? observer.snapshot() : {}
     const recoveryBaseline = recoverySnapshot()
     let newSessionPerformed = false
-    if (payload.newSession && getActiveEntry().supportsNewSession) {
+    if (getActiveEntry().supportsNewSession) {
       log('stage: 正在切换到新会话')
       newSessionPerformed = await tapNewSession()
       if (!newSessionPerformed) throw new Error('本题要求新建会话，但未找到可确认的新会话入口；为避免混入旧对话，已在输入前停止本题')
-    } else if (payload.newSession && !getActiveEntry().supportsNewSession) {
-      log(`stage: ${getActiveEntry().label}不支持自动新建会话，已跳过该步骤`)
     }
     log('stage: 正在输入问题')
     await inputQuestion(question)
@@ -268,7 +282,7 @@ function createQuestionWorkflows({
       question_index: index,
       question_directory: directory,
       ...activeEntryMetadata(),
-      new_session_requested: Boolean(payload.newSession),
+      new_session_requested: true,
       new_session_performed: newSessionPerformed,
       ui_backend: 'python_uiautomator2_strict',
       ui_fallback_enabled: false,

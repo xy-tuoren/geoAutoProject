@@ -1,7 +1,7 @@
 const { sleep } = require('./utils')
 const { cropImage, imageLooksLoaded, imageRegionsStable } = require('./images')
 const { captureStableSandwich } = require('./capture-primitives')
-const { normalizeOcrText } = require('./ocr')
+const { normalizeOcrText, mapPhysicalBoundsToLogical } = require('./ocr')
 const {
   douyinSearchInput,
   hierarchyLogicalSize,
@@ -14,10 +14,15 @@ const {
 const { DouyinSearchResultNotFoundError } = require('./search-recovery')
 
 const DOUYIN_SUMMARY_PREFERENCE_MS = 3_000
-const DOUYIN_INITIAL_RESULT_WAIT_MS = 12_000
-const DOUYIN_SEARCH_SCAN_LIMIT = 3
-const DOUYIN_POST_SCAN_WAIT_MS = 5_000
+const DOUYIN_SEARCH_SCAN_LIMIT = 0
 const DOUYIN_MINIAPP_CONTEXT_WAIT_MS = 15_000
+
+class DouyinMiniAppNetworkError extends Error {
+  constructor() {
+    super('抖音小程序显示“网络不稳定，请重试”，需要退出并重新打开抖音后重试当前题。')
+    this.name = 'DouyinMiniAppNetworkError'
+  }
+}
 
 const GENERIC_QUESTION_BIGRAMS = new Set([
   '什么', '怎么', '么办', '如何', '请问', '是否', '可以', '需要', '用什', '么药', '咋办',
@@ -53,6 +58,36 @@ function douyinMiniAppAnswerContextEvidence(recognition, question) {
   }
 }
 
+function douyinMiniAppNetworkRetryTarget(recognition, logicalSize) {
+  const results = (recognition?.results || []).filter(item => Number(item.confidence) >= 0.85)
+  const errors = results.filter(item => normalizeOcrText(item.normalizedText || item.text)
+    .replace(/[，,。.!！?？\s]/g, '') === '网络不稳定请重试')
+  const retries = results.filter(item => normalizeOcrText(item.normalizedText || item.text)
+    .replace(/\s/g, '') === '重试')
+  const physicalSize = recognition?.image
+  if (!physicalSize?.width || !physicalSize?.height || !logicalSize?.width || !logicalSize?.height) return null
+  for (const error of errors) {
+    const errorCenterX = (error.bounds[0] + error.bounds[2]) / 2
+    for (const retry of retries) {
+      const retryCenterX = (retry.bounds[0] + retry.bounds[2]) / 2
+      const verticalGap = retry.bounds[1] - error.bounds[3]
+      if (verticalGap < physicalSize.height * 0.035
+        || verticalGap > physicalSize.height * 0.16
+        || Math.abs(retryCenterX - errorCenterX) > physicalSize.width * 0.16
+        || retry.bounds[1] < physicalSize.height * 0.35
+        || retry.bounds[3] > physicalSize.height * 0.78) continue
+      return {
+        bounds: mapPhysicalBoundsToLogical(retry.bounds, physicalSize, logicalSize),
+        physicalBounds: retry.bounds,
+        errorPhysicalBounds: error.bounds,
+        errorConfidence: Number(error.confidence),
+        retryConfidence: Number(retry.confidence),
+      }
+    }
+  }
+  return null
+}
+
 function douyinSearchTargetStabilityBounds(target, size) {
   if (target?.mode === 'miniapp_entry_card' && Array.isArray(target.cardBounds)) return target.cardBounds
   if (target?.mode === 'smart_summary' && Array.isArray(target.viewFull)) {
@@ -83,22 +118,20 @@ function createDouyinSearchWorkflow({
   getActivePackageName,
   checkCancelled,
   waitForStableReply,
+  now = Date.now,
+  delay = sleep,
 }) {
   async function waitForDouyinSearchResult(timeout, { attempt = 1 } = {}) {
-    const startedAt = Date.now()
-    const initialScanDelay = Math.min(DOUYIN_INITIAL_RESULT_WAIT_MS, Math.max(5_000, Math.floor(timeout * 0.25)))
-    const deadline = Date.now() + timeout
+    const deadline = now() + timeout
     const size = await windowSize()
     const roundLabel = attempt === 1 ? '第一轮' : '刷新后第二轮'
     let lastProgress = 0
     let stableEntrySignature = ''
     let stableEntryReads = 0
     let entryFirstSeenAt = 0
-    let searchScrolls = 0
-    let lastSearchScrollAt = 0
     let genericAnswerLogged = false
     let nextOcrAt = 0
-    while (Date.now() < deadline) {
+    while (now() < deadline) {
       const xml = await source()
       const target = douyinSearchResultTarget(xml, size)
       const genericAnswer = douyinGenericAiAnswerBounds(xml, size)
@@ -109,7 +142,7 @@ function createDouyinSearchWorkflow({
         genericAnswerLogged = true
       }
       if (target?.mode === 'smart_summary') return { xml, target, size }
-      if (!target && Date.now() >= nextOcrAt) {
+      if (!target && now() >= nextOcrAt) {
         const frame = await screenshot()
         const logicalSize = hierarchyLogicalSize(xml, size)
         const recognition = await ocr.recognize(frame, { minConfidence: 0.5 })
@@ -142,7 +175,7 @@ function createDouyinSearchWorkflow({
             recognition,
           }
         }
-        nextOcrAt = Date.now() + 2_000
+        nextOcrAt = now() + 2_000
       }
       if (target?.mode === 'miniapp_entry_card') {
         const signature = `${target.cardBounds.join(',')}|${target.tapBounds.join(',')}`
@@ -150,9 +183,9 @@ function createDouyinSearchWorkflow({
         else {
           stableEntrySignature = signature
           stableEntryReads = 1
-          entryFirstSeenAt = Date.now()
+          entryFirstSeenAt = now()
         }
-        if (stableEntryReads >= 2 && Date.now() - entryFirstSeenAt >= DOUYIN_SUMMARY_PREFERENCE_MS) {
+        if (stableEntryReads >= 2 && now() - entryFirstSeenAt >= DOUYIN_SUMMARY_PREFERENCE_MS) {
           return { xml, target, size }
         }
       } else {
@@ -160,60 +193,32 @@ function createDouyinSearchWorkflow({
         stableEntryReads = 0
         entryFirstSeenAt = 0
       }
-      if (!target && searchScrolls >= DOUYIN_SEARCH_SCAN_LIMIT
-        && Date.now() - lastSearchScrollAt >= DOUYIN_POST_SCAN_WAIT_MS) {
-        throw new DouyinSearchResultNotFoundError(
-          `${roundLabel}抖音搜索结果已完成${DOUYIN_SEARCH_SCAN_LIMIT}次向下扫描，仍未找到智能总结或小程序入口卡片。`,
-          { scanScrolls: searchScrolls },
-        )
-      }
-      if (!target && searchScrolls < DOUYIN_SEARCH_SCAN_LIMIT
-        && Date.now() - startedAt >= initialScanDelay
-        && Date.now() - lastSearchScrollAt >= 3_500) {
-        const resultsBounds = douyinSearchResultsBounds(xml, size)
-        if (resultsBounds) {
-          searchScrolls += 1
-          lastSearchScrollAt = Date.now()
-          log(`stage: ${roundLabel}首屏未发现智能总结或入口卡片，向下扫描抖音搜索结果（${searchScrolls}/${DOUYIN_SEARCH_SCAN_LIMIT}）`)
-          await swipeChat(resultsBounds, 'down', 0.34, { maxFraction: 0.42, speed: 1_700, eventDrivenSettle: true })
-          await waitForVisualQuiet({ timeout: 1_200, fallbackMs: 300 })
-          continue
-        }
-      }
-      if (Date.now() - lastProgress >= 5_000) {
+      if (now() - lastProgress >= 5_000) {
         log(`waiting: ${stableEntryReads ? '已发现小程序入口卡片，继续短暂等待智能总结优先出现' : '正在等待抖音智能总结或小荷AI医生小程序入口卡片'}…`)
-        lastProgress = Date.now()
+        lastProgress = now()
       }
-      await sleep(500)
+      await delay(500)
     }
     throw new DouyinSearchResultNotFoundError(
-      `${roundLabel}抖音搜索结果中既未出现小荷AI医生智能总结，也未出现可验证的小程序入口卡片。`,
-      { scanScrolls: searchScrolls },
+      `${roundLabel}抖音搜索结果首屏既未出现小荷AI医生智能总结，也未出现可验证的小程序入口卡片。`,
+      { scanScrolls: 0 },
     )
   }
   
-  async function refreshDouyinSearchResults(question, scanScrolls = DOUYIN_SEARCH_SCAN_LIMIT) {
-    let xml = await source()
+  async function refreshDouyinSearchResults(question) {
+    const xml = await source()
     const size = await windowSize()
-    let resultsBounds = douyinSearchResultsBounds(xml, size)
-    if (!resultsBounds) throw new Error('抖音第一轮扫描无结果，但刷新前无法定位当前搜索结果列表。')
-    const returnSwipes = Math.max(1, Math.ceil(Math.max(1, scanScrolls) * 0.34 / 0.55))
-    log(`stage: 第一轮未找到入口，正在返回抖音搜索结果顶部（回滚=${returnSwipes}次）`)
-    for (let index = 0; index < returnSwipes; index += 1) {
-      await swipeChat(resultsBounds, 'up', 0.55, { maxFraction: 0.62, speed: 2_500, eventDrivenSettle: true })
-      await waitForVisualQuiet({ timeout: 1_200, fallbackMs: 300 })
-      xml = await source()
-      resultsBounds = douyinSearchResultsBounds(xml, size) || resultsBounds
-    }
+    const resultsBounds = douyinSearchResultsBounds(xml, size)
+    if (!resultsBounds) throw new Error('抖音首屏无结果，但刷新前无法定位当前搜索结果列表。')
     const edit = douyinSearchInput(xml)
     if (!edit || edit.text !== question) {
-      throw new Error('抖音搜索结果回到顶部后未能确认当前搜索关键词；为避免刷新错误问题已停止本题。')
+      throw new Error('抖音刷新首屏前未能确认当前搜索关键词；为避免刷新错误问题已停止本题。')
     }
-    log('stage: 已回到顶部，正在下拉刷新当前抖音搜索结果')
+    log('stage: 第一轮首屏未找到入口，正在下拉刷新当前抖音搜索结果（仅一次）')
     await swipeChat(resultsBounds, 'up', 0.5, { maxFraction: 0.58, speed: 700, eventDrivenSettle: true })
     await waitForVisualQuiet({ timeout: 2_500, fallbackMs: 1_200 })
-    await sleep(700)
-    log('stage: 当前搜索结果已刷新，开始第二轮入口识别与向下扫描')
+    await delay(700)
+    log('stage: 当前搜索结果已刷新，开始第二轮首屏入口识别')
   }
   
   async function captureDouyinSearchTarget(size, expectedTarget = null) {
@@ -331,14 +336,16 @@ function createDouyinSearchWorkflow({
         recognition,
         target: context,
       })
-      return context
+      return { context, recognition }
     }
     while (Date.now() < deadline) {
       checkCancelled()
       const screen = await screenshot()
       const frame = await cropImage(screen, readinessBounds)
       if (await imageLooksLoaded(frame)) {
-        const context = await recognizeQuestionContext(screen, 'initial_loaded_frame')
+        const { context, recognition } = await recognizeQuestionContext(screen, 'initial_loaded_frame')
+        const retryTarget = douyinMiniAppNetworkRetryTarget(recognition, await windowSize())
+        if (retryTarget) throw new DouyinMiniAppNetworkError()
         if (!context.matched) {
           contextMismatchStartedAt ||= Date.now()
           contextMismatchReads += 1
@@ -359,7 +366,7 @@ function createDouyinSearchWorkflow({
         const bounds = douyinMiniAppCaptureBounds(stable.xml, await windowSize())
         if (!bounds) throw new Error('抖音小程序回答稳定后未能重新确认正文截图区域。')
         const confirmedScreen = await screenshot()
-        const confirmedContext = await recognizeQuestionContext(confirmedScreen, 'stable_frame_recheck')
+        const { context: confirmedContext } = await recognizeQuestionContext(confirmedScreen, 'stable_frame_recheck')
         if (!confirmedContext.matched) {
           contextMismatchStartedAt ||= Date.now()
           contextMismatchReads += 1
@@ -391,8 +398,10 @@ function createDouyinSearchWorkflow({
 
 module.exports = {
   createDouyinSearchWorkflow,
+  DouyinMiniAppNetworkError,
   DOUYIN_SEARCH_SCAN_LIMIT,
   significantQuestionBigrams,
   douyinMiniAppAnswerContextEvidence,
+  douyinMiniAppNetworkRetryTarget,
   douyinSearchTargetStabilityBounds,
 }

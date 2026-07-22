@@ -20,6 +20,84 @@ async function rawImage(image) {
   return { data: result.data, width: result.info.width, height: result.info.height, channels: result.info.channels }
 }
 
+async function detectXiaoheUserQuestionBubble(image, chatBounds, logicalSize) {
+  const raw = await rawImage(image)
+  const logicalWidth = logicalSize?.width || raw.width
+  const logicalHeight = logicalSize?.height || raw.height
+  if (!Array.isArray(chatBounds) || chatBounds.length !== 4 || !logicalWidth || !logicalHeight) return null
+  const scaleX = raw.width / logicalWidth
+  const scaleY = raw.height / logicalHeight
+  const chatLeft = Math.max(0, Math.floor(chatBounds[0] * scaleX))
+  const chatTop = Math.max(0, Math.floor(chatBounds[1] * scaleY))
+  const chatRight = Math.min(raw.width, Math.ceil(chatBounds[2] * scaleX))
+  const chatBottom = Math.min(raw.height, Math.ceil(chatBounds[3] * scaleY))
+  const chatWidth = chatRight - chatLeft
+  const chatHeight = chatBottom - chatTop
+  if (chatWidth < 1 || chatHeight < 1) return null
+
+  // Xiaohe renders the sole user message as a solid turquoise bubble aligned
+  // to the right. Only inspect the upper part of the chat viewport so blue
+  // links and answer controls cannot be mistaken for the question bubble.
+  const searchLeft = Math.max(chatLeft, Math.floor(chatRight - chatWidth * 0.55))
+  const searchBottom = Math.min(chatBottom, Math.ceil(chatTop + chatHeight * 0.45))
+  const minimumPixelsPerRow = Math.max(12, Math.floor(chatWidth * 0.10))
+  const minimumSolidRows = Math.max(10, Math.floor(chatHeight * 0.012))
+  const requiredRightEdge = chatRight - chatWidth * 0.12
+  let runStart = -1
+  let runRows = 0
+  let runLeft = chatRight
+  let runRight = searchLeft
+  const candidates = []
+
+  const turquoise = offset => {
+    const r = raw.data[offset]
+    const g = raw.data[offset + 1]
+    const b = raw.data[offset + 2]
+    return r <= 80 && g >= 165 && g <= 230 && b >= 105 && b <= 195
+      && g - r >= 105 && g - b >= 22 && g - b <= 85
+  }
+
+  for (let y = chatTop; y < searchBottom; y += 1) {
+    let pixels = 0
+    let left = chatRight
+    let right = searchLeft
+    for (let x = searchLeft; x < chatRight; x += 1) {
+      const offset = (y * raw.width + x) * raw.channels
+      if (!turquoise(offset)) continue
+      pixels += 1
+      left = Math.min(left, x)
+      right = Math.max(right, x)
+    }
+    if (pixels >= minimumPixelsPerRow && right >= requiredRightEdge) {
+      if (runStart < 0) runStart = y
+      runRows += 1
+      runLeft = Math.min(runLeft, left)
+      runRight = Math.max(runRight, right)
+    } else {
+      if (runRows >= minimumSolidRows) {
+        candidates.push({
+          physicalBounds: [runLeft, runStart, runRight + 1, y],
+          solidRows: runRows,
+          fullyVisible: runStart > chatTop + Math.max(2, Math.floor(chatHeight * 0.004)),
+        })
+      }
+      runStart = -1
+      runRows = 0
+      runLeft = chatRight
+      runRight = searchLeft
+    }
+  }
+  if (runRows >= minimumSolidRows) {
+    candidates.push({
+      physicalBounds: [runLeft, runStart, runRight + 1, searchBottom],
+      solidRows: runRows,
+      fullyVisible: runStart > chatTop + Math.max(2, Math.floor(chatHeight * 0.004)),
+    })
+  }
+  const candidate = candidates[0]
+  return candidate ? { ...candidate, detectionMethod: 'adb_png_right_aligned_turquoise_bubble' } : null
+}
+
 async function imagesMeanDiff(first, second) {
   const a = await rawImage(first)
   const b = await rawImage(second)
@@ -738,4 +816,4 @@ async function textSeamsAreValid(frames, seams) {
   })
 }
 
-module.exports = { imageInfo, cropImage, imagesMeanDiff, imagesSimilar, imageRegionsStable, imageHasVisibleContent, imageLooksLoaded, alignCropToWhitespace, stackFramesInGroups, verifyFrameOverlap, verifyReplyFrameOverlap, verifyProductGridOverlap, analyzeReplyScrollEvidence, detectFloatingDownArrow, stitchFramesInGroups, stitchFramesWithOverlaps, stackFramesWithSeparators, stitchFramesWithTransitions, composeLongImages, cropFramesAtTextSeams, textSeamsAreValid }
+module.exports = { imageInfo, cropImage, imagesMeanDiff, imagesSimilar, imageRegionsStable, imageHasVisibleContent, imageLooksLoaded, detectXiaoheUserQuestionBubble, alignCropToWhitespace, stackFramesInGroups, verifyFrameOverlap, verifyReplyFrameOverlap, verifyProductGridOverlap, analyzeReplyScrollEvidence, detectFloatingDownArrow, stitchFramesInGroups, stitchFramesWithOverlaps, stackFramesWithSeparators, stitchFramesWithTransitions, composeLongImages, cropFramesAtTextSeams, textSeamsAreValid }

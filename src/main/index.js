@@ -138,6 +138,7 @@ ipcMain.handle('automation:start', async (event, payload) => {
   if (!payload.serial || !payload.outputDir) throw new Error('请选择 Android 设备和截图目录。')
   const entries = normalizeAutomationEntries(payload.entries)
   payload.entries = entries.map(entry => entry.id)
+  payload.newSession = true
   log('启动任务:', `serial=${payload.serial}`, `entries=${payload.entries.join(',')}`, `questions=${payload.questions.length}`, `output=${payload.outputDir}`)
   const runner = createRunner({
     root: appRoot(),
@@ -172,6 +173,7 @@ ipcMain.handle('automation:start', async (event, payload) => {
 ipcMain.handle('automation:retry-failed', async (event, payload) => {
   if (activeTask) throw new Error('已有任务正在执行。')
   if (!payload?.serial || !payload?.batchDirectory) throw new Error('请选择 Android 设备并保留原批次后再重试。')
+  payload.newSession = true
   log('重试失败题:', `serial=${payload.serial}`, `batch=${payload.batchDirectory}`)
   const runner = createRunner({
     root: appRoot(),

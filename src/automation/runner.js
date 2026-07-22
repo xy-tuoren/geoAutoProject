@@ -68,7 +68,7 @@ const {
 } = require('./capture-primitives')
 const { createCaptureStability } = require('./capture-stability')
 const { createReferenceProductCapture } = require('./reference-product-capture')
-const { createReplyCapture } = require('./reply-capture')
+const { createReplyCapture, miniAppQuestionFirstFrameCropBounds } = require('./reply-capture')
 const { createQuestionInputWorkflow } = require('./question-input-workflow')
 const { createDouyinSearchWorkflow } = require('./douyin-search-workflow')
 const { createToutiaoSearchWorkflow } = require('./toutiao-search-workflow')
@@ -237,12 +237,13 @@ function createRunner(options) {
     setFocusedText: 'ui.set_focused_text',
     press: 'ui.press',
     appStart: 'ui.app_start',
+    appStop: 'ui.app_stop',
   }
   const uiDetails = (method, args) => {
     if (method === 'click') return { x: Math.round(args[0]), y: Math.round(args[1]), coordinate_space: 'uiautomator2_logical_pixels' }
     if (method === 'sendKeys' || method === 'setFocusedText') return { text_length: String(args[0] || '').length, clear: Boolean(args[1]?.clear) }
     if (method === 'press') return { key: args[0] }
-    if (method === 'appStart') return { package: args[0] }
+    if (method === 'appStart' || method === 'appStop') return { package: args[0] }
     if (method === 'ocrRecognize') return { image_bytes: Buffer.isBuffer(args[0]) ? args[0].length : 0, region: args[1]?.region || null }
     return {}
   }
@@ -868,6 +869,12 @@ function createRunner(options) {
     captureFullReplyFrames,
     getActiveEntry: () => activeEntry,
     getActivePackageName: activePackageName,
+    restartDouyinEntry: async () => {
+      const entry = activeEntry
+      await ui.appStop(entry.packageName)
+      await sleep(800)
+      await prepareEntry(entry)
+    },
   })
 
 
@@ -891,6 +898,8 @@ function createRunner(options) {
 
   return {
     async captureCurrentAnswer(payload) {
+      throw new Error('当前已有回答采集模式已移除；请提供问题并由程序为每题新建会话后发送。')
+      /* c8 ignore start -- retained only to make old packaged callers fail closed during upgrade */
       activeSerial = payload.serial
       if ((payload.entries || []).length > 1) throw new Error('当前已有回答模式一次只能指定一个入口。')
       const requestedEntry = (payload.entries || []).length
@@ -938,7 +947,7 @@ function createRunner(options) {
             if (foreground?.package !== activePackageName() || !/MiniAppHostActivity/.test(foreground?.activity || '')) {
               throw new Error(`当前前台不是抖音小程序宿主页；本次未输入或发送（activity=${foreground?.activity || 'unknown'}）。`)
             }
-            captureMethod = () => captureDouyinMiniAppEntryAnswerFrames(xml, bounds)
+            captureMethod = () => captureDouyinMiniAppEntryAnswerFrames(xml, bounds, question)
           } else captureMethod = () => captureToutiaoFullAnswerFrames(xml, bounds)
         } else {
           const chatBounds = findChatScrollBounds(xml, size)
@@ -1098,8 +1107,10 @@ function createRunner(options) {
         await ui.stop().catch(() => {})
         await flushArtifactLogs().catch(() => {})
       }
+      /* c8 ignore stop */
     },
     async run(payload) {
+      payload = { ...payload, newSession: true }
       activeSerial = payload.serial
       payloadMaxLongImageHeight = maxLongImageHeight(payload.maxLongImageHeight)
       const entries = normalizeAutomationEntries(payload.entries)
@@ -1287,6 +1298,7 @@ function createRunner(options) {
       }
     },
     async retryFailedBatch(payload) {
+      payload = { ...payload, newSession: true }
       activeSerial = payload.serial
       payloadMaxLongImageHeight = maxLongImageHeight(payload.maxLongImageHeight)
       const batchDirectory = path.resolve(String(payload.batchDirectory || ''))
@@ -1514,6 +1526,7 @@ module.exports = {
   douyinMiniAppCaptureBounds,
   toutiaoGenericConsultationPage,
   miniAppReferenceProductsTrigger,
+  miniAppQuestionFirstFrameCropBounds,
   toutiaoHomeSearchBounds,
   toutiaoSearchInput,
   toutiaoSearchResultBelongsToQuestion,
