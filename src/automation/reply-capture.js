@@ -58,6 +58,10 @@ async function replyBoundaryFramesStable(first, second) {
   return comparisons.every(Boolean)
 }
 
+function feedbackPromptOverlaysChat(xml = '') {
+  return /对我的回答满意吗[？?]?/.test(xml) && xml.includes('期待你的反馈')
+}
+
 async function miniAppTopFramesStable(first, second) {
   const firstInfo = await imageInfo(first)
   const secondInfo = await imageInfo(second)
@@ -236,18 +240,23 @@ function createReplyCapture({
     let topConfirmationSwipes = 0
     const questionMatcher = singleQuestionSession ? questionVisibleExact : questionVisible
     if (singleQuestionSession) {
+      const feedbackPromptVisibleAtBottom = feedbackPromptOverlaysChat(completionConfirmation?.capture?.xml || '')
+      let topHierarchyRecoveryUsed = false
       const topBoundary = await scrollSingleQuestionSessionToTop({
         // Completion confirmation already owns a stable bottom snapshot. Reuse
         // it so return-to-top does not capture the same state twice.
         initialCapture: completionConfirmation?.capture || null,
         capture: () => waitForStableReplyRegion(navigationBounds),
-        swipeUp: attempt => swipeChat(navigationBounds, 'up', 0.78, {
-          maxFraction: 0.82,
-          speed: 4_000,
-          settle: 80,
-          xFraction: attempt % 2 ? 0.68 : 0.84,
-          eventDrivenSettle: true,
-        }),
+        swipeUp: (attempt, { unverifiedBoundaries = 0 } = {}) => {
+          const useSafeStart = feedbackPromptVisibleAtBottom || unverifiedBoundaries > 0
+          return swipeChat(navigationBounds, 'up', useSafeStart ? 0.55 : 0.78, {
+            maxFraction: useSafeStart ? 0.62 : 0.82,
+            speed: 4_000,
+            settle: 80,
+            xFraction: attempt % 2 ? 0.68 : 0.84,
+            eventDrivenSettle: true,
+          })
+        },
         settle: scroll => waitForStableReplyRegion(navigationBounds, 8_000, {
           settleSince: scroll.activityMark,
         }),
@@ -257,9 +266,13 @@ function createReplyCapture({
           question,
           chatBounds: navigationBounds,
           source,
-          recoverSource: recoverHierarchySource,
+          recoverSource: topHierarchyRecoveryUsed ? undefined : async () => {
+            topHierarchyRecoveryUsed = true
+            return recoverHierarchySource()
+          },
           log,
         }),
+        log,
       })
       topConfirmationSwipes = topBoundary.swipes
       topNavigationMethod = 'new_session_scroll_boundary_and_exact_question_bubble'

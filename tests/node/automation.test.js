@@ -20,6 +20,7 @@ const { douyinMiniAppAnswerContextEvidence, douyinSearchTargetStabilityBounds } 
 const { recoverTimedOutExistingReply } = require('../../src/automation/existing-reply-recovery')
 const { toutiaoAnswerRegionLooksReady } = require('../../src/automation/toutiao-search-workflow')
 const { createReferenceProductCapture } = require('../../src/automation/reference-product-capture')
+const { evidenceSummaryExpandedByOcr, evidenceSummaryOcrTarget } = require('../../src/automation/capture-primitives')
 
 const CHAT_BOUNDS = [0, 200, 1080, 1800]
 
@@ -986,14 +987,42 @@ test('新会话连续两次向上无变化且本题问题气泡完整可见才�
 })
 
 test('新会话画面连续无变化但未看到本题问题气泡时拒绝误判到顶', async () => {
+  const logs = []
+  let swipes = 0
   await assert.rejects(scrollSingleQuestionSessionToTop({
     initialCapture: { frame: '回答尾部', xml: '<tail />' },
     capture: async () => ({ frame: '回答尾部', xml: '<tail />' }),
-    swipeUp: async () => ({}),
+    swipeUp: async () => { swipes += 1; return {} },
     settle: async () => ({ frame: '回答尾部', xml: '<tail />' }),
     framesStable: async (before, after) => before === after,
     verifyTop: () => false,
+    log: message => logs.push(message),
   }), /未确认完整问题气泡/)
+  assert.equal(swipes, 4)
+  assert.match(logs.join('\n'), /切换安全回顶手势/)
+})
+
+test('回顶手势被底部浮层拦截后切换安全触点并继续确认真实顶部', async () => {
+  const frames = ['回答尾部', '回答尾部', '回答中部', '回答顶部', '回答顶部', '回答顶部']
+  const contexts = []
+  const logs = []
+  const result = await scrollSingleQuestionSessionToTop({
+    initialCapture: { frame: '回答尾部', xml: '<tail />' },
+    capture: async () => ({ frame: '不应读取' }),
+    swipeUp: async (attempt, context) => { contexts.push({ attempt, ...context }); return {} },
+    settle: async () => {
+      const frame = frames.shift()
+      return { frame, xml: frame === '回答顶部' ? '<question text="本题" />' : '<tail />' }
+    },
+    framesStable: async (before, after) => before === after,
+    verifyTop: capture => capture.xml.includes('text="本题"'),
+    log: message => logs.push(message),
+  })
+
+  assert.equal(result.confirmed, true)
+  assert.equal(result.swipes, 6)
+  assert.deepEqual(contexts.map(item => item.unverifiedBoundaries), [0, 0, 1, 1, 1, 1])
+  assert.match(logs.join('\n'), /切换安全回顶手势/)
 })
 
 test('回顶画面已静止但Compose层级暂时稀疏时有限重读确认本题气泡', async () => {
@@ -1088,7 +1117,11 @@ test('小荷新会话复用到底确认帧并用事件驱动稳定截图回顶',
   const top = await content.clone().extract({ left: 0, top: 0, width, height: viewportHeight }).png().toBuffer()
   const bottom = await content.clone().extract({ left: 0, top: shift, width, height: viewportHeight }).png().toBuffer()
   const full = await sharp({ create: { width, height: 500, channels: 3, background: '#f4f4f4' } }).png().toBuffer()
-  const bottomXml = '<hierarchy><node class="android.view.View" scrollable="true" visible-to-user="true" bounds="[0,80][240,440]" /></hierarchy>'
+  const bottomXml = '<hierarchy><node class="android.view.View" scrollable="true" visible-to-user="true" bounds="[0,80][240,440]">'
+    + '<node class="android.view.View" clickable="true" bounds="[7,80][233,130]">'
+    + '<node class="android.widget.TextView" text="对我的回答满意吗？" bounds="[12,84][228,105]" />'
+    + '<node class="android.widget.TextView" text="期待你的反馈" bounds="[12,106][228,126]" />'
+    + '</node></node></hierarchy>'
   const topXml = '<hierarchy><node class="android.view.View" scrollable="true" visible-to-user="true" bounds="[0,80][240,440]">'
     + '<node class="android.view.View" bounds="[12,120][228,200]"><node class="android.view.View" bounds="[120,122][220,198]">'
     + '<node class="android.widget.TextView" text="测试问题" content-desc="测试问题" visible-to-user="true" bounds="[122,140][218,180]" />'
@@ -1098,6 +1131,7 @@ test('小荷新会话复用到底确认帧并用事件驱动稳定截图回顶',
   let observedStableCaptures = 0
   let strictStableCaptures = 0
   const upwardOptions = []
+  const upwardFractions = []
   const capture = createReplyCapture({
     log: () => {},
     source: async () => currentXml(),
@@ -1120,9 +1154,12 @@ test('小荷新会话复用到底确认帧并用事件驱动稳定截图回顶',
       stable: true,
       attempts: 1,
     }),
-    swipeChat: async (_bounds, direction, _fraction, options = {}) => {
+    swipeChat: async (_bounds, direction, fraction, options = {}) => {
       position = direction === 'up' ? 'top' : 'bottom'
-      if (direction === 'up') upwardOptions.push(options)
+      if (direction === 'up') {
+        upwardOptions.push(options)
+        upwardFractions.push(fraction)
+      }
       return {
         distance: shift,
         canScrollMore: null,
@@ -1156,6 +1193,7 @@ test('小荷新会话复用到底确认帧并用事件驱动稳定截图回顶',
   assert.ok(observedStableCaptures >= 4)
   assert.ok(upwardOptions.length >= 3)
   assert.ok(upwardOptions.every(options => options.eventDrivenSettle === true))
+  assert.ok(upwardFractions.every(fraction => fraction === 0.55))
 })
 
 test('正式截图前以持续不可滚动和画面稳定确认回答已完整生成', async () => {
@@ -1306,6 +1344,49 @@ test('scrcpy确认静止后只截取一张无损PNG，并校验层级读取期�
   assert.deepEqual(events, ['noActivity', 'hierarchy', 'capture', 'noActivity'])
 })
 
+test('scrcpy静止后慢速ADB截图使用独立确认预算且不重复降级', async () => {
+  let now = 0
+  const events = []
+  const observer = {
+    waitForSettleSince: async (_mark, options) => {
+      events.push(['settle', options.hardTimeout])
+      now += 1_550
+      return { settled: true, activity: true }
+    },
+    waitForNoActivity: async options => {
+      events.push(['confirm', options])
+      now += options.minWaitMs
+      return { quiet: true }
+    },
+    mark: () => ({ activityFrameCount: 5 }),
+  }
+  const result = await captureStableObserved({
+    observer,
+    settleSince: { at: 0, activityFrameCount: 1 },
+    capture: async () => {
+      events.push(['capture'])
+      now += 1_500
+      return Buffer.from('png')
+    },
+    hierarchy: async () => {
+      events.push(['hierarchy'])
+      now += 200
+      return '<hierarchy />'
+    },
+    hierarchyLoading: () => false,
+    now: () => now,
+  }, 3_200)
+
+  assert.equal(result.stable, true)
+  assert.ok(result.frame.equals(Buffer.from('png')))
+  assert.deepEqual(events, [
+    ['settle', 2_500],
+    ['hierarchy'],
+    ['capture'],
+    ['confirm', { timeout: 800, quietMs: 300, minWaitMs: 300 }],
+  ])
+})
+
 test('滑动后的稳定截图优先使用活动标记快速判静止', async () => {
   const events = []
   const settleSince = { at: 1_000, frameCount: 4, activityFrameCount: 2 }
@@ -1372,7 +1453,7 @@ test('scrcpy二次确认失败时保留PNG给ADB夹心校验', async () => {
   })
 
   assert.equal(result.stable, false)
-  assert.equal(result.reason, 'confirmation_timeout')
+  assert.equal(result.reason, 'post_capture_confirmation_timeout')
   assert.ok(result.frame.equals(Buffer.from('png')))
   assert.equal(result.xml, '<hierarchy />')
   assert.deepEqual(events, ['hierarchy', 'capture'])
@@ -1431,7 +1512,7 @@ test('scrcpy全屏活动升级为严格区域校验，其他不确定结果使�
     requiredStablePairs: 2,
     activityObserved: true,
   })
-  assert.deepEqual(observerRegionFallbackOptions({ reason: 'confirmation_timeout', frame }), {
+  assert.deepEqual(observerRegionFallbackOptions({ reason: 'post_capture_confirmation_timeout', frame }), {
     initialFrame: frame,
     requiredStablePairs: 1,
     activityObserved: false,
@@ -1677,6 +1758,193 @@ test('OCR发现医学文献列表时确认资料已经展开且不再点击', as
   assert.equal(result.found, true)
   assert.equal(result.expanded, true)
   assert.equal(result.capture, capture)
+})
+
+test('新版参考医学文献标题可在不同物理与逻辑尺寸下严格识别', () => {
+  const recognition = {
+    image: { width: 1080, height: 2400 },
+    results: [
+      { text: '参考 1 篇医学文献', normalizedText: '参考1篇医学文献', confidence: 0.9999, bounds: [65, 818, 479, 868] },
+      { text: '正文中参考医学文献后再决定', normalizedText: '正文中参考医学文献后再决定', confidence: 0.9999, bounds: [65, 1100, 800, 1150] },
+    ],
+  }
+
+  const target = evidenceSummaryOcrTarget(recognition, { width: 720, height: 1600 }, [0, 222, 720, 1334])
+
+  assert.equal(target.text, '参考 1 篇医学文献')
+  assert.equal(target.variant, 'medical_references')
+  assert.deepEqual(target.logicalBounds, [43, 545, 319, 579])
+})
+
+test('历史药品题的参考药品说明书标题可识别并确认展开箭头', () => {
+  const recognition = {
+    image: { width: 1080, height: 2400 },
+    results: [
+      { text: '参考 1 篇药品说明书', normalizedText: '参考1篇药品说明书', confidence: 0.9997, bounds: [66, 375, 526, 426] },
+      { text: '正文提到药品说明书', normalizedText: '正文提到药品说明书', confidence: 0.999, bounds: [66, 800, 500, 850] },
+    ],
+  }
+  const target = evidenceSummaryOcrTarget(recognition, { width: 720, height: 1600 }, [0, 200, 720, 1400])
+
+  assert.equal(target.text, '参考 1 篇药品说明书')
+  assert.equal(target.variant, 'drug_instructions')
+  assert.deepEqual(target.logicalBounds, [44, 250, 351, 284])
+  assert.equal(evidenceSummaryExpandedByOcr(recognition, target), false)
+  assert.equal(evidenceSummaryExpandedByOcr(recognition, {
+    ...target,
+    normalizedText: '参考1篇药品说明书^',
+  }), true)
+})
+
+test('新版医学文献标题通过上箭头或同排文献来源确认已展开', () => {
+  const base = {
+    image: { width: 1080, height: 2400 },
+    results: [],
+  }
+  const arrowTarget = {
+    normalizedText: '参考1篇医学文献^',
+    variant: 'medical_references',
+    physicalBounds: [65, 818, 479, 868],
+  }
+  assert.equal(evidenceSummaryExpandedByOcr(base, arrowTarget), true)
+  assert.equal(evidenceSummaryExpandedByOcr(base, {
+    ...arrowTarget,
+    normalizedText: '参考1篇医学文献へ',
+  }), true)
+
+  const rowTarget = { ...arrowTarget, normalizedText: '参考1篇医学文献' }
+  const withCitationRow = {
+    ...base,
+    results: [
+      { text: '1. 肥胖患者的长期体重管理及药物临...', normalizedText: '1.肥胖患者的长期体重管理及药物临...', confidence: 0.991, bounds: [66, 903, 765, 951] },
+      { text: '中华医学会', normalizedText: '中华医学会', confidence: 0.999, bounds: [823, 903, 1017, 953] },
+    ],
+  }
+  assert.equal(evidenceSummaryExpandedByOcr(withCitationRow, rowTarget), true)
+})
+
+test('展开后标题单次OCR漏识别时沿用点击前位置复核紧邻文献行', async () => {
+  const recognitions = [
+    {
+      engine: 'rapidocr',
+      elapsedMs: 500,
+      image: { width: 1080, height: 2400 },
+      results: [{
+        text: '参考1篇医学文献',
+        normalizedText: '参考1篇医学文献',
+        confidence: 0.999,
+        bounds: [62, 705, 480, 761],
+      }],
+    },
+    {
+      engine: 'rapidocr',
+      elapsedMs: 500,
+      image: { width: 1080, height: 2400 },
+      results: [{
+        text: '1. 中国脑血管病临床管理指南（第2版）（节选）..',
+        normalizedText: '1.中国脑血管病临床管理指南(第2版)(节选)..',
+        confidence: 0.96153,
+        bounds: [63, 791, 1002, 842],
+      }],
+    },
+  ]
+  let taps = 0
+  const capture = { frame: Buffer.from('expanded'), xml: '<hierarchy />', stable: true }
+  const result = await prepareEmbeddedEvidence({
+    screenshot: async () => Buffer.from('screen'),
+    ocr: { recognize: async () => recognitions.shift() },
+    windowSize: async () => ({ width: 1080, height: 2400 }),
+    tap: async () => { taps += 1 },
+    delay: async () => {},
+    waitForStable: async () => capture,
+    log: () => {},
+  }, CHAT_BOUNDS)
+
+  assert.equal(result.expanded, true)
+  assert.equal(taps, 1)
+})
+
+test('OCR将文献标题与右侧来源标签合并为一行时仍确认资料已展开', () => {
+  const target = {
+    normalizedText: '参考1篇医学文献',
+    variant: 'medical_references',
+    physicalBounds: [62, 705, 481, 761],
+  }
+  const recognition = {
+    image: { width: 1080, height: 2400 },
+    results: [{
+      text: '1. Ramulus mori (Sangzhi) alkaloids reg... 国际研究',
+      normalizedText: '1.Ramulusmori(Sangzhi)alkaloidsreg...国际研究',
+      confidence: 0.9898,
+      bounds: [62, 792, 1018, 846],
+    }],
+  }
+
+  assert.equal(evidenceSummaryExpandedByOcr(recognition, target), true)
+})
+
+test('展开文献只有紧邻标题的整行截断条目时仍可确认', () => {
+  const target = {
+    normalizedText: '参考1篇医学文献',
+    variant: 'medical_references',
+    physicalBounds: [62, 705, 481, 761],
+  }
+  const recognition = {
+    image: { width: 1080, height: 2400 },
+    results: [{
+      text: '1. 中国脑血管病临床管理指南（第2版）（节选）..',
+      normalizedText: '1.中国脑血管病临床管理指南(第2版)(节选)..',
+      confidence: 0.96153,
+      bounds: [63, 791, 1002, 842],
+    }],
+  }
+
+  assert.equal(evidenceSummaryExpandedByOcr(recognition, target), true)
+})
+
+test('紧邻标题的超宽编号文献行即使OCR漏掉省略号仍可确认', () => {
+  const target = {
+    normalizedText: '参考1篇医学文献',
+    variant: 'medical_references',
+    physicalBounds: [63, 706, 478, 759],
+  }
+  const recognition = {
+    image: { width: 1080, height: 2400 },
+    results: [{
+      text: '1. 盐酸二甲双胍肠溶胶囊对患糖尿病肥胖症者ISI、',
+      normalizedText: '1.盐酸二甲双胍肠溶胶囊对患糖尿病肥胖症者ISI、',
+      confidence: 0.98302,
+      bounds: [66, 792, 983, 840],
+    }],
+  }
+
+  assert.equal(evidenceSummaryExpandedByOcr(recognition, target), true)
+})
+
+test('新版医学文献标题下只有编号回答正文时不能误判为展开', () => {
+  const target = {
+    normalizedText: '参考1篇医学文献',
+    variant: 'medical_references',
+    physicalBounds: [65, 818, 479, 868],
+  }
+  const recognition = {
+    image: { width: 1080, height: 2400 },
+    results: [
+      { text: '1. 先进行生活方式干预', normalizedText: '1.先进行生活方式干预', confidence: 0.999, bounds: [66, 930, 700, 980] },
+    ],
+  }
+  assert.equal(evidenceSummaryExpandedByOcr(recognition, target), false)
+
+  const laterTruncatedParagraph = {
+    ...recognition,
+    results: [{
+      text: '1. 先进行生活方式干预..',
+      normalizedText: '1.先进行生活方式干预..',
+      confidence: 0.999,
+      bounds: [66, 930, 700, 980],
+    }],
+  }
+  assert.equal(evidenceSummaryExpandedByOcr(laterTruncatedParagraph, target), false)
 })
 
 test('前两次文字点击未展开时重新OCR并在文字框内偏移点击，最多尝试三次', async () => {

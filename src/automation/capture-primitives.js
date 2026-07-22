@@ -101,15 +101,21 @@ async function scrollSingleQuestionSessionToTop({
   framesStable = imageRegionsStable,
   verifyTop,
   timeout = 120_000,
+  maxUnverifiedBoundaries = 2,
+  log = () => {},
   now = Date.now,
 }) {
   if (typeof verifyTop !== 'function') throw new Error('新会话回顶必须提供当前问题气泡校验。')
+  if (!Number.isInteger(maxUnverifiedBoundaries) || maxUnverifiedBoundaries < 1) {
+    throw new Error('回顶候选边界复核次数必须是正整数。')
+  }
   const deadline = now() + timeout
   let current = initialCapture ?? await capture()
   let unchangedCount = 0
+  let unverifiedBoundaries = 0
   let swipes = 0
   while (now() < deadline) {
-    const scroll = await swipeUp(swipes)
+    const scroll = await swipeUp(swipes, { unverifiedBoundaries })
     const next = await settle(scroll)
     swipes += 1
     if (await framesStable(current.frame, next.frame)) unchangedCount += 1
@@ -117,7 +123,13 @@ async function scrollSingleQuestionSessionToTop({
     current = next
     if (unchangedCount >= 2) {
       if (!await verifyTop(current)) {
-        throw new Error('新会话回顶画面已连续两次无变化，但未确认完整问题气泡且文字与本题一致；为避免把回答尾部误判为顶部，已停止截图。')
+        unverifiedBoundaries += 1
+        if (unverifiedBoundaries >= maxUnverifiedBoundaries) {
+          throw new Error('新会话回顶画面已连续两次无变化，但未确认完整问题气泡且文字与本题一致；为避免把回答尾部误判为顶部，已停止截图。')
+        }
+        unchangedCount = 0
+        log('waiting: 当前静止位置未确认本题完整问题气泡，可能有浮层拦截手势，切换安全回顶手势继续有限探测')
+        continue
       }
       return { capture: current, swipes, confirmed: true, questionVerified: true }
     }
@@ -169,15 +181,41 @@ async function buildReplyImages(frames, { transitions = [], maxHeight = DEFAULT_
   return composeLongImages(frames, { transitions, maxHeight, separatorHeight: 24 })
 }
 
+const EVIDENCE_SUMMARY_OCR_MATCHERS = [
+  {
+    variant: 'legacy_summary',
+    pattern: /^根据.{1,6}篇资料为(?:你|您)总结(?:[\^∧︿⌃˄∨⌄vVへ])?$/,
+  },
+  {
+    variant: 'medical_references',
+    pattern: /^参考[0-9一二三四五六七八九十百千万]{1,6}篇(?:医学)?文献(?:[\^∧︿⌃˄∨⌄vVへ])?$/,
+  },
+  {
+    variant: 'drug_instructions',
+    pattern: /^参考[0-9一二三四五六七八九十百千万]{1,6}篇药品说明书(?:[\^∧︿⌃˄∨⌄vVへ])?$/,
+  },
+]
+
+const EVIDENCE_EXPANDED_ARROW_PATTERN = /[\^∧︿⌃˄へ]$/
+
+function evidenceSummaryOcrVariant(text) {
+  return EVIDENCE_SUMMARY_OCR_MATCHERS.find(matcher => matcher.pattern.test(text))?.variant || null
+}
+
 function evidenceSummaryOcrTarget(recognition, logicalSize, chatBounds) {
   const maximumY = chatBounds[1] + (chatBounds[3] - chatBounds[1]) * 0.55
   return findOcrText(
     recognition,
-    item => /^根据.{1,6}篇资料为(?:你|您)总结$/.test(item.normalizedText),
+    item => Boolean(evidenceSummaryOcrVariant(item.normalizedText)),
     { minConfidence: 0.8 },
   ).map(item => {
     const logicalBounds = mapPhysicalBoundsToLogical(item.bounds, recognition.image, logicalSize)
-    return { ...item, physicalBounds: item.bounds, logicalBounds }
+    return {
+      ...item,
+      variant: evidenceSummaryOcrVariant(item.normalizedText),
+      physicalBounds: item.bounds,
+      logicalBounds,
+    }
   }).filter(item => {
     const [left, top, right, bottom] = item.logicalBounds
     const centerX = (left + right) / 2
@@ -189,12 +227,64 @@ function evidenceSummaryOcrTarget(recognition, logicalSize, chatBounds) {
 
 function evidenceSummaryExpandedByOcr(recognition, target) {
   if (!target) return false
+  if (target.variant !== 'legacy_summary' && EVIDENCE_EXPANDED_ARROW_PATTERN.test(target.normalizedText)) {
+    return true
+  }
   const maximumY = Math.min(
     recognition.image.height,
     target.physicalBounds[3] + recognition.image.height * 0.25,
   )
-  return findOcrText(recognition, /^医学文献$/, { minConfidence: 0.8 })
+  const legacyReferenceLabel = findOcrText(recognition, /^医学文献$/, { minConfidence: 0.8 })
     .some(item => item.bounds[1] >= target.physicalBounds[3] && item.bounds[1] <= maximumY)
+  if (legacyReferenceLabel) return true
+  if (!['medical_references', 'drug_instructions'].includes(target.variant)) return false
+
+  // Some OCR runs omit the small upward chevron. In that case require the
+  // expanded card's two-column citation row: a numbered title on the left and
+  // a source label on the same line to its right. Requiring both avoids
+  // mistaking a numbered answer paragraph below a collapsed card for evidence.
+  const citationMaximumY = Math.min(
+    recognition.image.height,
+    target.physicalBounds[3] + recognition.image.height * 0.08,
+  )
+  const citationRows = recognition.results.filter(item => item.confidence >= 0.8
+    && /^[0-9]{1,2}[.、．]/.test(item.normalizedText)
+    && item.bounds[1] >= target.physicalBounds[3]
+    && item.bounds[1] <= citationMaximumY)
+  // Another card variant has no source badge at all. Its citation is a
+  // full-width truncated row immediately below the title. Keep the vertical
+  // window narrow so a later numbered answer paragraph cannot qualify.
+  const immediateCitationMaximumY = target.physicalBounds[3] + recognition.image.height * 0.025
+  const truncatedCitationRow = citationRows.some(row => (
+    row.bounds[1] <= immediateCitationMaximumY
+    && /(?:\.{2,}|…{1,3})$/u.test(row.normalizedText)
+  ))
+  if (truncatedCitationRow) return true
+  // The UI can draw the trailing ellipsis separately from the text layer, so
+  // OCR may return only the numbered title. In that case a citation row still
+  // spans most of the card width and starts immediately below the heading.
+  const fullWidthCitationRow = citationRows.some(row => (
+    row.bounds[1] <= immediateCitationMaximumY
+    && row.bounds[2] - row.bounds[0] >= recognition.image.width * 0.78
+  ))
+  if (fullWidthCitationRow) return true
+  // RapidOCR sometimes merges the left citation title and the right source
+  // badge into one full-width line. The title is visually truncated before
+  // the badge, so require both a numbered row and an ellipsis followed by a
+  // short Chinese source label. A normal numbered answer paragraph does not
+  // satisfy this structure.
+  const mergedCitationRow = citationRows.some(row => (
+    /(?:\.{3}|…{1,3})[\p{Script=Han}]{2,12}$/u.test(row.normalizedText)
+  ))
+  if (mergedCitationRow) return true
+  return citationRows.some(row => recognition.results.some(source => {
+    if (source === row || source.confidence < 0.8 || source.bounds[0] < row.bounds[2]) return false
+    const verticalOverlap = Math.min(row.bounds[3], source.bounds[3]) - Math.max(row.bounds[1], source.bounds[1])
+    return verticalOverlap > 0
+      && source.normalizedText.length >= 2
+      && source.normalizedText.length <= 30
+      && !/^[0-9]{1,2}[.、．]/.test(source.normalizedText)
+  }))
 }
 
 function evidenceSummaryTextCenter(target) {
@@ -236,7 +326,10 @@ async function prepareEmbeddedEvidence({
     created_at: new Date().toISOString(),
     purpose: 'xiaohe_embedded_evidence',
     matcher: {
-      pattern: '^根据.{1,6}篇资料为(?:你|您)总结$',
+      patterns: EVIDENCE_SUMMARY_OCR_MATCHERS.map(item => ({
+        variant: item.variant,
+        pattern: item.pattern.source,
+      })),
       minimum_confidence: 0.8,
       top_chat_fraction: 0.55,
     },
@@ -247,7 +340,7 @@ async function prepareEmbeddedEvidence({
   }
   setLastOcrDiagnostic(diagnostic)
   log(target
-    ? `ocr: purpose=xiaohe_embedded_evidence outcome=matched engine=${recognition.engine} elapsed=${Math.round(recognition.elapsedMs)}ms confidence=${target.confidence.toFixed(3)} expanded=${alreadyExpanded} physical_bounds=${target.physicalBounds.join(',')} logical_bounds=${target.logicalBounds.join(',')}`
+    ? `ocr: purpose=xiaohe_embedded_evidence outcome=matched engine=${recognition.engine} elapsed=${Math.round(recognition.elapsedMs)}ms confidence=${target.confidence.toFixed(3)} variant=${target.variant} expanded=${alreadyExpanded} physical_bounds=${target.physicalBounds.join(',')} logical_bounds=${target.logicalBounds.join(',')}`
     : `ocr: purpose=xiaohe_embedded_evidence outcome=not_found engine=${recognition.engine} elapsed=${Math.round(recognition.elapsedMs)}ms lines=${recognition.results.length}`)
   if (!target) return { found: false, expanded: false, capture: await waitForStable(bounds) }
   if (alreadyExpanded) {
@@ -266,11 +359,18 @@ async function prepareEmbeddedEvidence({
     const panel = evidencePanelBounds(capture.xml || '', minimum)
     return Boolean(panel && panel[3] - panel[1] > viewportHeight * 0.16)
   }
-  const confirmByOcr = async attempt => {
+  const confirmByOcr = async (attempt, fallbackTarget) => {
     const confirmationFrame = await screenshot()
     const confirmation = await ocr.recognize(confirmationFrame, { minConfidence: 0.5 })
     const confirmationTarget = evidenceSummaryOcrTarget(confirmation, logicalSize, bounds)
-    const confirmationExpanded = evidenceSummaryExpandedByOcr(confirmation, confirmationTarget)
+    // Expansion can momentarily make the compact title harder to recognize.
+    // Keep using its pre-click physical bounds to verify an immediately
+    // adjacent citation row, without treating the missing title as permission
+    // to click again.
+    const confirmationExpanded = evidenceSummaryExpandedByOcr(
+      confirmation,
+      confirmationTarget || fallbackTarget,
+    )
     diagnostic.confirmations.push({ attempt, recognition: confirmation, target: confirmationTarget, expanded: confirmationExpanded })
     log(`ocr: purpose=xiaohe_embedded_evidence_confirmation attempt=${attempt} outcome=${confirmationExpanded ? 'expanded' : (confirmationTarget ? 'collapsed' : 'not_found')} engine=${confirmation.engine} elapsed=${Math.round(confirmation.elapsedMs)}ms`)
     return { target: confirmationTarget, expanded: confirmationExpanded }
@@ -283,13 +383,13 @@ async function prepareEmbeddedEvidence({
     capture = await clickTitle(currentTarget, attempt)
     expanded = hierarchyExpanded(capture)
     if (expanded) break
-    const confirmation = await confirmByOcr(attempt)
+    const confirmation = await confirmByOcr(attempt, currentTarget)
     expanded = confirmation.expanded
     if (expanded || !confirmation.target || attempt === 3) break
     log(`capture: 第${attempt}次点击后OCR仍确认引用资料处于折叠状态，重新识别位置后安全尝试第${attempt + 1}次标题文字点击`)
     currentTarget = confirmation.target
   }
-  if (!expanded) throw new Error('OCR已识别并尝试点击“根据…篇资料为你总结”最多三次，但未确认引用资料展开，已停止后续截图。')
+  if (!expanded) throw new Error('OCR已识别并尝试点击引用资料标题最多三次，但未确认资料展开，已停止后续截图。')
   log('capture: 引用资料已展开并合并到回答截图')
   return { found: true, expanded, capture }
 }
@@ -362,17 +462,18 @@ async function captureStableObserved({
   settleQuietMs = 650,
   settleConservativeQuietMs = 1_000,
   confirmQuietMs = 300,
+  postCaptureConfirmTimeout = 800,
 }, timeout = 3_500) {
   const deadline = now() + timeout
   const remaining = deadline - now()
   if (remaining <= 0) {
     return { frame: null, xml: '', stable: false, attempts: 0, observer: true, reason: 'observer_timeout' }
   }
-  // scrcpy is the cheap first gate, but it must leave time for XML and PNG
-  // confirmation after the quiet window; otherwise strict quiet checks turn
-  // into avoidable capture_deadline fallbacks.
-  const reserveForCapture = Math.min(1_000, Math.max(confirmQuietMs + 150, Math.floor(remaining * 0.28)))
-  const initialWaitTimeout = Math.max(1, Math.min(settleWaitCap, remaining - reserveForCapture))
+  // The caller's timeout bounds only the event-driven settle gate. Once that
+  // gate succeeds, hierarchy + lossless ADB PNG capture and the post-capture
+  // quiet check use their own bounded phases. Slow PNG transport must not
+  // consume the confirmation window and trigger a redundant sandwich capture.
+  const initialWaitTimeout = Math.max(1, Math.min(settleWaitCap, remaining))
   const settled = settleSince && typeof observer.waitForSettleSince === 'function'
     ? await observer.waitForSettleSince(settleSince, {
         hardTimeout: initialWaitTimeout,
@@ -399,33 +500,38 @@ async function captureStableObserved({
   const mark = observer.mark()
   const xml = await hierarchy()
   const frame = await capture()
-  const confirmRemaining = Math.min(800, deadline - now())
-  if (confirmRemaining <= 0) {
-    return { frame, xml, stable: false, attempts: 1, observer: true, reason: 'capture_deadline' }
+  const afterCaptureMark = observer.mark()
+  const activityFramesDuringCapture = (afterCaptureMark.activityFrameCount ?? afterCaptureMark.frameCount)
+    - (mark.activityFrameCount ?? mark.frameCount)
+  if (hierarchyLoading(xml)) {
+    return { frame, xml, stable: false, attempts: 1, observer: true, reason: 'hierarchy_loading' }
   }
+  if (activityFramesDuringCapture > 0) {
+    return { frame, xml, stable: false, attempts: 1, observer: true, reason: 'capture_activity' }
+  }
+  const confirmationTimeout = Math.max(confirmQuietMs, postCaptureConfirmTimeout)
   const confirmed = typeof observer.waitForNoActivity === 'function'
     ? await observer.waitForNoActivity({
-        timeout: confirmRemaining,
+        timeout: confirmationTimeout,
         quietMs: confirmQuietMs,
-        minWaitMs: Math.min(confirmQuietMs, confirmRemaining),
+        minWaitMs: confirmQuietMs,
       })
     : await observer.waitForQuiet({
-        timeout: confirmRemaining,
+        timeout: confirmationTimeout,
         windowMs: confirmQuietMs,
         quietMs: confirmQuietMs,
         maxFrames: 0,
-        minWaitMs: Math.min(confirmQuietMs, confirmRemaining),
+        minWaitMs: confirmQuietMs,
       })
   const currentMark = observer.mark()
-  const activityFramesDuringCapture = (currentMark.activityFrameCount ?? currentMark.frameCount)
+  const activityFramesThroughConfirmation = (currentMark.activityFrameCount ?? currentMark.frameCount)
     - (mark.activityFrameCount ?? mark.frameCount)
-  const loading = hierarchyLoading(xml)
-  if (!loading && confirmed.quiet && activityFramesDuringCapture === 0) {
+  if (confirmed.quiet && activityFramesThroughConfirmation === 0) {
     return { frame, xml, stable: true, attempts: 1, observer: true }
   }
-  const reason = loading
-    ? 'hierarchy_loading'
-    : (!confirmed.quiet ? 'confirmation_timeout' : 'capture_activity')
+  const reason = !confirmed.quiet
+    ? 'post_capture_confirmation_timeout'
+    : 'capture_activity'
   return { frame, xml, stable: false, attempts: 1, observer: true, reason }
 }
 
