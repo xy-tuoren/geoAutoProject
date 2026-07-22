@@ -278,6 +278,7 @@ function createReplyCapture({
     let topNavigationMethod = 'question_bubble'
     let topConfirmationSwipes = 0
     let visualQuestionBubble = null
+    let topCapture = null
     const questionMatcher = singleQuestionSession ? questionVisibleExact : questionVisible
     if (singleQuestionSession) {
       const feedbackPromptVisibleAtBottom = feedbackPromptOverlaysChat(completionConfirmation?.capture?.xml || '')
@@ -321,6 +322,7 @@ function createReplyCapture({
         log,
       })
       topConfirmationSwipes = topBoundary.swipes
+      topCapture = topBoundary.capture
       topNavigationMethod = visualQuestionBubble
         ? 'new_session_scroll_boundary_and_visual_question_bubble'
         : 'new_session_scroll_boundary_and_exact_question_bubble'
@@ -343,6 +345,7 @@ function createReplyCapture({
     const evidence = await prepareEmbeddedEvidence({
       screenshot,
       ocr,
+      initialCapture: topCapture,
       windowSize,
       setLastOcrDiagnostic,
       tap,

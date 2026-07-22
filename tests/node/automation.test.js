@@ -5,7 +5,7 @@ const os = require('node:os')
 const path = require('node:path')
 const sharp = require('sharp')
 const XLSX = require('xlsx')
-const { questionVisible, questionVisibleExact, currentQuestionText, replyTailOnScreen, findChatScrollBounds, validateCaptureViewport, floatingScrollControlBounds, replyCaptureBounds, estimateVerticalScrollShift, sharedTextSeam, evidencePanelBounds, visibleLabelBounds, visibleLabelBoundsList, boundsListForNodeAttribute, responseTimeoutRetryTarget, referenceProductsSection, referenceProductImageBounds } = require('../../src/automation/hierarchy')
+const { questionVisible, questionVisibleExact, currentQuestionText, replyTailOnScreen, findChatScrollBounds, validateCaptureViewport, floatingScrollControlBounds, replyCaptureBounds, estimateVerticalScrollShift, sharedTextSeam, evidencePanelBounds, evidencePanelBoundsForTitle, visibleLabelBounds, visibleLabelBoundsList, boundsListForNodeAttribute, responseTimeoutRetryTarget, referenceProductsSection, referenceProductImageBounds } = require('../../src/automation/hierarchy')
 const { stackFramesInGroups, verifyFrameOverlap, verifyReplyFrameOverlap, verifyProductGridOverlap, imageInfo, imageLooksLoaded, imagesSimilar, imageRegionsStable, detectXiaoheUserQuestionBubble, alignCropToWhitespace, stitchFramesWithOverlaps, composeLongImages, cropFramesAtTextSeams } = require('../../src/automation/images')
 const { createBatchDirectory, questionArtifactDirectory, batchArtifactDirectories, entryArtifactDirectories, questionArtifactDirectories } = require('../../src/automation/utils')
 const { EventLog, classifyAutomationLog } = require('../../src/automation/event-log')
@@ -20,7 +20,7 @@ const { createDouyinSearchWorkflow, DouyinMiniAppNetworkError, douyinMiniAppAnsw
 const { recoverTimedOutExistingReply } = require('../../src/automation/existing-reply-recovery')
 const { toutiaoAnswerRegionLooksReady } = require('../../src/automation/toutiao-search-workflow')
 const { createReferenceProductCapture } = require('../../src/automation/reference-product-capture')
-const { evidenceSummaryExpandedByOcr, evidenceSummaryOcrTarget } = require('../../src/automation/capture-primitives')
+const { evidenceSummaryExpandedByOcr, evidenceSummaryOcrTarget, suspiciousEvidenceSummaryOcrTarget } = require('../../src/automation/capture-primitives')
 
 const CHAT_BOUNDS = [0, 200, 1080, 1800]
 
@@ -1970,25 +1970,91 @@ test('新 Android 层级格式可识别引用资料卡和推荐药品入口', ()
   assert.deepEqual(visibleLabelBounds(xml, '推荐药品'), [60, 1100, 300, 1180])
 })
 
+test('引用资料高度比较只绑定包含OCR标题的同一张Compose卡片', () => {
+  const xml = '<hierarchy>'
+    + '<androidx.compose.ui.viewinterop.ViewFactoryHolder class="androidx.compose.ui.viewinterop.ViewFactoryHolder" displayed="true" bounds="[20,250][1060,620]" />'
+    + '<androidx.compose.ui.viewinterop.ViewFactoryHolder class="androidx.compose.ui.viewinterop.ViewFactoryHolder" displayed="true" bounds="[40,680][1040,840]" />'
+    + '</hierarchy>'
+  assert.deepEqual(evidencePanelBoundsForTitle(xml, [64, 705, 774, 761], 100), [40, 680, 1040, 840])
+})
+
+test('同一卡片明显增高且标题变为上箭头时确认引用资料展开', async () => {
+  const collapsedXml = '<hierarchy><androidx.compose.ui.viewinterop.ViewFactoryHolder class="androidx.compose.ui.viewinterop.ViewFactoryHolder" displayed="true" bounds="[40,340][1040,470]" /></hierarchy>'
+  const expandedXml = '<hierarchy><androidx.compose.ui.viewinterop.ViewFactoryHolder class="androidx.compose.ui.viewinterop.ViewFactoryHolder" displayed="true" bounds="[40,340][1040,780]" /></hierarchy>'
+  const collapsed = {
+    engine: 'rapidocr', elapsedMs: 400, image: { width: 1080, height: 2400 },
+    results: [{ text: '参考9篇医学文献和1篇药品说明v', normalizedText: '参考9篇医学文献和1篇药品说明v', confidence: 0.999, bounds: [64, 375, 774, 427] }],
+  }
+  const expanded = {
+    ...collapsed,
+    results: [{ text: '参考9篇医学文献和1篇药品说明^', normalizedText: '参考9篇医学文献和1篇药品说明^', confidence: 0.999, bounds: [64, 375, 774, 427] }],
+  }
+  const recognitions = [collapsed, expanded]
+  let taps = 0
+  const result = await prepareEmbeddedEvidence({
+    screenshot: async () => Buffer.from('confirmation'),
+    ocr: { recognize: async () => recognitions.shift() },
+    windowSize: async () => ({ width: 1080, height: 2400 }),
+    initialCapture: { frame: Buffer.from('initial'), xml: collapsedXml },
+    tap: async () => { taps += 1 },
+    delay: async () => {},
+    waitForStable: async () => ({ frame: Buffer.from('expanded'), xml: expandedXml }),
+    log: () => {},
+  }, CHAT_BOUNDS)
+  assert.equal(result.expanded, true)
+  assert.equal(taps, 1)
+})
+
+test('卡片增高但没有上箭头或紧邻资料行时不能误判展开', async () => {
+  const collapsedXml = '<hierarchy><androidx.compose.ui.viewinterop.ViewFactoryHolder class="androidx.compose.ui.viewinterop.ViewFactoryHolder" displayed="true" bounds="[40,340][1040,470]" /></hierarchy>'
+  const expandedXml = '<hierarchy><androidx.compose.ui.viewinterop.ViewFactoryHolder class="androidx.compose.ui.viewinterop.ViewFactoryHolder" displayed="true" bounds="[40,340][1040,780]" /></hierarchy>'
+  const recognition = {
+    engine: 'rapidocr', elapsedMs: 400, image: { width: 1080, height: 2400 },
+    results: [{ text: '参考9篇医学文献和1篇药品说明v', normalizedText: '参考9篇医学文献和1篇药品说明v', confidence: 0.999, bounds: [64, 375, 774, 427] }],
+  }
+  let taps = 0
+  await assert.rejects(prepareEmbeddedEvidence({
+    screenshot: async () => Buffer.from('confirmation'),
+    ocr: { recognize: async () => recognition },
+    windowSize: async () => ({ width: 1080, height: 2400 }),
+    initialCapture: { frame: Buffer.from('initial'), xml: collapsedXml },
+    tap: async () => { taps += 1 },
+    delay: async () => {},
+    waitForStable: async () => ({ frame: Buffer.from('grown'), xml: expandedXml }),
+    log: () => {},
+  }, CHAT_BOUNDS), /未确认资料展开/)
+  assert.equal(taps, 3)
+})
+
 test('到顶后通过OCR识别引用资料标题并按物理与逻辑尺寸映射点击', async () => {
   const expanded = '<hierarchy><androidx.compose.ui.viewinterop.ViewFactoryHolder class="androidx.compose.ui.viewinterop.ViewFactoryHolder" displayed="true" bounds="[0,466][720,900]" /></hierarchy>'
   const events = []
   const capture = { frame: Buffer.from('expanded-frame'), xml: expanded, stable: true }
+  let ocrCalls = 0
   const result = await prepareEmbeddedEvidence({
     screenshot: async () => { events.push('screenshot'); return Buffer.from('raw-screen') },
     ocr: {
       recognize: async () => {
         events.push('ocr')
+        ocrCalls += 1
         return {
           engine: 'rapidocr',
           elapsedMs: 420,
           image: { width: 1080, height: 2400 },
-          results: [{
-            text: '根据 3 篇资料为你总结',
-            normalizedText: '根据3篇资料为你总结',
-            confidence: 0.998,
-            bounds: [90, 600, 600, 660],
-          }],
+          results: [
+            {
+              text: '根据 3 篇资料为你总结',
+              normalizedText: '根据3篇资料为你总结',
+              confidence: 0.998,
+              bounds: [90, 600, 600, 660],
+            },
+            ...(ocrCalls > 1 ? [{
+              text: '医学文献',
+              normalizedText: '医学文献',
+              confidence: 0.999,
+              bounds: [850, 700, 1000, 750],
+            }] : []),
+          ],
         }
       },
     },
@@ -2007,6 +2073,8 @@ test('到顶后通过OCR识别引用资料标题并按物理与逻辑尺寸映�
     ['tap', 230, 420],
     'delay',
     'stable',
+    'screenshot',
+    'ocr',
   ])
   assert.equal(result.found, true)
   assert.equal(result.expanded, true)
@@ -2076,6 +2144,48 @@ test('历史药品题的参考药品说明书标题可识别并确认展开箭�
     ...target,
     normalizedText: '参考1篇药品说明书^',
   }), true)
+})
+
+test('真实组合标题可识别医学文献与药品说明并拒绝相似正文', () => {
+  const recognition = {
+    image: { width: 1080, height: 2400 },
+    results: [
+      { text: '参考9篇医学文献和1篇药品说明', normalizedText: '参考9篇医学文献和1篇药品说明', confidence: 0.99978, bounds: [64, 375, 774, 427] },
+      { text: '参考9篇医学文献说明该药可用于急救', normalizedText: '参考9篇医学文献说明该药可用于急救', confidence: 0.999, bounds: [64, 600, 900, 652] },
+    ],
+  }
+  const target = evidenceSummaryOcrTarget(recognition, { width: 1080, height: 2400 }, CHAT_BOUNDS)
+  assert.equal(target.text, '参考9篇医学文献和1篇药品说明')
+  assert.equal(target.variant, 'combined_references_and_instructions')
+
+  const bodyOnly = { ...recognition, results: [recognition.results[1]] }
+  assert.equal(evidenceSummaryOcrTarget(bodyOnly, { width: 1080, height: 2400 }, CHAT_BOUNDS), null)
+  assert.equal(suspiciousEvidenceSummaryOcrTarget(bodyOnly, { width: 1080, height: 2400 }, CHAT_BOUNDS)?.text, recognition.results[1].text)
+})
+
+test('顶部出现未知参考资料标题时明确失败而不是按无引用继续截图', async () => {
+  const recognition = {
+    engine: 'rapidocr',
+    elapsedMs: 500,
+    image: { width: 1080, height: 2400 },
+    results: [{
+      text: '参考3篇医学文献另附1项药品信息',
+      normalizedText: '参考3篇医学文献另附1项药品信息',
+      confidence: 0.999,
+      bounds: [64, 375, 900, 427],
+    }],
+  }
+  let stableCalls = 0
+  await assert.rejects(prepareEmbeddedEvidence({
+    screenshot: async () => Buffer.from('screen'),
+    ocr: { recognize: async () => recognition },
+    windowSize: async () => ({ width: 1080, height: 2400 }),
+    tap: async () => {},
+    delay: async () => {},
+    waitForStable: async () => { stableCalls += 1; return { frame: Buffer.from('stable'), xml: '' } },
+    log: () => {},
+  }, CHAT_BOUNDS), /疑似引用资料标题/)
+  assert.equal(stableCalls, 0)
 })
 
 test('新版医学文献标题通过上箭头或同排文献来源确认已展开', () => {
@@ -2241,11 +2351,23 @@ test('前两次文字点击未展开时重新OCR并在文字框内偏移点击�
   const collapsedXml = '<hierarchy><androidx.compose.ui.viewinterop.ViewFactoryHolder class="androidx.compose.ui.viewinterop.ViewFactoryHolder" displayed="true" bounds="[0,700][1080,850]" /></hierarchy>'
   const expandedXml = '<hierarchy><androidx.compose.ui.viewinterop.ViewFactoryHolder class="androidx.compose.ui.viewinterop.ViewFactoryHolder" displayed="true" bounds="[0,700][1080,1300]" /></hierarchy>'
   const taps = []
+  let ocrReads = 0
   let stableReads = 0
   const randomValues = [0, 1, 1, 0]
   const result = await prepareEmbeddedEvidence({
     screenshot: async () => Buffer.from('raw-screen'),
-    ocr: { recognize: async () => collapsedRecognition },
+    ocr: {
+      recognize: async () => {
+        ocrReads += 1
+        return ocrReads < 4 ? collapsedRecognition : {
+          ...collapsedRecognition,
+          results: [
+            ...collapsedRecognition.results,
+            { text: '医学文献', normalizedText: '医学文献', confidence: 0.999, bounds: [850, 800, 1000, 850] },
+          ],
+        }
+      },
+    },
     windowSize: async () => ({ width: 1080, height: 2400 }),
     tap: async (x, y) => { taps.push([x, y]) },
     random: () => randomValues.shift(),

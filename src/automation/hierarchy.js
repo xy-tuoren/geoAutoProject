@@ -355,14 +355,36 @@ function boundsForNodeAttribute(xml, attribute, value) {
   return boundsListForNodeAttribute(xml, attribute, value)[0] || null
 }
 
-function evidencePanelBounds(xml, minimumHeight = 1) {
+function evidencePanelBoundsList(xml, minimumHeight = 1) {
   return iterNodes(xml).flatMap(attrs => {
     if (nodeAttr(attrs, 'class') !== 'androidx.compose.ui.viewinterop.ViewFactoryHolder' || !nodeIsVisible(attrs)) return []
     const bounds = nodeAttr(attrs, 'bounds')
     if (!bounds) return []
     const parsed = parseBounds(bounds)
     return parsed[3] - parsed[1] >= minimumHeight ? [parsed] : []
-  })[0] || null
+  })
+}
+
+function evidencePanelBounds(xml, minimumHeight = 1) {
+  return evidencePanelBoundsList(xml, minimumHeight)[0] || null
+}
+
+function evidencePanelBoundsForTitle(xml, titleBounds, minimumHeight = 1) {
+  if (!Array.isArray(titleBounds) || titleBounds.length !== 4) return null
+  const titleWidth = Math.max(1, titleBounds[2] - titleBounds[0])
+  const titleCenterY = (titleBounds[1] + titleBounds[3]) / 2
+  const candidates = evidencePanelBoundsList(xml, minimumHeight).filter(panel => {
+    const horizontalOverlap = Math.min(panel[2], titleBounds[2]) - Math.max(panel[0], titleBounds[0])
+    return horizontalOverlap >= titleWidth * 0.5
+      && titleCenterY >= panel[1]
+      && titleCenterY <= panel[3]
+  })
+  candidates.sort((first, second) => {
+    const firstArea = (first[2] - first[0]) * (first[3] - first[1])
+    const secondArea = (second[2] - second[0]) * (second[3] - second[1])
+    return firstArea - secondArea
+  })
+  return candidates[0] || null
 }
 
 function panelIsClipped(panel, chatBounds, tolerance = 8) { return panel[1] <= chatBounds[1] + tolerance || panel[3] >= chatBounds[3] - tolerance }
@@ -532,4 +554,4 @@ function referenceProductImageBounds(xml, listBounds) {
   return { mode, bounds, expectedCards: inferred.length, explicitImages: explicit.length }
 }
 
-module.exports = { LOADING_TEXT_MARKERS, iterNodes, nodeAttr, nodeIsVisible, parseBounds, boundsIntersect, boundsCenterY, estimateVerticalScrollShift, sharedTextSeam, hierarchyIsLoading, visibleNodesWithLabel, replyTailOnScreen, questionVisible, questionVisibleExact, currentQuestionText, findChatScrollBounds, validateCaptureViewport, floatingScrollControlBounds, replyCaptureBounds, visibleLabelBounds, visibleLabelBoundsList, responseTimeoutRetryTarget, boundsForNodeAttribute, boundsListForNodeAttribute, evidencePanelBounds, panelIsClipped, evidenceMinimumHeight, parseNodeTree, referenceProductsSection, referenceProductImageBounds }
+module.exports = { LOADING_TEXT_MARKERS, iterNodes, nodeAttr, nodeIsVisible, parseBounds, boundsIntersect, boundsCenterY, estimateVerticalScrollShift, sharedTextSeam, hierarchyIsLoading, visibleNodesWithLabel, replyTailOnScreen, questionVisible, questionVisibleExact, currentQuestionText, findChatScrollBounds, validateCaptureViewport, floatingScrollControlBounds, replyCaptureBounds, visibleLabelBounds, visibleLabelBoundsList, responseTimeoutRetryTarget, boundsForNodeAttribute, boundsListForNodeAttribute, evidencePanelBounds, evidencePanelBoundsList, evidencePanelBoundsForTitle, panelIsClipped, evidenceMinimumHeight, parseNodeTree, referenceProductsSection, referenceProductImageBounds }

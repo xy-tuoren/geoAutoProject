@@ -1,5 +1,5 @@
 const { sleep } = require('./utils')
-const { evidencePanelBounds, evidenceMinimumHeight, questionVisibleExact } = require('./hierarchy')
+const { evidencePanelBoundsForTitle, evidenceMinimumHeight, questionVisibleExact } = require('./hierarchy')
 const { imageRegionsStable, composeLongImages } = require('./images')
 const { findOcrText, mapPhysicalBoundsToLogical } = require('./ocr')
 
@@ -186,63 +186,89 @@ async function buildReplyImages(frames, { transitions = [], maxHeight = DEFAULT_
   return composeLongImages(frames, { transitions, maxHeight, separatorHeight: 24 })
 }
 
+const EVIDENCE_NUMBER_PATTERN = '[0-9零〇○一二三四五六七八九十百千万两]+'
+const EVIDENCE_UNIT_PATTERN = '(?:篇|份|条|部|本|项|则)'
+const EVIDENCE_TYPE_PATTERN = '(?:药品说明书|药品说明|说明书|医学文献|临床文献|文献|医学资料|临床指南|指南|专家共识)'
+const EVIDENCE_ITEM_PATTERN = `${EVIDENCE_NUMBER_PATTERN}${EVIDENCE_UNIT_PATTERN}${EVIDENCE_TYPE_PATTERN}`
+const EVIDENCE_SEPARATOR_PATTERN = '(?:以及|和|及|与|、|\\+|&)'
+const EVIDENCE_ARROW_PATTERN = '[\\^∧︿⌃˄∨⌄vVへ]?'
+const STRUCTURED_EVIDENCE_TITLE_PATTERN = new RegExp(
+  `^参考${EVIDENCE_ITEM_PATTERN}(?:${EVIDENCE_SEPARATOR_PATTERN}${EVIDENCE_ITEM_PATTERN})*${EVIDENCE_ARROW_PATTERN}$`,
+)
+
 const EVIDENCE_SUMMARY_OCR_MATCHERS = [
   {
     variant: 'legacy_summary',
     pattern: /^根据.{1,6}篇资料为(?:你|您)总结(?:[\^∧︿⌃˄∨⌄vVへ])?$/,
   },
-  {
-    variant: 'medical_references',
-    pattern: /^参考[0-9一二三四五六七八九十百千万]{1,6}篇(?:医学)?文献(?:[\^∧︿⌃˄∨⌄vVへ])?$/,
-  },
-  {
-    variant: 'drug_instructions',
-    pattern: /^参考[0-9一二三四五六七八九十百千万]{1,6}篇药品说明书(?:[\^∧︿⌃˄∨⌄vVへ])?$/,
-  },
+  { variant: 'structured_references', pattern: STRUCTURED_EVIDENCE_TITLE_PATTERN },
 ]
 
 const EVIDENCE_EXPANDED_ARROW_PATTERN = /[\^∧︿⌃˄へ]$/
 
 function evidenceSummaryOcrVariant(text) {
-  return EVIDENCE_SUMMARY_OCR_MATCHERS.find(matcher => matcher.pattern.test(text))?.variant || null
+  const matched = EVIDENCE_SUMMARY_OCR_MATCHERS.find(matcher => matcher.pattern.test(text))?.variant || null
+  if (matched !== 'structured_references') return matched
+  const hasInstructions = /(?:药品说明书|药品说明|说明书)/.test(text)
+  const hasReferences = /(?:医学文献|临床文献|文献|医学资料|临床指南|指南|专家共识)/.test(text)
+  if (hasInstructions && hasReferences) return 'combined_references_and_instructions'
+  return hasInstructions ? 'drug_instructions' : 'medical_references'
+}
+
+function evidenceSummaryLooksSuspicious(text) {
+  return /^参考/.test(text)
+    && new RegExp(`${EVIDENCE_NUMBER_PATTERN}${EVIDENCE_UNIT_PATTERN}`).test(text)
+    && /(?:文献|资料|指南|共识|说明)/.test(text)
+    && !evidenceSummaryOcrVariant(text)
+}
+
+function evidenceSummaryOcrCandidates(recognition, logicalSize, chatBounds, predicate) {
+  const maximumY = chatBounds[1] + (chatBounds[3] - chatBounds[1]) * 0.55
+  return findOcrText(recognition, item => predicate(item.normalizedText), { minConfidence: 0.8 })
+    .map(item => {
+      const logicalBounds = mapPhysicalBoundsToLogical(item.bounds, recognition.image, logicalSize)
+      return { ...item, physicalBounds: item.bounds, logicalBounds }
+    }).filter(item => {
+      const [left, top, right, bottom] = item.logicalBounds
+      const centerX = (left + right) / 2
+      const centerY = (top + bottom) / 2
+      return centerX >= chatBounds[0] && centerX <= chatBounds[2]
+        && centerY >= chatBounds[1] && centerY <= maximumY
+    }).sort((first, second) => first.logicalBounds[1] - second.logicalBounds[1] || second.confidence - first.confidence)
 }
 
 function evidenceSummaryOcrTarget(recognition, logicalSize, chatBounds) {
-  const maximumY = chatBounds[1] + (chatBounds[3] - chatBounds[1]) * 0.55
-  return findOcrText(
+  const item = evidenceSummaryOcrCandidates(
     recognition,
-    item => Boolean(evidenceSummaryOcrVariant(item.normalizedText)),
-    { minConfidence: 0.8 },
-  ).map(item => {
-    const logicalBounds = mapPhysicalBoundsToLogical(item.bounds, recognition.image, logicalSize)
-    return {
-      ...item,
-      variant: evidenceSummaryOcrVariant(item.normalizedText),
-      physicalBounds: item.bounds,
-      logicalBounds,
-    }
-  }).filter(item => {
-    const [left, top, right, bottom] = item.logicalBounds
-    const centerX = (left + right) / 2
-    const centerY = (top + bottom) / 2
-    return centerX >= chatBounds[0] && centerX <= chatBounds[2]
-      && centerY >= chatBounds[1] && centerY <= maximumY
-  }).sort((first, second) => first.logicalBounds[1] - second.logicalBounds[1] || second.confidence - first.confidence)[0] || null
+    logicalSize,
+    chatBounds,
+    text => Boolean(evidenceSummaryOcrVariant(text)),
+  )[0]
+  return item ? { ...item, variant: evidenceSummaryOcrVariant(item.normalizedText) } : null
 }
 
-function evidenceSummaryExpandedByOcr(recognition, target) {
-  if (!target) return false
-  if (target.variant !== 'legacy_summary' && EVIDENCE_EXPANDED_ARROW_PATTERN.test(target.normalizedText)) {
-    return true
-  }
+function suspiciousEvidenceSummaryOcrTarget(recognition, logicalSize, chatBounds) {
+  return evidenceSummaryOcrCandidates(recognition, logicalSize, chatBounds, evidenceSummaryLooksSuspicious)[0] || null
+}
+
+function evidenceSummaryExpansionSignals(recognition, target) {
+  if (!target) return { expanded: false, arrowExpanded: false, citationRows: false, legacyReferenceLabel: false }
+  const arrowExpanded = target.variant !== 'legacy_summary'
+    && EVIDENCE_EXPANDED_ARROW_PATTERN.test(target.normalizedText)
   const maximumY = Math.min(
     recognition.image.height,
     target.physicalBounds[3] + recognition.image.height * 0.25,
   )
   const legacyReferenceLabel = findOcrText(recognition, /^医学文献$/, { minConfidence: 0.8 })
     .some(item => item.bounds[1] >= target.physicalBounds[3] && item.bounds[1] <= maximumY)
-  if (legacyReferenceLabel) return true
-  if (!['medical_references', 'drug_instructions'].includes(target.variant)) return false
+  if (!['medical_references', 'drug_instructions', 'combined_references_and_instructions'].includes(target.variant)) {
+    return {
+      expanded: arrowExpanded || legacyReferenceLabel,
+      arrowExpanded,
+      citationRows: false,
+      legacyReferenceLabel,
+    }
+  }
 
   // Some OCR runs omit the small upward chevron. In that case require the
   // expanded card's two-column citation row: a numbered title on the left and
@@ -264,7 +290,9 @@ function evidenceSummaryExpandedByOcr(recognition, target) {
     row.bounds[1] <= immediateCitationMaximumY
     && /(?:\.{2,}|…{1,3})$/u.test(row.normalizedText)
   ))
-  if (truncatedCitationRow) return true
+  if (truncatedCitationRow) {
+    return { expanded: true, arrowExpanded, citationRows: true, legacyReferenceLabel }
+  }
   // The UI can draw the trailing ellipsis separately from the text layer, so
   // OCR may return only the numbered title. In that case a citation row still
   // spans most of the card width and starts immediately below the heading.
@@ -272,7 +300,9 @@ function evidenceSummaryExpandedByOcr(recognition, target) {
     row.bounds[1] <= immediateCitationMaximumY
     && row.bounds[2] - row.bounds[0] >= recognition.image.width * 0.78
   ))
-  if (fullWidthCitationRow) return true
+  if (fullWidthCitationRow) {
+    return { expanded: true, arrowExpanded, citationRows: true, legacyReferenceLabel }
+  }
   // RapidOCR sometimes merges the left citation title and the right source
   // badge into one full-width line. The title is visually truncated before
   // the badge, so require both a numbered row and an ellipsis followed by a
@@ -281,8 +311,10 @@ function evidenceSummaryExpandedByOcr(recognition, target) {
   const mergedCitationRow = citationRows.some(row => (
     /(?:\.{3}|…{1,3})[\p{Script=Han}]{2,12}$/u.test(row.normalizedText)
   ))
-  if (mergedCitationRow) return true
-  return citationRows.some(row => recognition.results.some(source => {
+  if (mergedCitationRow) {
+    return { expanded: true, arrowExpanded, citationRows: true, legacyReferenceLabel }
+  }
+  const pairedCitationRow = citationRows.some(row => recognition.results.some(source => {
     if (source === row || source.confidence < 0.8 || source.bounds[0] < row.bounds[2]) return false
     const verticalOverlap = Math.min(row.bounds[3], source.bounds[3]) - Math.max(row.bounds[1], source.bounds[1])
     return verticalOverlap > 0
@@ -290,6 +322,17 @@ function evidenceSummaryExpandedByOcr(recognition, target) {
       && source.normalizedText.length <= 30
       && !/^[0-9]{1,2}[.、．]/.test(source.normalizedText)
   }))
+  const hasCitationRows = pairedCitationRow
+  return {
+    expanded: arrowExpanded || legacyReferenceLabel || hasCitationRows,
+    arrowExpanded,
+    citationRows: hasCitationRows,
+    legacyReferenceLabel,
+  }
+}
+
+function evidenceSummaryExpandedByOcr(recognition, target) {
+  return evidenceSummaryExpansionSignals(recognition, target).expanded
 }
 
 function evidenceSummaryTextCenter(target) {
@@ -315,6 +358,7 @@ async function prepareEmbeddedEvidence({
   screenshot,
   ocr,
   windowSize,
+  initialCapture = null,
   setLastOcrDiagnostic = () => {},
   tap,
   random = Math.random,
@@ -323,9 +367,13 @@ async function prepareEmbeddedEvidence({
   log,
 }, bounds) {
   const minimum = evidenceMinimumHeight(bounds)
-  const [frame, logicalSize] = await Promise.all([screenshot(), windowSize()])
+  const [frame, logicalSize] = await Promise.all([
+    initialCapture?.frame ? Promise.resolve(initialCapture.frame) : screenshot(),
+    windowSize(),
+  ])
   const recognition = await ocr.recognize(frame, { minConfidence: 0.5 })
   const target = evidenceSummaryOcrTarget(recognition, logicalSize, bounds)
+  const suspiciousTarget = target ? null : suspiciousEvidenceSummaryOcrTarget(recognition, logicalSize, bounds)
   const alreadyExpanded = evidenceSummaryExpandedByOcr(recognition, target)
   const diagnostic = {
     created_at: new Date().toISOString(),
@@ -341,9 +389,14 @@ async function prepareEmbeddedEvidence({
     logical_size: logicalSize,
     recognition,
     target: target ? { ...target, alreadyExpanded, textCenter: evidenceSummaryTextCenter(target) } : null,
+    suspicious_target: suspiciousTarget,
     confirmations: [],
   }
   setLastOcrDiagnostic(diagnostic)
+  if (suspiciousTarget) {
+    log(`ocr: purpose=xiaohe_embedded_evidence outcome=suspicious_unmatched engine=${recognition.engine} elapsed=${Math.round(recognition.elapsedMs)}ms text=${suspiciousTarget.text}`)
+    throw new Error(`OCR识别到疑似引用资料标题“${suspiciousTarget.text}”，但当前语法无法安全确认；为避免漏展开已停止本题。`)
+  }
   log(target
     ? `ocr: purpose=xiaohe_embedded_evidence outcome=matched engine=${recognition.engine} elapsed=${Math.round(recognition.elapsedMs)}ms confidence=${target.confidence.toFixed(3)} variant=${target.variant} expanded=${alreadyExpanded} physical_bounds=${target.physicalBounds.join(',')} logical_bounds=${target.logicalBounds.join(',')}`
     : `ocr: purpose=xiaohe_embedded_evidence outcome=not_found engine=${recognition.engine} elapsed=${Math.round(recognition.elapsedMs)}ms lines=${recognition.results.length}`)
@@ -353,6 +406,27 @@ async function prepareEmbeddedEvidence({
     return { found: true, expanded: true, capture: await waitForStable(bounds) }
   }
   const viewportHeight = bounds[3] - bounds[1]
+  const baselinePanel = evidencePanelBoundsForTitle(initialCapture?.xml || '', target.logicalBounds, minimum)
+  const titleHeight = target.logicalBounds[3] - target.logicalBounds[1]
+  diagnostic.baseline_panel = baselinePanel
+  const panelGrowth = (capture, currentTarget) => {
+    const panel = evidencePanelBoundsForTitle(capture.xml || '', currentTarget.logicalBounds, minimum)
+    const minimumGrowth = Math.max(titleHeight * 2, viewportHeight * 0.06)
+    if (!baselinePanel || !panel) return { confirmed: false, baseline: baselinePanel, panel, minimumGrowth }
+    const horizontalOverlap = Math.min(baselinePanel[2], panel[2]) - Math.max(baselinePanel[0], panel[0])
+    const baselineWidth = Math.max(1, baselinePanel[2] - baselinePanel[0])
+    const topTolerance = Math.max(titleHeight, viewportHeight * 0.03)
+    const growth = (panel[3] - panel[1]) - (baselinePanel[3] - baselinePanel[1])
+    return {
+      confirmed: horizontalOverlap >= baselineWidth * 0.7
+        && Math.abs(panel[1] - baselinePanel[1]) <= topTolerance
+        && growth >= minimumGrowth,
+      baseline: baselinePanel,
+      panel,
+      growth,
+      minimumGrowth,
+    }
+  }
   const clickTitle = async (currentTarget, attempt) => {
     const point = evidenceSummaryTapPoint(currentTarget, attempt, random)
     log(`capture: OCR识别到“${currentTarget.text}”，点击标题文字展开引用资料（${Math.round(point[0])},${Math.round(point[1])}，第${attempt}次）`)
@@ -360,25 +434,37 @@ async function prepareEmbeddedEvidence({
     await delay(800)
     return waitForStable(bounds)
   }
-  const hierarchyExpanded = capture => {
-    const panel = evidencePanelBounds(capture.xml || '', minimum)
-    return Boolean(panel && panel[3] - panel[1] > viewportHeight * 0.16)
-  }
-  const confirmByOcr = async (attempt, fallbackTarget) => {
+  const confirmByOcr = async (attempt, fallbackTarget, growth) => {
     const confirmationFrame = await screenshot()
     const confirmation = await ocr.recognize(confirmationFrame, { minConfidence: 0.5 })
     const confirmationTarget = evidenceSummaryOcrTarget(confirmation, logicalSize, bounds)
+    const suspiciousConfirmationTarget = confirmationTarget
+      ? null
+      : suspiciousEvidenceSummaryOcrTarget(confirmation, logicalSize, bounds)
+    if (suspiciousConfirmationTarget) {
+      throw new Error(`点击引用资料后OCR识别到疑似标题“${suspiciousConfirmationTarget.text}”，但无法安全确认其结构；已停止本题。`)
+    }
     // Expansion can momentarily make the compact title harder to recognize.
     // Keep using its pre-click physical bounds to verify an immediately
     // adjacent citation row, without treating the missing title as permission
     // to click again.
-    const confirmationExpanded = evidenceSummaryExpandedByOcr(
+    const signals = evidenceSummaryExpansionSignals(
       confirmation,
       confirmationTarget || fallbackTarget,
     )
-    diagnostic.confirmations.push({ attempt, recognition: confirmation, target: confirmationTarget, expanded: confirmationExpanded })
+    const confirmationExpanded = signals.citationRows
+      || signals.legacyReferenceLabel
+      || (growth.confirmed && signals.arrowExpanded)
+    diagnostic.confirmations.push({
+      attempt,
+      recognition: confirmation,
+      target: confirmationTarget,
+      expansion_signals: signals,
+      panel_growth: growth,
+      expanded: confirmationExpanded,
+    })
     log(`ocr: purpose=xiaohe_embedded_evidence_confirmation attempt=${attempt} outcome=${confirmationExpanded ? 'expanded' : (confirmationTarget ? 'collapsed' : 'not_found')} engine=${confirmation.engine} elapsed=${Math.round(confirmation.elapsedMs)}ms`)
-    return { target: confirmationTarget, expanded: confirmationExpanded }
+    return { target: confirmationTarget, expanded: confirmationExpanded, signals }
   }
 
   let capture = null
@@ -386,9 +472,8 @@ async function prepareEmbeddedEvidence({
   let currentTarget = target
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     capture = await clickTitle(currentTarget, attempt)
-    expanded = hierarchyExpanded(capture)
-    if (expanded) break
-    const confirmation = await confirmByOcr(attempt, currentTarget)
+    const growth = panelGrowth(capture, currentTarget)
+    const confirmation = await confirmByOcr(attempt, currentTarget, growth)
     expanded = confirmation.expanded
     if (expanded || !confirmation.target || attempt === 3) break
     log(`capture: 第${attempt}次点击后OCR仍确认引用资料处于折叠状态，重新识别位置后安全尝试第${attempt + 1}次标题文字点击`)
@@ -562,6 +647,7 @@ module.exports = {
   confirmPersistentScrollEnd,
   buildReplyImages,
   evidenceSummaryOcrTarget,
+  suspiciousEvidenceSummaryOcrTarget,
   evidenceSummaryExpandedByOcr,
   evidenceSummaryTextCenter,
   prepareEmbeddedEvidence,
