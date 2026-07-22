@@ -1,4 +1,4 @@
-# geo数据采集
+# 莲藕医生AI监测系统（数据采集）
 
 这是一个通过桌面应用批量控制 Android 手机提问、截图和归档的工具。界面、任务调度和截图引擎使用 Electron/Node.js；UI 层级、点击和输入使用内置的 Python uiautomator2 sidecar，ADB 负责无损截图、长图滚动和设备连接，scrcpy server 只提供低分辨率画面活动信号以减少重复截图。对于画面已经显示、但 WebView/Canvas 未向 UI 层级暴露的文字，sidecar 还提供本地 RapidOCR 通用识别能力。
 

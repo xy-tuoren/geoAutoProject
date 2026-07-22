@@ -33,7 +33,7 @@
   },
   "build": {
     "appId": "com.xiaohe.questionautomation",
-    "productName": "geo数据采集",
+    "productName": "莲藕医生AI监测系统（数据采集）",
     "asar": false,
     "files": [
       "src/**/*",

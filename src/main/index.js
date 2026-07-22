@@ -70,7 +70,7 @@ function createWindow() {
     minWidth: 960,
     minHeight: 700,
     backgroundColor: '#eef2f8',
-    title: 'geo数据采集',
+    title: '莲藕医生AI监测系统（数据采集）',
     icon: windowIconPath(),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -221,7 +221,7 @@ ipcMain.handle('log:export', async (_event, text) => {
   const stampName = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
   const result = await dialog.showSaveDialog({
     title: '导出执行日志',
-    defaultPath: path.join(app.getPath('documents'), `geo数据采集日志_${stampName}.txt`),
+    defaultPath: path.join(app.getPath('documents'), `莲藕医生AI监测系统（数据采集）日志_${stampName}.txt`),
     filters: [{ name: '文本文件', extensions: ['txt'] }],
   })
   if (result.canceled || !result.filePath) {
