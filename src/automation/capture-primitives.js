@@ -282,6 +282,18 @@ function evidenceSummaryExpansionSignals(recognition, target) {
     && /^[0-9]{1,2}[.、．]/.test(item.normalizedText)
     && item.bounds[1] >= target.physicalBounds[3]
     && item.bounds[1] <= citationMaximumY)
+  // Combined cards can render a single-column bibliography without a source
+  // badge, and RapidOCR may omit the tiny upward chevron. In that layout the
+  // first two sequential citation rows start immediately below the title.
+  // Requiring both 1 and 2 in this narrow strip keeps a later numbered answer
+  // list from being mistaken for an expanded evidence panel.
+  const immediateSequentialMaximumY = target.physicalBounds[3] + recognition.image.height * 0.08
+  const immediateCitationNumbers = citationRows
+    .filter(row => row.bounds[1] <= immediateSequentialMaximumY)
+    .map(row => Number(row.normalizedText.match(/^([0-9]{1,2})[.、．]/)?.[1]))
+    .filter(Number.isFinite)
+  const denseSequentialCitationRows = immediateCitationNumbers.includes(1)
+    && immediateCitationNumbers.includes(2)
   // Another card variant has no source badge at all. Its citation is a
   // full-width truncated row immediately below the title. Keep the vertical
   // window narrow so a later numbered answer paragraph cannot qualify.
@@ -301,6 +313,9 @@ function evidenceSummaryExpansionSignals(recognition, target) {
     && row.bounds[2] - row.bounds[0] >= recognition.image.width * 0.78
   ))
   if (fullWidthCitationRow) {
+    return { expanded: true, arrowExpanded, citationRows: true, legacyReferenceLabel }
+  }
+  if (denseSequentialCitationRows) {
     return { expanded: true, arrowExpanded, citationRows: true, legacyReferenceLabel }
   }
   // RapidOCR sometimes merges the left citation title and the right source
@@ -340,18 +355,18 @@ function evidenceSummaryTextCenter(target) {
   return [(left + right) / 2, (top + bottom) / 2]
 }
 
-function evidenceSummaryTapPoint(target, attempt, random = Math.random) {
+function evidenceSummaryTapPoint(target, attempt, logicalSize) {
   if (attempt === 1) return evidenceSummaryTextCenter(target)
   const [left, top, right, bottom] = target.logicalBounds
-  const width = right - left
   const height = bottom - top
-  // Keep retries inside the OCR glyph box while avoiding the exact point that
-  // Compose may have transiently ignored. The two retry bands sit on opposite
-  // sides of the title centre and scale with the current logical resolution.
-  const horizontalStart = attempt === 2 ? 0.38 : 0.52
-  const horizontalFraction = horizontalStart + random() * 0.1
-  const verticalFraction = 0.42 + random() * 0.16
-  return [left + width * horizontalFraction, top + height * verticalFraction]
+  // Some OCR engines include the trailing chevron in the title line bounds,
+  // while others stop at the last text glyph. Cover both representations with
+  // two same-row retries: first the right edge itself, then one scaled chevron
+  // width beyond it. Neither point can drift vertically into answer content.
+  if (attempt === 2) return [right - height * 0.3, (top + bottom) / 2]
+  const chevronOffset = Math.max(height * 0.7, logicalSize.width * 0.015)
+  const safeRight = logicalSize.width * 0.94
+  return [Math.min(right + chevronOffset, safeRight), (top + bottom) / 2]
 }
 
 async function prepareEmbeddedEvidence({
@@ -361,7 +376,6 @@ async function prepareEmbeddedEvidence({
   initialCapture = null,
   setLastOcrDiagnostic = () => {},
   tap,
-  random = Math.random,
   delay,
   waitForStable,
   log,
@@ -428,8 +442,13 @@ async function prepareEmbeddedEvidence({
     }
   }
   const clickTitle = async (currentTarget, attempt) => {
-    const point = evidenceSummaryTapPoint(currentTarget, attempt, random)
-    log(`capture: OCR识别到“${currentTarget.text}”，点击标题文字展开引用资料（${Math.round(point[0])},${Math.round(point[1])}，第${attempt}次）`)
+    const point = evidenceSummaryTapPoint(currentTarget, attempt, logicalSize)
+    const targetPart = attempt === 1 ? '标题文字' : '标题右侧展开箭头'
+    // A visually static Compose card can still be completing its nested-scroll
+    // gesture state. The same uiautomator2 tap becomes reliable after this
+    // short interaction-settle window; it applies only when evidence exists.
+    await delay(1600)
+    log(`capture: OCR识别到“${currentTarget.text}”，点击${targetPart}展开引用资料（${Math.round(point[0])},${Math.round(point[1])}，第${attempt}次）`)
     await tap(point[0], point[1])
     await delay(800)
     return waitForStable(bounds)

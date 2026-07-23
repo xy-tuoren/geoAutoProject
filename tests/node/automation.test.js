@@ -2070,6 +2070,7 @@ test('到顶后通过OCR识别引用资料标题并按物理与逻辑尺寸映�
     'screenshot',
     'ocr',
     ['diagnostic', [60, 400, 400, 440]],
+    'delay',
     ['tap', 230, 420],
     'delay',
     'stable',
@@ -2294,6 +2295,22 @@ test('展开文献只有紧邻标题的整行截断条目时仍可确认', () =>
   assert.equal(evidenceSummaryExpandedByOcr(recognition, target), true)
 })
 
+test('组合引用卡无来源标签且OCR漏掉上箭头时用紧邻连续文献行确认展开', () => {
+  const target = {
+    normalizedText: '参考9篇医学文献和1篇药品说明',
+    variant: 'combined_references_and_instructions',
+    physicalBounds: [63, 707, 802, 760],
+  }
+  const recognition = {
+    image: { width: 1080, height: 2400 },
+    results: [
+      { text: '1. 糖尿病心肌病病证结合诊疗指南', normalizedText: '1.糖尿病心肌病病证结合诊疗指南', confidence: 0.999, bounds: [63, 792, 700, 840] },
+      { text: '2. 急性心肌梗死中西医结合诊疗指南', normalizedText: '2.急性心肌梗死中西医结合诊疗指南', confidence: 0.999, bounds: [63, 855, 740, 903] },
+    ],
+  }
+  assert.equal(evidenceSummaryExpandedByOcr(recognition, target), true)
+})
+
 test('紧邻标题的超宽编号文献行即使OCR漏掉省略号仍可确认', () => {
   const target = {
     normalizedText: '参考1篇医学文献',
@@ -2339,7 +2356,7 @@ test('新版医学文献标题下只有编号回答正文时不能误判为展�
   assert.equal(evidenceSummaryExpandedByOcr(laterTruncatedParagraph, target), false)
 })
 
-test('前两次文字点击未展开时重新OCR并在文字框内偏移点击，最多尝试三次', async () => {
+test('首次文字点击未展开时覆盖OCR包含或不包含右侧箭头的两种边界', async () => {
   const collapsedRecognition = {
     engine: 'rapidocr',
     elapsedMs: 300,
@@ -2353,7 +2370,6 @@ test('前两次文字点击未展开时重新OCR并在文字框内偏移点击�
   const taps = []
   let ocrReads = 0
   let stableReads = 0
-  const randomValues = [0, 1, 1, 0]
   const result = await prepareEmbeddedEvidence({
     screenshot: async () => Buffer.from('raw-screen'),
     ocr: {
@@ -2370,7 +2386,6 @@ test('前两次文字点击未展开时重新OCR并在文字框内偏移点击�
     },
     windowSize: async () => ({ width: 1080, height: 2400 }),
     tap: async (x, y) => { taps.push([x, y]) },
-    random: () => randomValues.shift(),
     delay: async () => {},
     waitForStable: async () => ({
       frame: Buffer.from('frame'),
@@ -2382,10 +2397,8 @@ test('前两次文字点击未展开时重新OCR并在文字框内偏移点击�
 
   assert.equal(taps.length, 3)
   assert.deepEqual(taps[0], [300, 725])
-  assert.ok(taps[1][0] >= 60 + 480 * 0.38 && taps[1][0] <= 60 + 480 * 0.48)
-  assert.ok(taps[1][1] >= 700 + 50 * 0.42 && taps[1][1] <= 700 + 50 * 0.58)
-  assert.ok(taps[2][0] >= 60 + 480 * 0.52 && taps[2][0] <= 60 + 480 * 0.62)
-  assert.ok(taps[2][1] >= 700 + 50 * 0.42 && taps[2][1] <= 700 + 50 * 0.58)
+  assert.deepEqual(taps[1], [525, 725])
+  assert.deepEqual(taps[2], [575, 725])
   assert.notDeepEqual(taps[1], taps[0])
   assert.notDeepEqual(taps[2], taps[0])
   assert.equal(result.expanded, true)
