@@ -1220,6 +1220,7 @@ test('ADB原图可在不同竖屏尺寸识别一行和三行小荷用户问题�
     const detected = await detectXiaoheUserQuestionBubble(frame, [0, 333, 1080, 2001], { width: 1080, height: 2400 })
     assert.ok(detected, `${sample.width}x${sample.height} 应识别用户气泡`)
     assert.equal(detected.detectionMethod, 'adb_png_right_aligned_turquoise_bubble')
+    assert.equal(detected.fullyVisible, true)
   }
 })
 
@@ -1236,17 +1237,45 @@ test('ADB原图不会把右侧绿色小按钮或正文彩色细线误判为问�
   assert.equal(await detectXiaoheUserQuestionBubble(frame, [0, 333, 1080, 2001], { width: 1080, height: 2400 }), null)
 })
 
-test('问题气泡贴住聊天区上边界时仍可证明到顶并记录未完全露出', async () => {
+test('ADB原图不会把聊天区边界处的绿色气泡残片误判为完整问题气泡', async () => {
+  const frame = await sharp({ create: { width: 1080, height: 2400, channels: 3, background: '#ffffff' } })
+    .composite([{
+      input: await sharp({ create: { width: 525, height: 13, channels: 3, background: '#00c090' } }).png().toBuffer(),
+      left: 486,
+      top: 333,
+    }])
+    .png()
+    .toBuffer()
+  assert.equal(await detectXiaoheUserQuestionBubble(frame, [0, 333, 1080, 2001], { width: 1080, height: 2400 }), null)
+})
+
+test('完整问题气泡跨出Compose聊天区上边界时仍记录为完全露出', async () => {
   const frame = await sharp({ create: { width: 1080, height: 2400, channels: 3, background: '#ffffff' } })
     .composite([{
       input: await sharp({ create: { width: 430, height: 120, channels: 3, background: '#00c090' } }).png().toBuffer(),
       left: 590,
-      top: 333,
+      top: 210,
     }])
     .png()
     .toBuffer()
   const detected = await detectXiaoheUserQuestionBubble(frame, [0, 333, 1080, 2001], { width: 1080, height: 2400 })
   assert.ok(detected)
+  assert.deepEqual(detected.physicalBounds, [590, 210, 1020, 330])
+  assert.equal(detected.fullyVisible, true)
+})
+
+test('问题气泡被物理可见区域上边界裁切时记录为未完全露出', async () => {
+  const frame = await sharp({ create: { width: 1080, height: 2400, channels: 3, background: '#ffffff' } })
+    .composite([{
+      input: await sharp({ create: { width: 430, height: 120, channels: 3, background: '#00c090' } }).png().toBuffer(),
+      left: 590,
+      top: 40,
+    }])
+    .png()
+    .toBuffer()
+  const detected = await detectXiaoheUserQuestionBubble(frame, [0, 333, 1080, 2001], { width: 1080, height: 2400 })
+  assert.ok(detected)
+  assert.equal(detected.physicalBounds[1], Math.floor(2400 * 0.032))
   assert.equal(detected.fullyVisible, false)
 })
 

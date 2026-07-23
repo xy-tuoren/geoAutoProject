@@ -36,12 +36,17 @@ async function detectXiaoheUserQuestionBubble(image, chatBounds, logicalSize) {
   if (chatWidth < 1 || chatHeight < 1) return null
 
   // Xiaohe renders the sole user message as a solid turquoise bubble aligned
-  // to the right. Only inspect the upper part of the chat viewport so blue
-  // links and answer controls cannot be mistaken for the question bubble.
+  // to the right. Compose can report an inner scroll bound whose top cuts
+  // through that visually complete bubble, so inspect a bounded area above
+  // chatTop as well. Keep clear of the physical status bar and only inspect
+  // the upper part of the viewport so answer links cannot be mistaken for it.
+  const visibleSafeTop = Math.max(0, Math.floor(raw.height * 0.032))
+  const searchTop = visibleSafeTop
   const searchLeft = Math.max(chatLeft, Math.floor(chatRight - chatWidth * 0.55))
   const searchBottom = Math.min(chatBottom, Math.ceil(chatTop + chatHeight * 0.45))
   const minimumPixelsPerRow = Math.max(12, Math.floor(chatWidth * 0.10))
   const minimumSolidRows = Math.max(10, Math.floor(chatHeight * 0.012))
+  const minimumFullBubbleRows = Math.max(18, Math.floor(raw.height * 0.015))
   const requiredRightEdge = chatRight - chatWidth * 0.12
   let runStart = -1
   let runRows = 0
@@ -57,7 +62,19 @@ async function detectXiaoheUserQuestionBubble(image, chatBounds, logicalSize) {
       && g - r >= 105 && g - b >= 22 && g - b <= 85
   }
 
-  for (let y = chatTop; y < searchBottom; y += 1) {
+  const addCandidate = (bottom) => {
+    if (runRows < minimumSolidRows) return
+    const edgeMargin = Math.max(2, Math.floor(raw.height * 0.002))
+    candidates.push({
+      physicalBounds: [runLeft, runStart, runRight + 1, bottom],
+      solidRows: runRows,
+      fullyVisible: runRows >= minimumFullBubbleRows
+        && runStart > visibleSafeTop + edgeMargin
+        && bottom < chatBottom - edgeMargin,
+    })
+  }
+
+  for (let y = searchTop; y < searchBottom; y += 1) {
     let pixels = 0
     let left = chatRight
     let right = searchLeft
@@ -74,27 +91,21 @@ async function detectXiaoheUserQuestionBubble(image, chatBounds, logicalSize) {
       runLeft = Math.min(runLeft, left)
       runRight = Math.max(runRight, right)
     } else {
-      if (runRows >= minimumSolidRows) {
-        candidates.push({
-          physicalBounds: [runLeft, runStart, runRight + 1, y],
-          solidRows: runRows,
-          fullyVisible: runStart > chatTop + Math.max(2, Math.floor(chatHeight * 0.004)),
-        })
-      }
+      addCandidate(y)
       runStart = -1
       runRows = 0
       runLeft = chatRight
       runRight = searchLeft
     }
   }
-  if (runRows >= minimumSolidRows) {
-    candidates.push({
-      physicalBounds: [runLeft, runStart, runRight + 1, searchBottom],
-      solidRows: runRows,
-      fullyVisible: runStart > chatTop + Math.max(2, Math.floor(chatHeight * 0.004)),
-    })
-  }
-  const candidate = candidates[0]
+  addCandidate(searchBottom)
+  const candidate = candidates
+    .filter(item => item.solidRows >= minimumFullBubbleRows)
+    .sort((a, b) => {
+      const areaA = (a.physicalBounds[2] - a.physicalBounds[0]) * a.solidRows
+      const areaB = (b.physicalBounds[2] - b.physicalBounds[0]) * b.solidRows
+      return areaB - areaA
+    })[0]
   return candidate ? { ...candidate, detectionMethod: 'adb_png_right_aligned_turquoise_bubble' } : null
 }
 
