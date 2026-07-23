@@ -381,10 +381,11 @@ async function prepareEmbeddedEvidence({
   log,
 }, bounds) {
   const minimum = evidenceMinimumHeight(bounds)
-  const [frame, logicalSize] = await Promise.all([
-    initialCapture?.frame ? Promise.resolve(initialCapture.frame) : screenshot(),
-    windowSize(),
-  ])
+  // Top-navigation captures are cropped to the chat viewport. OCR coordinates
+  // from those frames cannot be used as full-screen uiautomator2 tap points.
+  // Always take one full-screen ADB PNG here so recognition and tapping share
+  // an explicit, identical coordinate space.
+  const [frame, logicalSize] = await Promise.all([screenshot(), windowSize()])
   const recognition = await ocr.recognize(frame, { minConfidence: 0.5 })
   const target = evidenceSummaryOcrTarget(recognition, logicalSize, bounds)
   const suspiciousTarget = target ? null : suspiciousEvidenceSummaryOcrTarget(recognition, logicalSize, bounds)
@@ -471,9 +472,13 @@ async function prepareEmbeddedEvidence({
       confirmation,
       confirmationTarget || fallbackTarget,
     )
+    // An explicit upward chevron is the card's own expanded-state indicator.
+    // Do not require Compose hierarchy growth as a second condition: this UI
+    // frequently exposes no stable card node, and another retry would toggle
+    // an already-expanded card closed again.
     const confirmationExpanded = signals.citationRows
       || signals.legacyReferenceLabel
-      || (growth.confirmed && signals.arrowExpanded)
+      || signals.arrowExpanded
     diagnostic.confirmations.push({
       attempt,
       recognition: confirmation,

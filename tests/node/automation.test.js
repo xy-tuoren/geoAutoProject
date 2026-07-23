@@ -2005,6 +2005,59 @@ test('同一卡片明显增高且标题变为上箭头时确认引用资料展�
   assert.equal(taps, 1)
 })
 
+test('初始聊天区裁剪帧不参与引用点击坐标换算', async () => {
+  const collapsed = {
+    engine: 'rapidocr', elapsedMs: 300, image: { width: 1080, height: 2400 },
+    results: [{ text: '参考1篇医学文献', normalizedText: '参考1篇医学文献', confidence: 0.999, bounds: [64, 707, 480, 760] }],
+  }
+  const expanded = {
+    ...collapsed,
+    results: [{ text: '参考1篇医学文献^', normalizedText: '参考1篇医学文献^', confidence: 0.999, bounds: [64, 707, 500, 760] }],
+  }
+  const recognitions = [collapsed, expanded]
+  const taps = []
+  const result = await prepareEmbeddedEvidence({
+    screenshot: async () => Buffer.from('full-screen'),
+    ocr: { recognize: async () => recognitions.shift() },
+    windowSize: async () => ({ width: 1080, height: 2400 }),
+    initialCapture: { frame: Buffer.from('cropped-chat-frame'), xml: '<hierarchy />' },
+    tap: async (x, y) => { taps.push([x, y]) },
+    delay: async () => {},
+    waitForStable: async () => ({ frame: Buffer.from('stable'), xml: '<hierarchy />' }),
+    log: () => {},
+  }, CHAT_BOUNDS)
+
+  assert.deepEqual(taps, [[272, 733.5]])
+  assert.equal(result.expanded, true)
+})
+
+test('明确上箭头在Compose卡片层级缺失时也立即确认展开', async () => {
+  const recognitions = [
+    {
+      engine: 'rapidocr', elapsedMs: 300, image: { width: 1080, height: 2400 },
+      results: [{ text: '参考1篇医学文献', normalizedText: '参考1篇医学文献', confidence: 0.999, bounds: [64, 707, 480, 760] }],
+    },
+    {
+      engine: 'rapidocr', elapsedMs: 300, image: { width: 1080, height: 2400 },
+      results: [{ text: '参考1篇医学文献^', normalizedText: '参考1篇医学文献^', confidence: 0.999, bounds: [64, 707, 500, 760] }],
+    },
+  ]
+  let taps = 0
+  const result = await prepareEmbeddedEvidence({
+    screenshot: async () => Buffer.from('full-screen'),
+    ocr: { recognize: async () => recognitions.shift() },
+    windowSize: async () => ({ width: 1080, height: 2400 }),
+    initialCapture: { frame: Buffer.from('cropped'), xml: '<hierarchy />' },
+    tap: async () => { taps += 1 },
+    delay: async () => {},
+    waitForStable: async () => ({ frame: Buffer.from('stable'), xml: '<hierarchy />' }),
+    log: () => {},
+  }, CHAT_BOUNDS)
+
+  assert.equal(taps, 1)
+  assert.equal(result.expanded, true)
+})
+
 test('卡片增高但没有上箭头或紧邻资料行时不能误判展开', async () => {
   const collapsedXml = '<hierarchy><androidx.compose.ui.viewinterop.ViewFactoryHolder class="androidx.compose.ui.viewinterop.ViewFactoryHolder" displayed="true" bounds="[40,340][1040,470]" /></hierarchy>'
   const expandedXml = '<hierarchy><androidx.compose.ui.viewinterop.ViewFactoryHolder class="androidx.compose.ui.viewinterop.ViewFactoryHolder" displayed="true" bounds="[40,340][1040,780]" /></hierarchy>'
