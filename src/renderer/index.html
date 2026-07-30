@@ -58,6 +58,7 @@
             <div class="queue-tools">
               <span id="question-count" class="count-pill">0 条问题</span>
               <label class="column-label">列名 <input id="column-name" value="问题" /></label>
+              <button id="open-question-generator" class="secondary" type="button">产品问题生成</button>
               <button id="import-questions" class="secondary" type="button">导入问题文件</button>
             </div>
           </div>
@@ -117,8 +118,101 @@
         </section>
       </section>
     </main>
+
+    <dialog id="question-generator-dialog" class="generator-dialog" aria-labelledby="generator-title">
+      <div class="generator-shell">
+        <header class="generator-header">
+          <div>
+            <p class="eyebrow">QUESTION BUILDER</p>
+            <h2 id="generator-title">产品问题生成器</h2>
+          </div>
+          <button id="close-question-generator" class="icon-button" type="button" title="关闭" aria-label="关闭">×</button>
+        </header>
+
+        <div class="generator-body">
+          <section class="generator-config" aria-labelledby="generator-fields-title">
+            <div class="generator-section-heading">
+              <div>
+                <h3 id="generator-fields-title">商品信息</h3>
+                <p>每组四项构成一个完整话题，可新增多组</p>
+              </div>
+              <div class="generator-import-actions">
+                <button id="add-generator-topic" class="secondary" type="button">新增一组</button>
+                <button id="clear-generator-products" class="text-button" type="button" hidden>清空表格</button>
+              </div>
+            </div>
+            <div
+              id="generator-product-dropzone"
+              class="generator-product-dropzone"
+              role="button"
+              tabindex="0"
+              aria-label="拖入或选择 XLSX 商品信息表格"
+            >
+              <span class="generator-drop-symbol" aria-hidden="true">↑</span>
+              <span class="generator-drop-copy">
+                <strong>拖入 XLSX 批量导入</strong>
+                <span id="generator-import-state" aria-live="polite">未导入，当前使用下方话题组</span>
+              </span>
+              <span class="generator-drop-action" aria-hidden="true">选择文件</span>
+            </div>
+            <div class="generator-topic-table-wrap">
+              <table class="generator-topic-table" aria-label="商品话题组">
+                <thead>
+                  <tr>
+                    <th scope="col">话题</th>
+                    <th scope="col">商品名</th>
+                    <th scope="col">通用名</th>
+                    <th scope="col">适应症</th>
+                    <th scope="col">药品类型</th>
+                    <th scope="col">操作</th>
+                  </tr>
+                </thead>
+                <tbody id="generator-fields"></tbody>
+              </table>
+            </div>
+
+            <div class="generator-section-heading templates-heading">
+              <div>
+                <h3>问题模板</h3>
+                <p id="generator-variable-hint">可用变量</p>
+              </div>
+              <button id="add-generator-template" class="text-button command-button" type="button">+新增模板</button>
+            </div>
+            <div class="generator-table-labels template-labels" aria-hidden="true">
+              <span>启用</span><span>模板名</span><span>模板内容</span><span>排序</span><span></span>
+            </div>
+            <div id="generator-templates" class="generator-rows"></div>
+
+          </section>
+
+          <section class="generator-preview" aria-labelledby="generator-preview-title">
+            <div class="generator-section-heading">
+              <div>
+                <h3 id="generator-preview-title">审核预览</h3>
+                <p>可修改、删除、新增和调整顺序</p>
+              </div>
+              <span id="generator-preview-count" class="count-pill">0 条</span>
+            </div>
+            <div id="generator-messages" class="generator-messages" aria-live="polite"></div>
+            <div id="generator-preview-list" class="generator-preview-list">
+              <p class="generator-empty">填写产品信息并生成后，在这里审核问题。</p>
+            </div>
+          </section>
+        </div>
+
+        <footer class="generator-footer">
+          <span id="generator-save-state">配置保存在本机</span>
+          <div>
+            <button id="reset-question-generator" class="text-button" type="button">恢复默认</button>
+            <button id="generate-product-questions" class="secondary" type="button">生成预览</button>
+            <button id="confirm-generated-questions" class="primary" type="button" disabled>确认并加入队列</button>
+          </div>
+        </footer>
+      </div>
+    </dialog>
     <script src="./retry-state.js"></script>
     <script src="./entry-progress.js"></script>
+    <script src="./question-generator.js"></script>
     <script src="./renderer.js"></script>
   </body>
 </html>

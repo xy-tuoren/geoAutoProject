@@ -6,6 +6,7 @@ const path = require('node:path')
 const { createRunner, CancelledError } = require('../automation/runner')
 const { automationEntries, normalizeAutomationEntries } = require('../automation/entry-catalog')
 const { loadQuestionFile } = require('../questions')
+const { parseProductWorkbook } = require('../product-question-import')
 const { projectRoot, resolveAdbPath } = require('../runtime-paths')
 const { createUpdateManager } = require('./updater')
 
@@ -117,6 +118,15 @@ ipcMain.handle('dialog:select-questions', async () => {
   return result.canceled ? null : result.filePaths[0]
 })
 
+ipcMain.handle('dialog:select-product-workbook', async () => {
+  const result = await dialog.showOpenDialog({
+    properties: ['openFile'],
+    filters: [{ name: '商品信息表格', extensions: ['xlsx'] }],
+  })
+  if (!result.canceled) log('选择商品信息表格:', result.filePaths[0])
+  return result.canceled ? null : result.filePaths[0]
+})
+
 ipcMain.handle('automation:devices', async () => listDevices())
 ipcMain.handle('automation:entries', () => automationEntries())
 
@@ -128,6 +138,18 @@ ipcMain.handle('questions:import', async (_event, payload) => {
     return questions
   } catch (error) {
     logError('导入失败:', error.message)
+    throw error
+  }
+})
+
+ipcMain.handle('product-questions:import', async (_event, file) => {
+  log('导入商品信息表格:', file)
+  try {
+    const products = parseProductWorkbook(file)
+    log(`商品信息导入完成: ${products.length} 行`)
+    return products
+  } catch (error) {
+    logError('商品信息导入失败:', error.message)
     throw error
   }
 })

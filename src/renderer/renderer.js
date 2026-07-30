@@ -10,9 +10,286 @@ const entryList = $('#entry-list')
 const updateAction = $('#update-action')
 const { retryableBatchDirectory } = window.retryState
 const { initializeEntryProgress, applyEntryProgress } = window.entryProgress
+const {
+  FIXED_FIELDS: generatorFixedFields,
+  defaultTopicGroup,
+  defaultConfig: defaultGeneratorConfig,
+  normalizeTopicGroup: normalizeGeneratorTopicGroup,
+  normalizeConfig: normalizeGeneratorConfig,
+  generateQuestions,
+  canonicalQuestion,
+} = window.questionGenerator
 let updateState = null
 let retryBatchDirectory = null
 let entryProgressState = initializeEntryProgress()
+const generatorDialog = $('#question-generator-dialog')
+const GENERATOR_STORAGE_KEY = 'question-generator-config-v1'
+let generatorConfig = loadGeneratorConfig()
+let generatorPreviewGroups = []
+let generatorImportedFile = ''
+let generatorIdSequence = 0
+
+function loadGeneratorConfig() {
+  try {
+    return normalizeGeneratorConfig(JSON.parse(localStorage.getItem(GENERATOR_STORAGE_KEY)))
+  } catch (_error) {
+    return defaultGeneratorConfig()
+  }
+}
+
+function saveGeneratorConfig() {
+  try {
+    localStorage.setItem(GENERATOR_STORAGE_KEY, JSON.stringify(generatorConfig))
+    $('#generator-save-state').textContent = '配置已保存在本机'
+  } catch (_error) {
+    $('#generator-save-state').textContent = '配置保存失败，当前编辑仍可使用'
+  }
+}
+
+function generatorId(prefix) {
+  generatorIdSequence += 1
+  return `${prefix}-${Date.now()}-${generatorIdSequence}`
+}
+
+function iconButton(label, symbol, action, disabled = false) {
+  const button = document.createElement('button')
+  button.className = 'icon-button small'
+  button.type = 'button'
+  button.title = label
+  button.setAttribute('aria-label', label)
+  button.textContent = symbol
+  button.disabled = disabled
+  button.addEventListener('click', action)
+  return button
+}
+
+function generatorInput(value, ariaLabel, onInput, options = {}) {
+  const input = document.createElement('input')
+  input.type = options.type || 'text'
+  input.value = value ?? ''
+  input.setAttribute('aria-label', ariaLabel)
+  if (options.placeholder) input.placeholder = options.placeholder
+  input.addEventListener('input', event => onInput(event.target.value))
+  return input
+}
+
+function invalidateGeneratorPreview() {
+  generatorPreviewGroups = []
+  renderGeneratorPreview()
+  saveGeneratorConfig()
+}
+
+function moveGeneratorItem(list, index, offset) {
+  const target = index + offset
+  if (target < 0 || target >= list.length) return
+  ;[list[index], list[target]] = [list[target], list[index]]
+  invalidateGeneratorPreview()
+  renderGeneratorEditor()
+}
+
+function renderGeneratorFields() {
+  const rows = generatorConfig.topicGroups.map((topic, topicIndex) => {
+    const row = document.createElement('tr')
+    const numberCell = document.createElement('th')
+    numberCell.scope = 'row'
+    numberCell.textContent = String(topicIndex + 1)
+    row.append(numberCell)
+    for (const [fieldIndex, field] of generatorFixedFields.entries()) {
+      const cell = document.createElement('td')
+      const inputId = `generator-topic-${topicIndex}-field-${fieldIndex}`
+      const input = generatorInput(topic[field.token], `话题 ${topicIndex + 1} ${field.label}，必填`, value => {
+        topic[field.token] = value
+        invalidateGeneratorPreview()
+      }, { placeholder: `请输入${field.label}` })
+      input.id = inputId
+      input.required = true
+      cell.append(input)
+      row.append(cell)
+    }
+    const actionCell = document.createElement('td')
+    actionCell.className = 'generator-topic-action'
+    if (generatorConfig.topicGroups.length > 1) {
+      actionCell.append(iconButton(`删除话题 ${topicIndex + 1}`, '×', () => {
+        generatorConfig.topicGroups.splice(topicIndex, 1)
+        invalidateGeneratorPreview()
+        renderGeneratorEditor()
+      }))
+    }
+    row.append(actionCell)
+    return row
+  })
+  $('#generator-fields').replaceChildren(...rows)
+}
+
+function renderGeneratorImportState() {
+  const state = $('#generator-import-state')
+  const clear = $('#clear-generator-products')
+  const dropzone = $('#generator-product-dropzone')
+  if (generatorImportedFile) {
+    const name = generatorImportedFile.split(/[\\/]/).pop() || 'XLSX 表格'
+    state.textContent = `已将 ${name} 的 ${generatorConfig.topicGroups.length} 组写入下方表格，可继续编辑。`
+    dropzone.classList.add('is-imported')
+    clear.hidden = false
+  } else {
+    state.textContent = '未导入，当前使用下方话题组'
+    dropzone.classList.remove('is-imported')
+    clear.hidden = true
+  }
+}
+
+function renderGeneratorVariableHint() {
+  const tokens = generatorFixedFields.map(field => `{${field.token}}`)
+  $('#generator-variable-hint').textContent = `可用变量：${tokens.join('  ')}`
+}
+
+function renderGeneratorTemplates() {
+  const rows = generatorConfig.templates.map((template, index) => {
+    const row = document.createElement('div')
+    row.className = 'generator-row generator-template-row'
+    const enabledWrap = document.createElement('label')
+    enabledWrap.className = 'generator-enabled'
+    const enabled = document.createElement('input')
+    enabled.type = 'checkbox'
+    enabled.checked = template.enabled
+    enabled.setAttribute('aria-label', `启用模板 ${template.name || index + 1}`)
+    enabled.addEventListener('change', () => { template.enabled = enabled.checked; invalidateGeneratorPreview() })
+    enabledWrap.append(enabled)
+    row.append(
+      enabledWrap,
+      generatorInput(template.name, `第 ${index + 1} 条模板名`, value => { template.name = value; invalidateGeneratorPreview() }),
+      generatorInput(template.content, `第 ${index + 1} 条模板内容`, value => { template.content = value; invalidateGeneratorPreview() }, { placeholder: '例：{适应症}吃{通用名}有效吗' }),
+    )
+    const order = document.createElement('div')
+    order.className = 'generator-row-actions'
+    order.append(
+      iconButton('上移模板', '↑', () => moveGeneratorItem(generatorConfig.templates, index, -1), index === 0),
+      iconButton('下移模板', '↓', () => moveGeneratorItem(generatorConfig.templates, index, 1), index === generatorConfig.templates.length - 1),
+    )
+    const remove = document.createElement('div')
+    remove.className = 'generator-row-actions'
+    remove.append(iconButton('删除模板', '×', () => {
+      generatorConfig.templates.splice(index, 1)
+      invalidateGeneratorPreview()
+      renderGeneratorEditor()
+    }))
+    row.append(order, remove)
+    return row
+  })
+  $('#generator-templates').replaceChildren(...rows)
+}
+
+function renderGeneratorEditor() {
+  renderGeneratorImportState()
+  renderGeneratorFields()
+  renderGeneratorVariableHint()
+  renderGeneratorTemplates()
+}
+
+function setGeneratorMessages(errors = [], warnings = []) {
+  const messages = []
+  for (const message of errors) {
+    const item = document.createElement('p')
+    item.className = 'generator-message error'
+    item.textContent = message
+    messages.push(item)
+  }
+  for (const message of warnings) {
+    const item = document.createElement('p')
+    item.className = 'generator-message warning'
+    item.textContent = message
+    messages.push(item)
+  }
+  $('#generator-messages').replaceChildren(...messages)
+}
+
+function allGeneratorPreviewQuestions() {
+  return generatorPreviewGroups.flatMap(group => group.questions)
+}
+
+function refreshGeneratorPreviewState() {
+  const questions = allGeneratorPreviewQuestions()
+  const reviewed = questions.map(item => item.trim()).filter(Boolean)
+  $('#generator-preview-count').textContent = `${reviewed.length} 条 · ${generatorPreviewGroups.length} 组`
+  $('#confirm-generated-questions').disabled = reviewed.length === 0 || reviewed.length !== questions.length
+}
+
+function renderGeneratorPreview() {
+  const list = $('#generator-preview-list')
+  if (!generatorPreviewGroups.length) {
+    const empty = document.createElement('p')
+    empty.className = 'generator-empty'
+    empty.textContent = '填写产品信息并生成后，在这里审核问题。'
+    list.replaceChildren(empty)
+    setGeneratorMessages()
+    refreshGeneratorPreviewState()
+    return
+  }
+  const groups = generatorPreviewGroups.map((group, groupIndex) => {
+    const section = document.createElement('section')
+    section.className = 'generator-preview-group'
+    const heading = document.createElement('header')
+    heading.className = 'generator-preview-group-heading'
+    const identity = document.createElement('div')
+    identity.className = 'generator-preview-group-identity'
+    const label = document.createElement('span')
+    label.className = 'generator-preview-group-label'
+    label.textContent = `第 ${groupIndex + 1} 组`
+    const title = document.createElement('strong')
+    title.textContent = [group.topic['商品名'], group.topic['通用名']].filter(Boolean).join(' · ') || `话题 ${groupIndex + 1}`
+    const detail = document.createElement('span')
+    detail.className = 'generator-preview-group-detail'
+    detail.textContent = [group.topic['适应症'], group.topic['药品类型']].filter(Boolean).join(' · ')
+    identity.append(label, title, detail)
+    heading.append(identity, iconButton(`在第 ${groupIndex + 1} 组新增问题`, '+', () => {
+      group.questions.push('')
+      renderGeneratorPreview()
+      const currentGroup = list.querySelectorAll('.generator-preview-group')[groupIndex]
+      const inputs = currentGroup?.querySelectorAll('input') || []
+      inputs[inputs.length - 1]?.focus()
+    }))
+    const rows = document.createElement('div')
+    rows.className = 'generator-preview-group-questions'
+    if (!group.questions.length) {
+      const empty = document.createElement('p')
+      empty.className = 'generator-preview-group-empty'
+      empty.textContent = '本组问题已被前面话题去重，可点击 + 补充。'
+      rows.append(empty)
+    } else {
+      rows.append(...group.questions.map((question, questionIndex) => {
+        const row = document.createElement('div')
+        row.className = 'generator-preview-row'
+        const number = document.createElement('span')
+        number.className = 'generator-preview-number'
+        number.textContent = String(questionIndex + 1)
+        const input = generatorInput(question, `第 ${groupIndex + 1} 组第 ${questionIndex + 1} 条预览问题`, value => {
+          group.questions[questionIndex] = value
+          refreshGeneratorPreviewState()
+        })
+        const actions = document.createElement('div')
+        actions.className = 'generator-row-actions'
+        actions.append(
+          iconButton('上移问题', '↑', () => { movePreviewQuestion(groupIndex, questionIndex, -1) }, questionIndex === 0),
+          iconButton('下移问题', '↓', () => { movePreviewQuestion(groupIndex, questionIndex, 1) }, questionIndex === group.questions.length - 1),
+          iconButton('删除问题', '×', () => { group.questions.splice(questionIndex, 1); renderGeneratorPreview() }),
+        )
+        row.append(number, input, actions)
+        return row
+      }))
+    }
+    section.append(heading, rows)
+    return section
+  })
+  list.replaceChildren(...groups)
+  refreshGeneratorPreviewState()
+}
+
+function movePreviewQuestion(groupIndex, questionIndex, offset) {
+  const questions = generatorPreviewGroups[groupIndex]?.questions
+  const target = questionIndex + offset
+  if (!questions || target < 0 || target >= questions.length) return
+  ;[questions[questionIndex], questions[target]] = [questions[target], questions[questionIndex]]
+  renderGeneratorPreview()
+}
 
 function renderEntryProgress() {
   const container = $('#entry-progress')
@@ -136,8 +413,11 @@ async function refreshEntries() {
 }
 
 const QUESTION_EXTENSIONS = new Set(['.txt', '.csv', '.json', '.xlsx', '.xlsm'])
+const PRODUCT_WORKBOOK_EXTENSIONS = new Set(['.xlsx'])
 const questionsPanel = $('#questions-panel')
+const generatorProductDropzone = $('#generator-product-dropzone')
 let dragDepth = 0
+let generatorProductDragDepth = 0
 
 function extensionOf(filePath) {
   const match = /\.[^.\\/]+$/.exec(filePath || '')
@@ -158,6 +438,30 @@ async function importQuestionFile(filePath) {
   } catch (error) { status.textContent = error.message || '导入失败' }
 }
 
+async function importGeneratorProductFile(filePath) {
+  if (!filePath) return
+  if (!PRODUCT_WORKBOOK_EXTENSIONS.has(extensionOf(filePath))) {
+    const message = '商品信息批量导入仅支持 XLSX 文件。'
+    setGeneratorMessages([message])
+    status.textContent = message
+    return
+  }
+  try {
+    const products = await window.automation.importProductWorkbook(filePath)
+    generatorConfig.topicGroups = products.map(normalizeGeneratorTopicGroup)
+    generatorImportedFile = filePath
+    generatorPreviewGroups = []
+    saveGeneratorConfig()
+    renderGeneratorEditor()
+    renderGeneratorPreview()
+    setGeneratorMessages([])
+    status.textContent = `已导入 ${products.length} 组完整话题`
+  } catch (error) {
+    setGeneratorMessages([error.message || '商品信息表格导入失败。'])
+    status.textContent = '商品信息表格导入失败'
+  }
+}
+
 function setDropActive(active) {
   questionsPanel.classList.toggle('is-drop-active', active)
 }
@@ -170,6 +474,94 @@ $('#select-directory').addEventListener('click', async () => {
 $('#import-questions').addEventListener('click', async () => {
   const file = await window.automation.selectQuestions()
   await importQuestionFile(file)
+})
+
+$('#open-question-generator').addEventListener('click', () => {
+  renderGeneratorEditor()
+  renderGeneratorPreview()
+  if (!generatorDialog.open) generatorDialog.showModal()
+})
+$('#close-question-generator').addEventListener('click', () => generatorDialog.close())
+$('#add-generator-topic').addEventListener('click', () => {
+  generatorConfig.topicGroups.push(defaultTopicGroup())
+  invalidateGeneratorPreview()
+  renderGeneratorEditor()
+})
+$('#add-generator-template').addEventListener('click', () => {
+  generatorConfig.templates.push({
+    id: generatorId('template'),
+    name: '新模板',
+    enabled: true,
+    content: '',
+  })
+  invalidateGeneratorPreview()
+  renderGeneratorEditor()
+})
+generatorProductDropzone.addEventListener('click', async () => {
+  const file = await window.automation.selectProductWorkbook()
+  await importGeneratorProductFile(file)
+})
+generatorProductDropzone.addEventListener('keydown', async event => {
+  if (event.key !== 'Enter' && event.key !== ' ') return
+  event.preventDefault()
+  const file = await window.automation.selectProductWorkbook()
+  await importGeneratorProductFile(file)
+})
+$('#clear-generator-products').addEventListener('click', () => {
+  generatorConfig.topicGroups = [defaultTopicGroup()]
+  generatorImportedFile = ''
+  generatorPreviewGroups = []
+  saveGeneratorConfig()
+  renderGeneratorEditor()
+  renderGeneratorPreview()
+  status.textContent = '已清空导入内容，可重新填写或导入'
+})
+$('#reset-question-generator').addEventListener('click', () => {
+  generatorConfig = defaultGeneratorConfig()
+  generatorPreviewGroups = []
+  generatorImportedFile = ''
+  saveGeneratorConfig()
+  renderGeneratorEditor()
+  renderGeneratorPreview()
+  status.textContent = '已恢复默认问题生成配置'
+})
+$('#generate-product-questions').addEventListener('click', () => {
+  const result = generateQuestions(generatorConfig)
+  generatorConfig = result.config
+  generatorPreviewGroups = result.questionGroups.map(group => ({
+    topicIndex: group.topicIndex,
+    topic: { ...group.topic },
+    questions: [...group.questions],
+  }))
+  saveGeneratorConfig()
+  renderGeneratorEditor()
+  renderGeneratorPreview()
+  setGeneratorMessages(result.errors, result.warnings)
+  if (result.errors.length) status.textContent = `问题生成配置有 ${result.errors.length} 项需要处理`
+  else status.textContent = `已生成 ${result.questions.length} 条问题，请审核后加入队列`
+})
+$('#confirm-generated-questions').addEventListener('click', () => {
+  const previewQuestions = allGeneratorPreviewQuestions()
+  const reviewed = previewQuestions.map(item => item.trim()).filter(Boolean)
+  if (!reviewed.length || reviewed.length !== previewQuestions.length) {
+    setGeneratorMessages(['请删除或填写空白的预览问题。'])
+    return
+  }
+  const existing = uniqueQuestions()
+  const seen = new Set(existing.map(canonicalQuestion))
+  const additions = []
+  for (const item of reviewed) {
+    const key = canonicalQuestion(item)
+    if (seen.has(key)) continue
+    seen.add(key)
+    additions.push(item)
+  }
+  questions.value = [...existing, ...additions].join('\n')
+  updatePlan()
+  generatorDialog.close()
+  status.textContent = additions.length
+    ? `已审核并加入 ${additions.length} 条问题`
+    : '审核问题已全部存在于队列中'
 })
 
 // Keep the window from navigating when a file is dropped outside the drop zone.
@@ -201,6 +593,34 @@ questionsPanel.addEventListener('drop', async event => {
   const file = event.dataTransfer.files?.[0]
   if (!file) return
   await importQuestionFile(window.automation.getPathForFile(file))
+}, true)
+generatorProductDropzone.addEventListener('dragenter', event => {
+  event.preventDefault()
+  event.stopPropagation()
+  if (![...event.dataTransfer.types].includes('Files')) return
+  generatorProductDragDepth += 1
+  generatorProductDropzone.classList.add('is-drop-active')
+})
+generatorProductDropzone.addEventListener('dragover', event => {
+  event.preventDefault()
+  event.stopPropagation()
+  if (![...event.dataTransfer.types].includes('Files')) return
+  event.dataTransfer.dropEffect = 'copy'
+})
+generatorProductDropzone.addEventListener('dragleave', event => {
+  event.preventDefault()
+  event.stopPropagation()
+  generatorProductDragDepth = Math.max(0, generatorProductDragDepth - 1)
+  if (generatorProductDragDepth === 0) generatorProductDropzone.classList.remove('is-drop-active')
+})
+generatorProductDropzone.addEventListener('drop', async event => {
+  event.preventDefault()
+  event.stopPropagation()
+  generatorProductDragDepth = 0
+  generatorProductDropzone.classList.remove('is-drop-active')
+  const file = event.dataTransfer.files?.[0]
+  if (!file) return
+  await importGeneratorProductFile(window.automation.getPathForFile(file))
 }, true)
 questions.addEventListener('input', updatePlan)
 device.addEventListener('change', updatePlan)
