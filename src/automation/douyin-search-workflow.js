@@ -276,13 +276,27 @@ function createDouyinSearchWorkflow({
   }
   
   async function openDouyinFullAnswer(viewFull, size, timeout = 12_000) {
+    const startedAt = Date.now()
     await tap((viewFull[0] + viewFull[2]) / 2, (viewFull[1] + viewFull[3]) / 2)
-    const deadline = Date.now() + timeout
-    while (Date.now() < deadline) {
+    const deadline = startedAt + timeout
+    const hardDeadline = startedAt + Math.max(timeout, 30_000)
+    let miniAppHostSeen = false
+    while (Date.now() < deadline || (miniAppHostSeen && Date.now() < hardDeadline)) {
       await waitForVisualQuiet({ timeout: 1_000, fallbackMs: 400 })
-      const xml = await source()
+      const [xml, current, foreground] = await Promise.all([source(), ui.currentApp(), ui.foregroundWindow()])
+      const expectedPackage = getActivePackageName()
+      const windows = [foreground, current].filter(Boolean)
+      const miniAppHost = windows.find(window => window.package === expectedPackage
+        && /MiniAppHostActivity/.test(window.activity || ''))
+      if (windows.length && windows.every(window => window.package && window.package !== expectedPackage)) {
+        throw new Error(`抖音全文入口点击后进入了错误应用：expected=${expectedPackage}, actual=${windows.map(window => window.package).join('|')}`)
+      }
+      if (miniAppHost) {
+        if (!miniAppHostSeen) log('waiting: 已确认进入抖音小程序宿主，正在等待全文UI层级就绪')
+        miniAppHostSeen = true
+      }
       const bounds = douyinMiniAppCaptureBounds(xml, size)
-      if (bounds) return { xml, bounds }
+      if (miniAppHostSeen && bounds) return { xml, bounds, activity: miniAppHost.activity, startedAt }
     }
     throw new Error('已点击抖音小荷AI医生“查看全文”，但未能确认全文页打开。')
   }

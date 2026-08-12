@@ -33,6 +33,16 @@ const SESSION_TRANSITION = `<hierarchy>
   <node package="com.aurora.xiaohe.aidoctor" bounds="[0,0][1080,2400]" visible-to-user="true" />
 </hierarchy>`
 
+const DOUYIN_FULL_ANSWER = `<hierarchy>
+  <node package="com.ss.android.ugc.aweme" class="android.view.View" content-desc="close" visible-to-user="true" bounds="[978,135][1020,177]" />
+  <node package="com.ss.android.ugc.aweme" class="android.view.ViewGroup" visible-to-user="true" bounds="[0,231][1080,2014]" />
+  <node package="com.ss.android.ugc.aweme" class="android.widget.HorizontalScrollView" scrollable="true" visible-to-user="true" bounds="[0,2014][1080,2169]" />
+</hierarchy>`
+
+const DOUYIN_SEARCH_INPUT = `<hierarchy>
+  <node package="com.ss.android.ugc.aweme" class="android.widget.EditText" resource-id="com.ss.android.ugc.aweme:id/et_search_kw" text="" visible-to-user="true" bounds="[132,90][754,210]" />
+</hierarchy>`
+
 function workflowWithSource(source, {
   tap = async () => {},
   log = () => {},
@@ -118,6 +128,46 @@ test('组合输入提示也能被点击并进入真实编辑框', async () => {
   const input = await workflow.waitForInput(1_500)
   assert.deepEqual(input.bounds, [180, 2220, 850, 2300])
   assert.equal(taps, 1)
+})
+
+test('抖音下一题识别英文close并只点击一次关闭上一题全文页', async () => {
+  let closed = false
+  const taps = []
+  const workflow = workflowWithSource(async () => closed ? DOUYIN_SEARCH_INPUT : DOUYIN_FULL_ANSWER, {
+    tap: async (x, y) => { taps.push([x, y]); closed = true },
+    getActiveEntry: () => ({ label: '抖音搜索框（小荷AI小程序）', inputHints: [] }),
+  })
+  const input = await workflow.waitForDouyinSearchInput(2_000)
+  assert.deepEqual(input.bounds, [132, 90, 754, 210])
+  assert.deepEqual(taps, [[999, 156]])
+})
+
+test('抖音题间关闭按钮按竖屏比例定位且不把正文close当作外壳', async () => {
+  const scaled = DOUYIN_FULL_ANSWER
+    .replaceAll('1080', '720').replaceAll('2400', '1600')
+    .replaceAll('978', '652').replaceAll('1020', '680')
+    .replaceAll('135', '90').replaceAll('177', '118')
+    .replaceAll('231', '154').replaceAll('2014', '1343').replaceAll('2169', '1446')
+  let reads = 0
+  const taps = []
+  const workflow = createQuestionInputWorkflow({
+    checkCancelled: () => {},
+    source: async () => (++reads === 1 ? scaled : DOUYIN_SEARCH_INPUT.replaceAll('1080', '720')),
+    windowSize: async () => ({ width: 720, height: 1600 }),
+    tap: async (x, y) => { taps.push([x, y]) }, log: () => {}, ui: {}, waitForVisualQuiet: async () => {},
+    findSubmitBounds: () => null, boundsForResourceId: () => null,
+    getActiveEntry: () => ({ label: '抖音搜索框（小荷AI小程序）', inputHints: [] }),
+    getCachedInputBounds: () => null, setCachedInputBounds: () => {}, getCachedSendBounds: () => null, setCachedSendBounds: () => {},
+  })
+  await workflow.waitForDouyinSearchInput(2_000)
+  assert.deepEqual(taps, [[666, 104]])
+
+  const bodyClose = DOUYIN_FULL_ANSWER.replace('[978,135][1020,177]', '[400,900][450,950]')
+  const noTapWorkflow = workflowWithSource(async () => bodyClose, {
+    tap: async () => { throw new Error('正文close不应被点击') },
+    getActiveEntry: () => ({ label: '抖音搜索框（小荷AI小程序）', inputHints: [] }),
+  })
+  await assert.rejects(() => noTapWorkflow.waitForDouyinSearchInput(30), /未能在抖音打开搜索输入框/)
 })
 
 test('头条搜索入口在等待截止点刚出现时执行最终探测', async () => {

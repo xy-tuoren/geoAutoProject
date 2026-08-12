@@ -9,6 +9,7 @@ const {
 } = require('./hierarchy')
 const { fillQuestionInput, historyOnboardingVisible } = require('./capture-primitives')
 const {
+  miniAppShellCloseBounds,
   douyinSearchInput,
   toutiaoSearchInput,
   toutiaoHomeSearchBounds,
@@ -232,17 +233,25 @@ function createQuestionInputWorkflow({
   
   async function waitForDouyinSearchInput(timeout = 12_000) {
     const deadline = Date.now() + timeout
+    let closeClickedAt = 0
     while (Date.now() < deadline) {
       const xml = await source()
       const edit = douyinSearchInput(xml)
       if (edit) return edit
-      const close = boundsForNodeAttribute(xml, 'content-desc', '关闭')
+      const size = await windowSize()
+      const close = miniAppShellCloseBounds(xml, size)
       if (close) {
-        log('stage: 正在关闭上一题的小荷AI全文页')
-        await tap((close[0] + close[2]) / 2, (close[1] + close[3]) / 2)
-        await waitForVisualQuiet({ timeout: 1_500, fallbackMs: 800 })
+        if (!closeClickedAt) {
+          log('stage: 正在关闭上一题的小荷AI全文页')
+          closeClickedAt = Date.now()
+          await tap((close[0] + close[2]) / 2, (close[1] + close[3]) / 2)
+          await waitForVisualQuiet({ timeout: 1_500, fallbackMs: 800 })
+        } else if (Date.now() - closeClickedAt >= 4_000) {
+          throw new Error('已点击上一题小荷AI全文页的关闭按钮，但页面仍未退出；为避免重复点击，本题已停止。')
+        } else await sleep(250)
         continue
       }
+      closeClickedAt = 0
       const search = boundsForNodeAttribute(xml, 'content-desc', '搜索') || visibleLabelBounds(xml, '搜索')
       if (search) {
         await tap((search[0] + search[2]) / 2, (search[1] + search[3]) / 2)

@@ -4,7 +4,6 @@ const {
   nodeIsVisible,
   parseBounds,
   parseNodeTree,
-  boundsForNodeAttribute,
 } = require('./hierarchy')
 const { findOcrText, mapPhysicalBoundsToLogical } = require('./ocr')
 const { ENTRY_DEFINITIONS } = require('./entry-catalog')
@@ -16,6 +15,35 @@ function boundsForResourceSuffix(xml, suffix) {
     if (rawBounds) return parseBounds(rawBounds)
   }
   return null
+}
+
+function miniAppShellCloseBounds(xml, screenSize) {
+  if (!screenSize?.width || !screenSize?.height || screenSize.width >= screenSize.height) return null
+  const allowedPackages = new Set([
+    ENTRY_DEFINITIONS['douyin-xiaohe-miniapp'].packageName,
+    ENTRY_DEFINITIONS['toutiao-xiaohe-miniapp'].packageName,
+  ])
+  const candidates = []
+  for (const attrs of iterNodes(xml)) {
+    if (!nodeIsVisible(attrs)
+      || !allowedPackages.has(nodeAttr(attrs, 'package'))) continue
+    const description = nodeAttr(attrs, 'content-desc').trim().toLowerCase()
+    if (!['关闭', 'close'].includes(description)) continue
+    const rawBounds = nodeAttr(attrs, 'bounds')
+    if (!rawBounds) continue
+    const bounds = parseBounds(rawBounds)
+    const itemWidth = bounds[2] - bounds[0]
+    const itemHeight = bounds[3] - bounds[1]
+    const centerX = (bounds[0] + bounds[2]) / 2
+    const centerY = (bounds[1] + bounds[3]) / 2
+    if (centerX < screenSize.width * 0.82
+      || centerY > screenSize.height * 0.12
+      || itemWidth <= 0 || itemWidth > screenSize.width * 0.18
+      || itemHeight <= 0 || itemHeight > screenSize.height * 0.1) continue
+    candidates.push(bounds)
+  }
+  candidates.sort((first, second) => second[0] - first[0] || first[1] - second[1])
+  return candidates[0] || null
 }
 
 function douyinSearchInput(xml) {
@@ -308,7 +336,7 @@ function douyinSearchResultsBounds(xml, screenSize) {
 
 function douyinMiniAppCaptureBounds(xml, screenSize) {
   if (douyinSearchInput(xml)) return null
-  const close = boundsForNodeAttribute(xml, 'content-desc', '关闭')
+  const close = miniAppShellCloseBounds(xml, screenSize)
   if (!close) return null
   const width = screenSize.width
   const height = screenSize.height
@@ -355,6 +383,7 @@ function toutiaoGenericConsultationPage(xml, { answerContentReady = false } = {}
 
 
 module.exports = {
+  miniAppShellCloseBounds,
   douyinSearchInput,
   toutiaoSearchInput,
   toutiaoSearchResultBelongsToQuestion,

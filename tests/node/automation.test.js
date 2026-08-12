@@ -987,6 +987,81 @@ test('抖音小荷AI全文页排除固定顶部、工具栏和输入区', () => 
     .replaceAll('111', '74').replaceAll('207', '138')
     .replaceAll('363', '242').replaceAll('1785', '1190').replaceAll('1940', '1293')
   assert.deepEqual(douyinMiniAppCaptureBounds(scaledXml, { width: 720, height: 1605 }), [0, 242, 720, 1190])
+
+  const currentDouyinXml = `<hierarchy>
+    <node package="com.ss.android.ugc.aweme" class="android.view.View" content-desc="close" visible-to-user="true" bounds="[978,135][1020,177]" />
+    <node package="com.ss.android.ugc.aweme" class="android.view.ViewGroup" visible-to-user="true" bounds="[0,231][1080,2014]">
+      <node package="com.ss.android.ugc.aweme" class="android.view.ViewGroup" visible-to-user="true" bounds="[0,231][1080,2014]" />
+    </node>
+    <node package="com.ss.android.ugc.aweme" class="android.widget.ScrollView" visible-to-user="true" bounds="[0,2014][1080,2169]" />
+    <node package="com.ss.android.ugc.aweme" class="android.widget.HorizontalScrollView" scrollable="true" visible-to-user="true" bounds="[0,2014][1080,2169]" />
+  </hierarchy>`
+  assert.deepEqual(douyinMiniAppCaptureBounds(currentDouyinXml, { width: 1080, height: 2400 }), [0, 231, 1080, 2014])
+  const scaledCurrentDouyinXml = currentDouyinXml
+    .replaceAll('1080', '720').replaceAll('2400', '1600')
+    .replaceAll('978', '652').replaceAll('1020', '680')
+    .replaceAll('135', '90').replaceAll('177', '118')
+    .replaceAll('231', '154').replaceAll('2014', '1343').replaceAll('2169', '1446')
+  assert.deepEqual(douyinMiniAppCaptureBounds(scaledCurrentDouyinXml, { width: 720, height: 1600 }), [0, 154, 720, 1343])
+  assert.equal(douyinMiniAppCaptureBounds(currentDouyinXml.replace('[978,135][1020,177]', '[400,135][442,177]'), { width: 1080, height: 2400 }), null)
+  assert.deepEqual(douyinMiniAppCaptureBounds(currentDouyinXml.replaceAll('com.ss.android.ugc.aweme', 'com.ss.android.article.news'), { width: 1080, height: 2400 }), [0, 231, 1080, 2014])
+  assert.equal(douyinMiniAppCaptureBounds(currentDouyinXml.replaceAll('com.ss.android.ugc.aweme', 'invalid.package'), { width: 1080, height: 2400 }), null)
+})
+
+test('抖音查看全文以真实前台窗口确认新版小程序宿主', async () => {
+  const xml = `<hierarchy>
+    <node package="com.ss.android.ugc.aweme" class="android.view.View" content-desc="close" visible-to-user="true" bounds="[978,135][1020,177]" />
+    <node package="com.ss.android.ugc.aweme" class="android.view.ViewGroup" visible-to-user="true" bounds="[0,231][1080,2014]" />
+    <node package="com.ss.android.ugc.aweme" class="android.widget.HorizontalScrollView" scrollable="true" visible-to-user="true" bounds="[0,2014][1080,2169]" />
+  </hierarchy>`
+  let taps = 0
+  const workflow = createDouyinSearchWorkflow({
+    source: async () => xml,
+    windowSize: async () => ({ width: 1080, height: 2400 }),
+    log: () => {},
+    screenshot: async () => Buffer.from('screen'),
+    ocr: { recognize: async () => ({ image: { width: 1080, height: 2400 }, results: [] }) },
+    setLastOcrDiagnostic: () => {},
+    swipeChat: async () => {},
+    waitForVisualQuiet: async () => {},
+    tap: async () => { taps += 1 },
+    ui: {
+      currentApp: async () => ({ package: 'com.ss.android.ugc.aweme', activity: 'com.ss.android.ugc.aweme.search.activity.SearchResultActivity' }),
+      foregroundWindow: async () => ({ package: 'com.ss.android.ugc.aweme', activity: 'com.bytedance.kmp.open_platform.kmp_miniapp_business_impl.process.container.MiniAppHostActivity0' }),
+    },
+    getActivePackageName: () => 'com.ss.android.ugc.aweme',
+    checkCancelled: () => {},
+    waitForStableReply: async () => ({ status: 'stable', xml }),
+  })
+
+  const opened = await workflow.openDouyinFullAnswer([420, 900, 660, 1020], { width: 1080, height: 2400 })
+  assert.equal(taps, 1)
+  assert.equal(opened.activity.endsWith('MiniAppHostActivity0'), true)
+  assert.deepEqual(opened.bounds, [0, 231, 1080, 2014])
+})
+
+test('抖音查看全文兼容currentApp先看到宿主而foregroundWindow仍报告搜索页', async () => {
+  const xml = `<hierarchy>
+    <node package="com.ss.android.ugc.aweme" class="android.view.View" content-desc="close" visible-to-user="true" bounds="[978,135][1020,177]" />
+    <node package="com.ss.android.ugc.aweme" class="android.view.ViewGroup" visible-to-user="true" bounds="[0,231][1080,2014]" />
+    <node package="com.ss.android.ugc.aweme" class="android.widget.HorizontalScrollView" scrollable="true" visible-to-user="true" bounds="[0,2014][1080,2169]" />
+  </hierarchy>`
+  const workflow = createDouyinSearchWorkflow({
+    source: async () => xml,
+    windowSize: async () => ({ width: 1080, height: 2400 }),
+    log: () => {}, screenshot: async () => Buffer.from('screen'),
+    ocr: { recognize: async () => ({ image: { width: 1080, height: 2400 }, results: [] }) },
+    setLastOcrDiagnostic: () => {}, swipeChat: async () => {}, waitForVisualQuiet: async () => {}, tap: async () => {},
+    ui: {
+      currentApp: async () => ({ package: 'com.ss.android.ugc.aweme', activity: 'com.bytedance.kmp.open_platform.kmp_miniapp_business_impl.process.container.MiniAppHostActivity0' }),
+      foregroundWindow: async () => ({ package: 'com.ss.android.ugc.aweme', activity: 'com.ss.android.ugc.aweme.search.activity.SearchResultActivity' }),
+    },
+    getActivePackageName: () => 'com.ss.android.ugc.aweme', checkCancelled: () => {},
+    waitForStableReply: async () => ({ status: 'stable', xml }),
+  })
+  const opened = await workflow.openDouyinFullAnswer([420, 900, 660, 1020], { width: 1080, height: 2400 })
+  assert.equal(opened.activity.endsWith('MiniAppHostActivity0'), true)
+  assert.deepEqual(opened.bounds, [0, 231, 1080, 2014])
 })
 
 test('抖音小程序回答尾部用无文字卡片结构定位参考药品箭头', () => {
