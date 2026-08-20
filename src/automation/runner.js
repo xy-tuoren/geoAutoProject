@@ -1,7 +1,8 @@
 const fs = require('node:fs/promises')
 const path = require('node:path')
 const { execFileSync } = require('node:child_process')
-const { sleep, createBatchDirectory, batchArtifactDirectories, entryArtifactDirectories, questionArtifactDirectories } = require('./utils')
+const { sleep, createBatchDirectory, batchArtifactDirectories, entryArtifactDirectories, questionArtifactDirectories, taskArtifactDirectories } = require('./utils')
+const { normalizeQuestionPlan, brandExecutionUnits, safeDirectorySegment } = require('../question-plan')
 const { EventLog } = require('./event-log')
 const { iterNodes, nodeAttr, nodeIsVisible, parseBounds, currentQuestionText, findChatScrollBounds, validateCaptureViewport, visibleLabelBounds, boundsForNodeAttribute, responseTimeoutRetryTarget } = require('./hierarchy')
 const { imageInfo, cropImage, imagesSimilar } = require('./images')
@@ -167,6 +168,22 @@ function seamDiagnosticsForError(error) {
       frame_transition_invariant_valid: value.details?.frame_transition_invariant_valid ?? null,
     },
   }
+}
+
+function groupedBrandSummaries(brandGroups, entries, results) {
+  return brandGroups.map((brand, brandOffset) => {
+    const matches = results.filter(result => result.brand_index === brandOffset + 1)
+    return {
+      name: brand.brand,
+      brand_index: brandOffset + 1,
+      directory_name: safeDirectorySegment(brand.brand),
+      question_count: brand.questions.length,
+      planned: brand.questions.length * entries.length,
+      completed: matches.filter(result => result.status === 'completed').length,
+      failed: matches.filter(result => result.status === 'failed').length,
+      search_results_only: matches.filter(result => result.search_result_only).length,
+    }
+  })
 }
 
 function createRunner(options) {
@@ -1114,11 +1131,31 @@ function createRunner(options) {
       activeSerial = payload.serial
       payloadMaxLongImageHeight = maxLongImageHeight(payload.maxLongImageHeight)
       const entries = normalizeAutomationEntries(payload.entries)
+      const questionPlan = normalizeQuestionPlan(payload)
+      payload.questions = questionPlan.questions
+      payload.brandGroups = questionPlan.brandGroups
+      const grouped = questionPlan.mode === 'grouped'
+      const executionUnits = brandExecutionUnits(questionPlan)
       const outputRoot = path.resolve(payload.outputDir)
       const batchDirectory = await createBatchDirectory(outputRoot)
       const batchArtifacts = batchArtifactDirectories(batchDirectory)
       await initializeArtifactLogging(batchArtifacts, payload, 'batch_questions')
-      emitProgress({ type: 'initialized', entries: entries.map(entry => ({ id: entry.id, label: entry.label })), question_count: payload.questions.length, results: [] })
+      const brandManifestPath = grouped ? path.join(batchArtifacts.diagnosticDirectory, '品牌执行清单.json') : null
+      if (brandManifestPath) {
+        await fs.writeFile(brandManifestPath, JSON.stringify({
+          created_at: new Date().toISOString(),
+          artifact_layout_version: ARTIFACT_LAYOUT_VERSION,
+          execution_order: 'brand_entry_question',
+          brand_directory_numbered: false,
+          batch_directory: batchDirectory,
+          delivery_directory: batchArtifacts.deliveryDirectory,
+          diagnostic_directory: batchArtifacts.diagnosticDirectory,
+          entries: entries.map((entry, index) => ({ index: index + 1, id: entry.id, label: entry.label })),
+          brands: groupedBrandSummaries(questionPlan.brandGroups, entries, []),
+          brand_groups: questionPlan.brandGroups,
+        }, null, 2), 'utf8')
+      }
+      emitProgress({ type: 'initialized', entries: entries.map(entry => ({ id: entry.id, label: entry.label })), question_count: questionPlan.tasks.length, results: [] })
       try {
         await waitForDevice()
         await ui.start(payload.serial)
@@ -1133,110 +1170,147 @@ function createRunner(options) {
         let failed = 0
         const results = []
         const failures = []
-        for (const [entryIndex, entry] of entries.entries()) {
-          checkCancelled()
-          emitProgress({ type: 'entry_started', entry_id: entry.id })
-          log(`entry: [${entryIndex + 1}/${entries.length}] ${entry.label} package=${entry.packageName}`)
-          const entryArtifacts = entryArtifactDirectories(batchArtifacts, entryIndex + 1, entry.label, entries.length)
-          const entryResult = await runQuestionsWithRecovery({
-            questions: payload.questions,
-            beforeQuestion: async (question, index) => {
-              const artifacts = questionArtifactDirectories(entryArtifacts, index, question)
-              await startQuestionLogging(artifacts, {
-                batch_id: path.basename(batchDirectory),
-                serial: payload.serial,
-                entry_id: entry.id,
-                entry_label: entry.label,
-                question,
-                question_index: index,
-              })
-              log(`[${entryIndex + 1}/${entries.length} ${index}/${payload.questions.length}] task ready via ${entry.label}: ${question}`)
-            },
-            prepare: () => prepareEntry(entry),
-            execute: async (question, index) => {
-              const artifacts = questionArtifactDirectories(entryArtifacts, index, question)
-              log(`[${entryIndex + 1}/${entries.length} ${index}/${payload.questions.length}] asking via ${entry.label}: ${question}`)
-              const result = await askOnce(payload, artifacts, question, index)
-              log(JSON.stringify(result))
-              results.push({
-                status: 'completed',
-                entry_id: entry.id,
-                entry_label: entry.label,
-                question,
-                question_index: index,
-                delivery_directory: artifacts.deliveryDirectory,
-                diagnostic_directory: artifacts.diagnosticDirectory,
-                event_log: path.join(artifacts.diagnosticDirectory, '执行日志.jsonl'),
-                ...result,
-              })
-              await finishQuestionLogging('question_completed', { screenshot: result.screenshot, metadata: result.metadata })
-            },
-            recordFailure: async (error, question, index) => {
-              const artifacts = questionArtifactDirectories(entryArtifacts, index, question)
-              const directory = artifacts.diagnosticDirectory
-              const failurePath = path.join(directory, '失败.json')
-              const diagnostics = await saveFailureDiagnostics(artifacts, error)
-              const failure = {
-                created_at: new Date().toISOString(),
-                status: 'failed',
-                artifact_layout_version: ARTIFACT_LAYOUT_VERSION,
-                serial: payload.serial,
-                batch_id: path.basename(batchDirectory),
-                question,
-                question_index: index,
-                question_directory: directory,
-                delivery_directory: artifacts.deliveryDirectory,
-                diagnostic_directory: artifacts.diagnosticDirectory,
-                event_log: path.join(directory, '执行日志.jsonl'),
-                performance_report: performanceReportPath(artifacts),
-                batch_event_log: batchEventLog.filePath,
-                entry_id: entry.id,
-                entry_label: entry.label,
-                entry_package: entry.packageName,
-                entry_hierarchy_startup_timeout_ms: entryHierarchyStartupTimeout(entry),
-                batch_continued: true,
-                error_name: error?.name || 'Error',
-                error_message: error?.message || String(error),
-                stack: error?.stack || null,
-                ...seamDiagnosticsForError(error),
-                failure_diagnostics: diagnostics,
-                operation_telemetry: { ...telemetry.snapshot(), current_stage: currentStage },
-              }
-              await fs.mkdir(directory, { recursive: true })
-              await fs.writeFile(failurePath, JSON.stringify(failure, null, 2), 'utf8')
-              failures.push({
-                entry_id: entry.id,
-                entry_label: entry.label,
-                question,
-                question_index: index,
-                failure: failurePath,
-                error_name: failure.error_name,
-                error_message: failure.error_message,
-                failure_diagnostics: diagnostics.manifest,
-              })
-              results.push({
-                status: 'failed',
-                entry_id: entry.id,
-                entry_label: entry.label,
-                question,
-                question_index: index,
-                delivery_directory: artifacts.deliveryDirectory,
-                diagnostic_directory: artifacts.diagnosticDirectory,
-                event_log: path.join(directory, '执行日志.jsonl'),
-                performance_report: performanceReportPath(artifacts),
-                failure: failurePath,
-                failure_diagnostics: diagnostics.manifest,
-              })
-              log(`failed: [${entryIndex + 1}/${entries.length} ${index}/${payload.questions.length}] ${entry.label} / ${question}: ${failure.error_message}`)
-              log(`recovery: 本题已记录到 ${failurePath}；下一题将重新启动并校验当前入口`)
-              await finishQuestionLogging('question_failed', { failure: failurePath, failure_diagnostics: diagnostics.manifest, error_name: failure.error_name, error_message: failure.error_message })
-            },
-            checkCancelled,
-          })
-          completed += entryResult.completed
-          failed += entryResult.failed
+        for (const [unitIndex, unit] of executionUnits.entries()) {
+          if (grouped) {
+            log(`brand: [${unitIndex + 1}/${executionUnits.length}] ${unit.brand} questions=${unit.tasks.length}`)
+            await batchEventLog.record('brand_started', {
+              category: 'lifecycle',
+              details: {
+                brand: unit.brand,
+                brand_sequence: unitIndex + 1,
+                brand_count: executionUnits.length,
+                question_count: unit.tasks.length,
+              },
+            })
+            emitProgress({ type: 'brand_started', brand: unit.brand, brand_sequence: unitIndex + 1, brand_count: executionUnits.length })
+          }
+          for (const [entryIndex, entry] of entries.entries()) {
+            checkCancelled()
+            emitProgress({ type: 'entry_started', entry_id: entry.id })
+            log(`entry: [${entryIndex + 1}/${entries.length}] ${entry.label} package=${entry.packageName}${grouped ? ` brand=${unit.brand}` : ''}`)
+            const entryResult = await runQuestionsWithRecovery({
+              questions: unit.tasks,
+              beforeQuestion: async task => {
+                const artifacts = taskArtifactDirectories(batchArtifacts, entryIndex + 1, entry.label, entries.length, task, grouped)
+                const taskContext = grouped ? {
+                  brand: task.brand,
+                  brand_index: task.brand_index,
+                  question_index_in_brand: task.question_index_in_brand,
+                  global_question_index: task.global_question_index,
+                } : {}
+                await startQuestionLogging(artifacts, {
+                  batch_id: path.basename(batchDirectory),
+                  serial: payload.serial,
+                  entry_id: entry.id,
+                  entry_label: entry.label,
+                  question: task.question,
+                  question_index: task.question_index,
+                  ...taskContext,
+                })
+                log(`[${entryIndex + 1}/${entries.length} ${task.question_index}/${questionPlan.tasks.length}] task ready via ${entry.label}: ${task.question}`)
+              },
+              prepare: () => prepareEntry(entry),
+              execute: async task => {
+                const artifacts = taskArtifactDirectories(batchArtifacts, entryIndex + 1, entry.label, entries.length, task, grouped)
+                const taskContext = grouped ? {
+                  brand: task.brand,
+                  brand_index: task.brand_index,
+                  question_index_in_brand: task.question_index_in_brand,
+                  global_question_index: task.global_question_index,
+                } : {}
+                log(`[${entryIndex + 1}/${entries.length} ${task.question_index}/${questionPlan.tasks.length}] asking via ${entry.label}: ${task.question}`)
+                const result = await askOnce({ ...payload, taskContext }, artifacts, task.question, task.question_index)
+                log(JSON.stringify(result))
+                results.push({
+                  status: 'completed',
+                  entry_id: entry.id,
+                  entry_label: entry.label,
+                  question: task.question,
+                  question_index: task.question_index,
+                  ...taskContext,
+                  delivery_directory: artifacts.deliveryDirectory,
+                  diagnostic_directory: artifacts.diagnosticDirectory,
+                  event_log: path.join(artifacts.diagnosticDirectory, '执行日志.jsonl'),
+                  ...result,
+                })
+                await finishQuestionLogging('question_completed', { screenshot: result.screenshot, metadata: result.metadata })
+              },
+              recordFailure: async (error, task) => {
+                const artifacts = taskArtifactDirectories(batchArtifacts, entryIndex + 1, entry.label, entries.length, task, grouped)
+                const taskContext = grouped ? {
+                  brand: task.brand,
+                  brand_index: task.brand_index,
+                  question_index_in_brand: task.question_index_in_brand,
+                  global_question_index: task.global_question_index,
+                } : {}
+                const directory = artifacts.diagnosticDirectory
+                const failurePath = path.join(directory, '失败.json')
+                const diagnostics = await saveFailureDiagnostics(artifacts, error)
+                const failure = {
+                  created_at: new Date().toISOString(),
+                  status: 'failed',
+                  artifact_layout_version: ARTIFACT_LAYOUT_VERSION,
+                  serial: payload.serial,
+                  batch_id: path.basename(batchDirectory),
+                  question: task.question,
+                  question_index: task.question_index,
+                  ...taskContext,
+                  question_directory: directory,
+                  delivery_directory: artifacts.deliveryDirectory,
+                  diagnostic_directory: artifacts.diagnosticDirectory,
+                  event_log: path.join(directory, '执行日志.jsonl'),
+                  performance_report: performanceReportPath(artifacts),
+                  batch_event_log: batchEventLog.filePath,
+                  entry_id: entry.id,
+                  entry_label: entry.label,
+                  entry_package: entry.packageName,
+                  entry_hierarchy_startup_timeout_ms: entryHierarchyStartupTimeout(entry),
+                  batch_continued: true,
+                  error_name: error?.name || 'Error',
+                  error_message: error?.message || String(error),
+                  stack: error?.stack || null,
+                  ...seamDiagnosticsForError(error),
+                  failure_diagnostics: diagnostics,
+                  operation_telemetry: { ...telemetry.snapshot(), current_stage: currentStage },
+                }
+                await fs.mkdir(directory, { recursive: true })
+                await fs.writeFile(failurePath, JSON.stringify(failure, null, 2), 'utf8')
+                failures.push({
+                  entry_id: entry.id,
+                  entry_label: entry.label,
+                  question: task.question,
+                  question_index: task.question_index,
+                  ...taskContext,
+                  failure: failurePath,
+                  error_name: failure.error_name,
+                  error_message: failure.error_message,
+                  failure_diagnostics: diagnostics.manifest,
+                })
+                results.push({
+                  status: 'failed',
+                  entry_id: entry.id,
+                  entry_label: entry.label,
+                  question: task.question,
+                  question_index: task.question_index,
+                  ...taskContext,
+                  delivery_directory: artifacts.deliveryDirectory,
+                  diagnostic_directory: artifacts.diagnosticDirectory,
+                  event_log: path.join(directory, '执行日志.jsonl'),
+                  performance_report: performanceReportPath(artifacts),
+                  failure: failurePath,
+                  failure_diagnostics: diagnostics.manifest,
+                })
+                log(`failed: [${entryIndex + 1}/${entries.length} ${task.question_index}/${questionPlan.tasks.length}] ${entry.label} / ${task.question}: ${failure.error_message}`)
+                log(`recovery: 本题已记录到 ${failurePath}；下一题将重新启动并校验当前入口`)
+                await finishQuestionLogging('question_failed', { failure: failurePath, failure_diagnostics: diagnostics.manifest, error_name: failure.error_name, error_message: failure.error_message })
+              },
+              checkCancelled,
+            })
+            completed += entryResult.completed
+            failed += entryResult.failed
+          }
         }
-        const total = entries.length * payload.questions.length
+        const total = entries.length * questionPlan.tasks.length
         const summaryPath = path.join(batchArtifacts.diagnosticDirectory, 'batch-summary.json')
         const summary = {
           created_at: new Date().toISOString(),
@@ -1247,10 +1321,15 @@ function createRunner(options) {
           diagnostic_directory: batchArtifacts.diagnosticDirectory,
           event_log: batchEventLog.filePath,
           entries: entries.map(entry => ({ id: entry.id, label: entry.label, package: entry.packageName })),
-          question_count: payload.questions.length,
+          question_plan_mode: questionPlan.mode,
+          brand_groups: questionPlan.brandGroups,
+          brand_manifest: brandManifestPath,
+          brands: grouped ? groupedBrandSummaries(questionPlan.brandGroups, entries, results) : [],
+          question_count: questionPlan.tasks.length,
           total,
           completed,
           failed,
+          search_results_only: results.filter(result => result.search_result_only).length,
           status: failed ? 'completed_with_failures' : 'completed',
           results,
           failures,
@@ -1319,6 +1398,7 @@ function createRunner(options) {
         if (!entriesById.has(item.entry_id)) throw new Error(`原批次使用的入口“${item.entry_id}”已不可用，无法安全重试。`)
       }
       const retryAttempt = retryAttemptCount(previousSummary)
+      const grouped = previousSummary.question_plan_mode === 'grouped'
       const results = [...previousSummary.results]
       const retryStartedAt = new Date().toISOString()
       const retryFailures = []
@@ -1346,8 +1426,21 @@ function createRunner(options) {
           const entry = entriesById.get(item.entry_id)
           const entryCount = Array.isArray(previousSummary.entries) ? previousSummary.entries.length : 1
           const entryIndex = Math.max(0, (previousSummary.entries || []).findIndex(candidate => candidate.id === entry.id))
-          const entryArtifacts = entryArtifactDirectories(batchArtifacts, entryIndex + 1, entry.label, entryCount)
-          const artifacts = questionArtifactDirectories(entryArtifacts, item.question_index, item.question)
+          const task = {
+            question: item.question,
+            question_index: item.question_index,
+            global_question_index: item.global_question_index || item.question_index,
+            question_index_in_brand: item.question_index_in_brand,
+            brand: item.brand,
+            brand_index: item.brand_index,
+          }
+          const taskContext = grouped ? {
+            brand: task.brand,
+            brand_index: task.brand_index,
+            question_index_in_brand: task.question_index_in_brand,
+            global_question_index: task.global_question_index,
+          } : {}
+          const artifacts = taskArtifactDirectories(batchArtifacts, entryIndex + 1, entry.label, entryCount, task, grouped)
           const failurePath = path.join(artifacts.diagnosticDirectory, '失败.json')
           await startQuestionLogging(artifacts, {
             batch_id: path.basename(batchDirectory),
@@ -1356,6 +1449,7 @@ function createRunner(options) {
             entry_label: entry.label,
             question: item.question,
             question_index: item.question_index,
+            ...taskContext,
             retry_attempt: retryAttempt,
           })
           try {
@@ -1364,13 +1458,14 @@ function createRunner(options) {
             await fs.rm(artifacts.deliveryDirectory, { recursive: true, force: true })
             await prepareEntry(entry)
             log(`retry: [${item.question_index}] ${entry.label} / ${item.question}`)
-            const result = await askOnce(payload, artifacts, item.question, item.question_index)
+            const result = await askOnce({ ...payload, taskContext }, artifacts, item.question, item.question_index)
             const replacement = {
               status: 'completed',
               entry_id: entry.id,
               entry_label: entry.label,
               question: item.question,
               question_index: item.question_index,
+              ...taskContext,
               delivery_directory: artifacts.deliveryDirectory,
               diagnostic_directory: artifacts.diagnosticDirectory,
               event_log: path.join(artifacts.diagnosticDirectory, '执行日志.jsonl'),
@@ -1397,6 +1492,7 @@ function createRunner(options) {
               batch_id: path.basename(batchDirectory),
               question: item.question,
               question_index: item.question_index,
+              ...taskContext,
               question_directory: artifacts.diagnosticDirectory,
               delivery_directory: artifacts.deliveryDirectory,
               diagnostic_directory: artifacts.diagnosticDirectory,
@@ -1419,13 +1515,14 @@ function createRunner(options) {
             results[item.resultIndex] = {
               status: 'failed', entry_id: entry.id, entry_label: entry.label,
               question: item.question, question_index: item.question_index,
+              ...taskContext,
               delivery_directory: artifacts.deliveryDirectory, diagnostic_directory: artifacts.diagnosticDirectory,
               event_log: path.join(artifacts.diagnosticDirectory, '执行日志.jsonl'), failure: failurePath,
               performance_report: performanceReportPath(artifacts),
               retry_attempt: retryAttempt,
               failure_diagnostics: diagnostics.manifest,
             }
-            retryFailures.push({ entry_id: entry.id, entry_label: entry.label, question: item.question, question_index: item.question_index, failure: failurePath, failure_diagnostics: diagnostics.manifest, error_name: failure.error_name, error_message: failure.error_message })
+            retryFailures.push({ entry_id: entry.id, entry_label: entry.label, question: item.question, question_index: item.question_index, ...taskContext, failure: failurePath, failure_diagnostics: diagnostics.manifest, error_name: failure.error_name, error_message: failure.error_message })
             log(`retry failed: [${item.question_index}] ${entry.label} / ${item.question}: ${failure.error_message}`)
             await finishQuestionLogging('question_failed', { retry_attempt: retryAttempt, failure: failurePath, failure_diagnostics: diagnostics.manifest, error_name: failure.error_name, error_message: failure.error_message })
           }
@@ -1437,8 +1534,12 @@ function createRunner(options) {
           serial: payload.serial,
           completed: results.filter(result => result.status === 'completed').length,
           failed: remainingFailures.length,
+          search_results_only: results.filter(result => result.search_result_only).length,
           status: remainingFailures.length ? 'completed_with_failures' : 'completed',
           results,
+          brands: previousSummary.question_plan_mode === 'grouped'
+            ? groupedBrandSummaries(previousSummary.brand_groups || [], previousSummary.entries || [], results)
+            : [],
           failures: remainingFailures.map(result => retryFailures.find(failure => failure.entry_id === result.entry_id && failure.question_index === result.question_index && failure.question === result.question) || {
             entry_id: result.entry_id, entry_label: result.entry_label, question: result.question,
             question_index: result.question_index, failure: result.failure,
@@ -1516,6 +1617,7 @@ module.exports = {
   DOUYIN_SEARCH_SUMMARY_FILENAME,
   TOUTIAO_SEARCH_SUMMARY_FILENAME,
   ARTIFACT_LAYOUT_VERSION,
+  groupedBrandSummaries,
   douyinSearchInput,
   douyinGenericAiAnswerBounds,
   douyinMiniAppEntryBounds,

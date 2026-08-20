@@ -10,6 +10,7 @@ const entryList = $('#entry-list')
 const updateAction = $('#update-action')
 const { retryableBatchDirectory } = window.retryState
 const { initializeEntryProgress, applyEntryProgress } = window.entryProgress
+const { parseQuestionInput } = window.questionPlan
 const {
   FIXED_FIELDS: generatorFixedFields,
   defaultTopicGroup,
@@ -304,7 +305,9 @@ function renderEntryProgress() {
   }
   const succeeded = entryProgressState.entries.reduce((sum, entry) => sum + entry.succeeded, 0)
   const failed = entryProgressState.entries.reduce((sum, entry) => sum + entry.failed, 0)
-  totalLabel.textContent = `成功 ${succeeded} · 失败 ${failed}`
+  totalLabel.textContent = entryProgressState.current_brand
+    ? `${entryProgressState.current_brand}（${entryProgressState.brand_sequence}/${entryProgressState.brand_count}） · 成功 ${succeeded} · 失败 ${failed}`
+    : `成功 ${succeeded} · 失败 ${failed}`
   const rows = entryProgressState.entries.map(entry => {
     const row = document.createElement('article')
     row.className = 'entry-progress-item'
@@ -348,8 +351,51 @@ function renderUpdateState(next) {
   else updateAction.textContent = `v${next.currentVersion} · 检查更新`
 }
 
+function currentQuestionPlan() {
+  return parseQuestionInput(questions.value)
+}
+
 function uniqueQuestions() {
-  return [...new Set(questions.value.split('\n').map(line => line.trim()).filter(Boolean))]
+  return currentQuestionPlan().questions
+}
+
+function renderQuestionPlan(plan = currentQuestionPlan()) {
+  const preview = $('#question-plan-preview')
+  preview.classList.toggle('is-grouped', plan.mode === 'grouped')
+  preview.classList.toggle('has-errors', plan.errors.length > 0)
+  if (plan.errors.length) {
+    preview.replaceChildren(...plan.errors.map(message => {
+      const error = document.createElement('p')
+      error.className = 'question-plan-error'
+      error.textContent = message
+      return error
+    }))
+    return
+  }
+  if (plan.mode !== 'grouped') {
+    const empty = document.createElement('p')
+    empty.className = 'question-plan-empty'
+    empty.textContent = plan.questions.length
+      ? `普通问题列表 · ${plan.questions.length} 条问题 · 结果沿用原目录结构`
+      : '每行输入一题；需要分品牌存档时，在每组问题前直接填写“#品牌名”。'
+    preview.replaceChildren(empty)
+    return
+  }
+  const summary = document.createElement('p')
+  summary.className = 'question-plan-summary'
+  summary.textContent = `${plan.brandGroups.length} 个品牌 · ${plan.tasks.length} 条问题；品牌目录不加序号`
+  const brands = plan.brandGroups.map(group => {
+    const brand = document.createElement('div')
+    brand.className = 'question-plan-brand'
+    const title = document.createElement('strong')
+    title.textContent = group.brand
+    const count = document.createElement('span')
+    count.className = 'question-plan-brand-count'
+    count.textContent = `${group.questions.length} 题`
+    brand.append(title, count)
+    return brand
+  })
+  preview.replaceChildren(summary, ...brands)
 }
 
 function selectedEntries() {
@@ -357,11 +403,18 @@ function selectedEntries() {
 }
 
 function updatePlan() {
+  const plan = currentQuestionPlan()
   const deviceCount = device.value ? 1 : 0
   const entryCount = selectedEntries().length
-  const questionCount = uniqueQuestions().length
-  $('#plan').textContent = `${deviceCount} 台设备 × ${entryCount} 个入口 × ${questionCount} 条问题 = ${deviceCount * entryCount * questionCount} 次计划`
+  const questionCount = plan.questions.length
+  const grouping = plan.mode === 'grouped'
+    ? `${plan.brandGroups.length} 品牌 · `
+    : ''
+  $('#plan').textContent = plan.errors.length
+    ? `分组输入有 ${plan.errors.length} 项需要修正`
+    : `${grouping}${deviceCount} 台设备 × ${entryCount} 个入口 × ${questionCount} 条问题 = ${deviceCount * entryCount * questionCount} 次计划`
   $('#question-count').textContent = `${questionCount} 条问题`
+  renderQuestionPlan(plan)
 }
 
 function appendLog(text) {
@@ -431,6 +484,10 @@ async function importQuestionFile(filePath) {
     return
   }
   try {
+    if (currentQuestionPlan().mode === 'grouped') {
+      status.textContent = '当前为品牌分组模式，请把导入的问题放到对应“#品牌名”标题下'
+      return
+    }
     const imported = await window.automation.importQuestions({ file: filePath, column: $('#column-name').value })
     questions.value = [...uniqueQuestions(), ...imported].filter((item, index, list) => list.indexOf(item) === index).join('\n')
     updatePlan()
@@ -547,6 +604,10 @@ $('#confirm-generated-questions').addEventListener('click', () => {
     setGeneratorMessages(['请删除或填写空白的预览问题。'])
     return
   }
+  if (currentQuestionPlan().mode === 'grouped') {
+    setGeneratorMessages(['当前队列使用品牌分组，请关闭生成器后把问题加入对应“#品牌名”标题下。'])
+    return
+  }
   const existing = uniqueQuestions()
   const seen = new Set(existing.map(canonicalQuestion))
   const additions = []
@@ -655,6 +716,8 @@ updateAction.addEventListener('click', async () => {
 
 start.addEventListener('click', async () => {
   clearLog()
+  const questionPlan = currentQuestionPlan()
+  if (questionPlan.errors.length) { status.textContent = `请先修正分组输入：${questionPlan.errors[0]}`; return }
   const timeout = Number($('#timeout').value)
   if (!Number.isFinite(timeout) || timeout <= 0) { status.textContent = '请输入大于 0 的超时时间'; return }
   const maxLongImageHeight = Number($('#max-long-image-height').value)
@@ -664,7 +727,8 @@ start.addEventListener('click', async () => {
   try {
     appendLog('$ 启动自动化任务\n')
     await window.automation.start({
-      questions: uniqueQuestions(),
+      questions: questionPlan.questions,
+      brandGroups: questionPlan.brandGroups,
       entries,
       serial: device.value,
       outputDir: $('#output-dir').value.trim(),

@@ -7,10 +7,10 @@ const sharp = require('sharp')
 const XLSX = require('xlsx')
 const { questionVisible, questionVisibleExact, currentQuestionText, replyTailOnScreen, findChatScrollBounds, validateCaptureViewport, floatingScrollControlBounds, replyCaptureBounds, estimateVerticalScrollShift, sharedTextSeam, evidencePanelBounds, evidencePanelBoundsForTitle, visibleLabelBounds, visibleLabelBoundsList, boundsListForNodeAttribute, responseTimeoutRetryTarget, referenceProductsSection, referenceProductImageBounds } = require('../../src/automation/hierarchy')
 const { stackFramesInGroups, verifyFrameOverlap, verifyReplyFrameOverlap, verifyProductGridOverlap, imageInfo, imageLooksLoaded, imagesSimilar, imageRegionsStable, detectXiaoheUserQuestionBubble, alignCropToWhitespace, stitchFramesWithOverlaps, composeLongImages, cropFramesAtTextSeams } = require('../../src/automation/images')
-const { createBatchDirectory, questionArtifactDirectory, batchArtifactDirectories, entryArtifactDirectories, questionArtifactDirectories } = require('../../src/automation/utils')
+const { createBatchDirectory, questionArtifactDirectory, batchArtifactDirectories, entryArtifactDirectories, questionArtifactDirectories, groupedQuestionArtifactDirectories } = require('../../src/automation/utils')
 const { EventLog, classifyAutomationLog } = require('../../src/automation/event-log')
 const { loadQuestionFile } = require('../../src/questions')
-const { adbConnectionLost, captureFailureDiagnostics, captureStableObserved, captureStableSandwich, calibratedProductFallbackOverlap, chatSwipePlan, conservativeFallbackOverlap, buildReplyImages, CancelledError, confirmPersistentScrollEnd, confirmQuestionAtTop, DOUYIN_MINIAPP_ENTRY_FILENAME, DOUYIN_SEARCH_SUMMARY_FILENAME, TOUTIAO_SEARCH_SUMMARY_FILENAME, douyinGenericAiAnswerBounds, douyinMiniAppCaptureBounds, douyinMiniAppEntryBounds, douyinOcrViewFullTarget, douyinSearchInput, douyinSearchResultTarget, douyinSearchResultsBounds, douyinViewFullBounds, failedRetryItems, fillQuestionInput, historyOnboardingVisible, maxLongImageHeight, miniAppQuestionFirstFrameCropBounds, miniAppReferenceProductsTrigger, observerRegionFallbackOptions, prepareDeviceForAutomation, prepareEmbeddedEvidence, referenceProductDrawerBounds, referenceProductsCaptureComplete, referenceProductSheetExpanded, referenceProductsTrigger, referenceProductViewportReadiness, refreshedReferenceProductsTrigger, requireQuestionLocated, retryAttemptCount, runQuestionsWithRecovery, scrollEndConfirmed, scrollSingleQuestionSessionToTop, toutiaoGenericConsultationPage, toutiaoHomeSearchBounds, toutiaoOcrViewMoreTarget, toutiaoSearchInput, toutiaoSearchResultBelongsToQuestion, toutiaoViewMoreBounds, waitForPackageHierarchy } = require('../../src/automation/runner')
+const { adbConnectionLost, captureFailureDiagnostics, captureStableObserved, captureStableSandwich, calibratedProductFallbackOverlap, chatSwipePlan, conservativeFallbackOverlap, buildReplyImages, CancelledError, confirmPersistentScrollEnd, confirmQuestionAtTop, DOUYIN_MINIAPP_ENTRY_FILENAME, DOUYIN_SEARCH_SUMMARY_FILENAME, TOUTIAO_SEARCH_SUMMARY_FILENAME, douyinGenericAiAnswerBounds, douyinMiniAppCaptureBounds, douyinMiniAppEntryBounds, douyinOcrViewFullTarget, douyinSearchInput, douyinSearchResultTarget, douyinSearchResultsBounds, douyinViewFullBounds, failedRetryItems, fillQuestionInput, groupedBrandSummaries, historyOnboardingVisible, maxLongImageHeight, miniAppQuestionFirstFrameCropBounds, miniAppReferenceProductsTrigger, observerRegionFallbackOptions, prepareDeviceForAutomation, prepareEmbeddedEvidence, referenceProductDrawerBounds, referenceProductsCaptureComplete, referenceProductSheetExpanded, referenceProductsTrigger, referenceProductViewportReadiness, refreshedReferenceProductsTrigger, requireQuestionLocated, retryAttemptCount, runQuestionsWithRecovery, scrollEndConfirmed, scrollSingleQuestionSessionToTop, toutiaoGenericConsultationPage, toutiaoHomeSearchBounds, toutiaoOcrViewMoreTarget, toutiaoSearchInput, toutiaoSearchResultBelongsToQuestion, toutiaoViewMoreBounds, waitForPackageHierarchy } = require('../../src/automation/runner')
 const { toutiaoAddToHomeScreenCancelBounds } = require('../../src/automation/miniapp-locators')
 const { automationEntries, ENTRY_DEFINITIONS, entryHierarchyStartupTimeout, hierarchyBelongsToPackage, normalizeAutomationEntries } = require('../../src/automation/entry-catalog')
 const { DouyinSearchResultNotFoundError, ToutiaoAnswerCardNotFoundError, ToutiaoFullAnswerNotOpenedError, runDouyinSearchResultAttempts, runToutiaoAnswerCardAttempts, runToutiaoFullAnswerAttempts } = require('../../src/automation/search-recovery')
@@ -565,6 +565,13 @@ test('失败重试只选择失败题，并保留原结果位置和题号', () =>
   assert.throws(() => failedRetryItems({ results: [{ status: 'failed', question: '缺少入口', question_index: 1 }] }), /信息不完整/)
 })
 
+test('分组失败项缺少品牌路径信息时拒绝重试', () => {
+  assert.throws(() => failedRetryItems({
+    question_plan_mode: 'grouped',
+    results: [{ status: 'failed', entry_id: 'xiaohe-app', question: '问题', question_index: 1 }],
+  }), /品牌归档信息不完整/)
+})
+
 test('单题失败后重新准备入口并继续执行后续问题', async () => {
   const events = []
   const result = await runQuestionsWithRecovery({
@@ -783,6 +790,37 @@ test('抖音刷新后仍没有入口时明确失败且不进行第三轮', async
   assert.deepEqual(calls, ['wait:1', 'refresh', 'wait:2'])
 })
 
+test('抖音两轮未召回智能总结或小荷入口时保存正式搜索结果截图', async () => {
+  let saved = null
+  const workflow = createQuestionWorkflows({
+    observer: { snapshot: () => ({ active: true }) },
+    recoverySnapshot: () => ({}),
+    log: () => {},
+    inputDouyinQuestion: async () => [600, 40, 710, 120],
+    tap: async () => {},
+    waitForDouyinSearchResult: async () => { throw new DouyinSearchResultNotFoundError('未召回') },
+    refreshDouyinSearchResults: async () => {},
+    source: async () => '<hierarchy><node text="普通搜索结果" /></hierarchy>',
+    screenshot: async () => Buffer.from('douyin-results'),
+    saveArtifacts: async options => {
+      saved = options
+      return { screenshot: `${options.artifacts.deliveryDirectory}/${options.stem}.png`, metadata: '/tmp/meta.json' }
+    },
+    getActiveEntry: () => ENTRY_DEFINITIONS['douyin-xiaohe-miniapp'],
+    getActivePackageName: () => ENTRY_DEFINITIONS['douyin-xiaohe-miniapp'].packageName,
+  })
+  const artifacts = { batchDirectory: '/tmp/batch', deliveryDirectory: '/tmp/delivery', diagnosticDirectory: '/tmp/debug' }
+  const result = await workflow.askOnceDouyin({ serial: 'device', timeout: 1 }, artifacts, '测试问题', 1)
+
+  assert.equal(result.search_result_only, true)
+  assert.equal(saved.stem, '回答_搜索结果')
+  assert.equal(saved.stitch, false)
+  assert.equal(saved.frame.toString(), 'douyin-results')
+  assert.equal(saved.meta.douyin_result_mode, 'search_results_only')
+  assert.equal(saved.meta.xiaohe_result_detected, false)
+  assert.equal(saved.meta.search_result_capture_complete, true)
+})
+
 test('抖音两轮都只检查首屏且第一次无入口后仅下拉刷新一次', async () => {
   let now = 0
   const swipes = []
@@ -868,6 +906,36 @@ test('头条同词重试后仍未召回则明确失败且不进行第三次搜�
     repeatExactSearch: async () => calls.push('repeat-exact'),
   }), /相同问题受控重试后.*仍未出现/)
   assert.deepEqual(calls, ['wait:1', 'repeat-exact', 'wait:2'])
+})
+
+test('头条同词重试仍未召回小荷入口时保存正式搜索结果截图', async () => {
+  let saved = null
+  const workflow = createQuestionWorkflows({
+    observer: { snapshot: () => ({ active: true }) },
+    recoverySnapshot: () => ({}),
+    log: () => {},
+    inputToutiaoQuestion: async () => [600, 40, 710, 120],
+    tap: async () => {},
+    waitForToutiaoAnswerCard: async () => { throw new ToutiaoAnswerCardNotFoundError('未召回') },
+    source: async () => '<hierarchy><node text="普通搜索结果" /></hierarchy>',
+    screenshot: async () => Buffer.from('toutiao-results'),
+    saveArtifacts: async options => {
+      saved = options
+      return { screenshot: `${options.artifacts.deliveryDirectory}/${options.stem}.png`, metadata: '/tmp/meta.json' }
+    },
+    getActiveEntry: () => ENTRY_DEFINITIONS['toutiao-xiaohe-miniapp'],
+    getActivePackageName: () => ENTRY_DEFINITIONS['toutiao-xiaohe-miniapp'].packageName,
+  })
+  const artifacts = { batchDirectory: '/tmp/batch', deliveryDirectory: '/tmp/delivery', diagnosticDirectory: '/tmp/debug' }
+  const result = await workflow.askOnceToutiao({ serial: 'device', timeout: 1 }, artifacts, '测试问题', 1)
+
+  assert.equal(result.search_result_only, true)
+  assert.equal(saved.stem, '回答_搜索结果')
+  assert.equal(saved.stitch, false)
+  assert.equal(saved.frame.toString(), 'toutiao-results')
+  assert.equal(saved.meta.toutiao_result_mode, 'search_results_only')
+  assert.equal(saved.meta.xiaohe_result_detected, false)
+  assert.equal(saved.meta.search_result_capture_complete, true)
 })
 
 test('头条读取或点击异常不会被同词重试掩盖', async () => {
@@ -2180,7 +2248,7 @@ test('卡片增高但没有上箭头或紧邻资料行时不能误判展开', as
     waitForStable: async () => ({ frame: Buffer.from('grown'), xml: expandedXml }),
     log: () => {},
   }, CHAT_BOUNDS), /未确认资料展开/)
-  assert.equal(taps, 3)
+  assert.equal(taps, 1)
 })
 
 test('到顶后通过OCR识别引用资料标题并按物理与逻辑尺寸映射点击', async () => {
@@ -2487,6 +2555,79 @@ test('紧邻标题的超宽编号文献行即使OCR漏掉省略号仍可确认',
   assert.equal(evidenceSummaryExpandedByOcr(recognition, target), true)
 })
 
+test('紧邻标题的完整指南题名无需省略号或来源标签也可确认展开', () => {
+  for (const scale of [1, 2 / 3]) {
+    const target = {
+      normalizedText: '参考1篇医学文献',
+      variant: 'medical_references',
+      physicalBounds: [62, 704, 479, 760].map(value => Math.round(value * scale)),
+    }
+    const recognition = {
+      image: { width: Math.round(1080 * scale), height: Math.round(2400 * scale) },
+      results: [{
+        text: '1. 中国超重/肥胖医学营养治疗指南(2021)',
+        normalizedText: '1.中国超重/肥胖医学营养治疗指南(2021)',
+        confidence: 0.99274,
+        bounds: [65, 793, 831, 842].map(value => Math.round(value * scale)),
+      }],
+    }
+
+    assert.equal(evidenceSummaryExpandedByOcr(recognition, target), true)
+  }
+})
+
+test('紧邻标题的完整研究进展题名无需来源标签也可确认展开', () => {
+  const target = {
+    normalizedText: '参考1篇医学文献',
+    variant: 'medical_references',
+    physicalBounds: [63, 816, 480, 869],
+  }
+  const recognition = {
+    image: { width: 1080, height: 2400 },
+    results: [{
+      text: '1. 替扎尼定预防治疗慢性每日头痛的研究进展',
+      normalizedText: '1.替扎尼定预防治疗慢性每日头痛的研究进展',
+      confidence: 0.9926,
+      bounds: [66, 903, 901, 951],
+    }],
+  }
+
+  assert.equal(evidenceSummaryExpandedByOcr(recognition, target), true)
+})
+
+test('完整指南题名在首次点击后确认展开且不会再次切换', async () => {
+  const collapsed = {
+    engine: 'rapidocr', elapsedMs: 300, image: { width: 1080, height: 2400 },
+    results: [{ text: '参考1篇医学文献', normalizedText: '参考1篇医学文献', confidence: 0.999, bounds: [62, 704, 479, 760] }],
+  }
+  const expanded = {
+    ...collapsed,
+    results: [
+      collapsed.results[0],
+      {
+        text: '1. 中国超重/肥胖医学营养治疗指南(2021)',
+        normalizedText: '1.中国超重/肥胖医学营养治疗指南(2021)',
+        confidence: 0.99274,
+        bounds: [65, 793, 831, 842],
+      },
+    ],
+  }
+  const recognitions = [collapsed, expanded]
+  let taps = 0
+  const result = await prepareEmbeddedEvidence({
+    screenshot: async () => Buffer.from('screen'),
+    ocr: { recognize: async () => recognitions.shift() },
+    windowSize: async () => ({ width: 1080, height: 2400 }),
+    tap: async () => { taps += 1 },
+    delay: async () => {},
+    waitForStable: async () => ({ frame: Buffer.from('expanded'), xml: '<hierarchy />' }),
+    log: () => {},
+  }, CHAT_BOUNDS)
+
+  assert.equal(result.expanded, true)
+  assert.equal(taps, 1)
+})
+
 test('新版医学文献标题下只有编号回答正文时不能误判为展开', () => {
   const target = {
     normalizedText: '参考1篇医学文献',
@@ -2513,7 +2654,7 @@ test('新版医学文献标题下只有编号回答正文时不能误判为展�
   assert.equal(evidenceSummaryExpandedByOcr(laterTruncatedParagraph, target), false)
 })
 
-test('首次文字点击未展开时覆盖OCR包含或不包含右侧箭头的两种边界', async () => {
+test('首次点击后状态不明确时仅做只读OCR复核且不再次切换', async () => {
   const collapsedRecognition = {
     engine: 'rapidocr',
     elapsedMs: 300,
@@ -2552,12 +2693,8 @@ test('首次文字点击未展开时覆盖OCR包含或不包含右侧箭头的�
     log: () => {},
   }, CHAT_BOUNDS)
 
-  assert.equal(taps.length, 3)
+  assert.equal(taps.length, 1)
   assert.deepEqual(taps[0], [300, 725])
-  assert.deepEqual(taps[1], [525, 725])
-  assert.deepEqual(taps[2], [575, 725])
-  assert.notDeepEqual(taps[1], taps[0])
-  assert.notDeepEqual(taps[2], taps[0])
   assert.equal(result.expanded, true)
 })
 
@@ -2727,7 +2864,36 @@ test('批次产物拆分为纯图片交付区和镜像调试区，CSV 默认读�
   } finally { await fs.rm(directory, { recursive: true, force: true }) }
 })
 
+test('分组产物只有品牌一层，入口和题目保留顺序', () => {
+  const batch = batchArtifactDirectories('/captures/batch_1')
+  const artifacts = groupedQuestionArtifactDirectories(batch, 2, '抖音搜索框', {
+    brand: '诺和诺德',
+    question: '有哪些副作用？',
+    question_index_in_brand: 3,
+  })
+  assert.equal(artifacts.deliveryDirectory, path.join('/captures/batch_1', '交付图片', '诺和诺德', '02_抖音搜索框', '003_有哪些副作用？'))
+  assert.equal(artifacts.diagnosticDirectory, path.join('/captures/batch_1', '调试产物', '诺和诺德', '02_抖音搜索框', '003_有哪些副作用？'))
+})
+
+test('品牌汇总按入口数量计算计划、成功和失败', () => {
+  const brands = groupedBrandSummaries([
+    { brand: '诺和诺德', questions: ['问题一', '问题二'] },
+  ], [{ id: 'a' }, { id: 'b' }], [
+    { brand_index: 1, status: 'completed', search_result_only: true },
+    { brand_index: 1, status: 'failed' },
+  ])
+  assert.deepEqual(brands, [{
+    name: '诺和诺德', brand_index: 1, directory_name: '诺和诺德',
+    question_count: 2, planned: 4, completed: 1, failed: 1, search_results_only: 1,
+  }])
+})
+
 test('结构化事件日志记录参考药品关键阶段和单题上下文', async () => {
+  assert.deepEqual(classifyAutomationLog('capture: 抖音未召回智能总结或小荷入口，搜索结果已保存 /tmp/回答_搜索结果.png'), {
+    event: 'search_results_only_captured',
+    category: 'capture',
+    details: { platform: '抖音', screenshot: '/tmp/回答_搜索结果.png', xiaohe_result_detected: false },
+  })
   assert.deepEqual(classifyAutomationLog('capture: 推荐药品 page 3'), {
     event: 'reference_products_page_captured',
     category: 'capture',

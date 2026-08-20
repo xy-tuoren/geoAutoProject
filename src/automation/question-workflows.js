@@ -5,6 +5,8 @@ const { entryHierarchyStartupTimeout } = require('./entry-catalog')
 const { findChatScrollBounds } = require('./hierarchy')
 const { recoverTimedOutReply } = require('./existing-reply-recovery')
 const {
+  DouyinSearchResultNotFoundError,
+  ToutiaoAnswerCardNotFoundError,
   runDouyinSearchResultAttempts,
   runToutiaoAnswerCardAttempts,
   runToutiaoFullAnswerAttempts,
@@ -15,6 +17,7 @@ const SEARCH_SUMMARY_FILENAME = '回答_智能总结.png'
 const DOUYIN_SEARCH_SUMMARY_FILENAME = SEARCH_SUMMARY_FILENAME
 const DOUYIN_MINIAPP_ENTRY_FILENAME = '回答_小程序入口.png'
 const TOUTIAO_SEARCH_SUMMARY_FILENAME = SEARCH_SUMMARY_FILENAME
+const SEARCH_RESULTS_ONLY_STEM = '回答_搜索结果'
 
 function createQuestionWorkflows({
   observer,
@@ -61,6 +64,50 @@ function createQuestionWorkflows({
     }
   }
 
+  async function saveUnmatchedSearchResult({ platform, artifacts, question, meta, error, observerBaseline, recoveryBaseline }) {
+    const [xml, frame] = await Promise.all([source(), screenshot()])
+    const screenshotPath = path.join(artifacts.deliveryDirectory, `${SEARCH_RESULTS_ONLY_STEM}.png`)
+    const platformMeta = platform === 'douyin'
+      ? {
+          douyin_result_mode: 'search_results_only',
+          douyin_search_attempts: 2,
+          douyin_search_refreshed: true,
+          douyin_search_summary_captured: false,
+          douyin_miniapp_entry_detected: false,
+          douyin_question_logical_image_count: 1,
+          douyin_search_result_screenshot: screenshotPath,
+        }
+      : {
+          toutiao_result_mode: 'search_results_only',
+          toutiao_search_attempts: 2,
+          toutiao_search_repeated_exact_question: true,
+          toutiao_search_summary_captured: false,
+          toutiao_question_logical_image_count: 1,
+          toutiao_search_result_screenshot: screenshotPath,
+        }
+    const result = await saveArtifacts({
+      artifacts,
+      stem: SEARCH_RESULTS_ONLY_STEM,
+      question,
+      status: 'search_completed_without_xiaohe_result',
+      xml,
+      frame,
+      stitch: false,
+      meta: {
+        ...meta,
+        ...platformMeta,
+        search_result_only: true,
+        xiaohe_result_detected: false,
+        search_result_capture_complete: true,
+        search_result_not_found_reason: error.message,
+      },
+      observerBaseline,
+      recoveryBaseline,
+    })
+    log(`capture: ${platform === 'douyin' ? '抖音' : '头条'}未召回智能总结或小荷入口，搜索结果已保存 ${screenshotPath}`)
+    return { search_result_only: true, search_result_screenshot: screenshotPath, ...result }
+  }
+
   async function askOnceDouyinAttempt(payload, artifacts, question, index) {
     const observerBaseline = typeof observer.snapshot === 'function' ? observer.snapshot() : {}
     const recoveryBaseline = recoverySnapshot()
@@ -72,6 +119,7 @@ function createQuestionWorkflows({
       batch_id: path.basename(artifacts.batchDirectory),
       question_index: index,
       question_directory: directory,
+      ...(payload.taskContext || {}),
       ...activeEntryMetadata(),
       new_session_requested: Boolean(payload.newSession),
       new_session_performed: false,
@@ -92,6 +140,11 @@ function createQuestionWorkflows({
         douyin_search_refreshed: card.refreshed,
       })
     } catch (error) {
+      if (error instanceof DouyinSearchResultNotFoundError) {
+        return saveUnmatchedSearchResult({
+          platform: 'douyin', artifacts, question, meta, error, observerBaseline, recoveryBaseline,
+        })
+      }
       await fs.mkdir(directory, { recursive: true })
       const [xml, frame] = await Promise.all([source(), screenshot()])
       await Promise.all([
@@ -187,6 +240,7 @@ function createQuestionWorkflows({
       batch_id: path.basename(artifacts.batchDirectory),
       question_index: index,
       question_directory: directory,
+      ...(payload.taskContext || {}),
       ...activeEntryMetadata(),
       new_session_requested: Boolean(payload.newSession),
       new_session_performed: false,
@@ -196,15 +250,23 @@ function createQuestionWorkflows({
     }
     log('stage: 正在执行头条搜索')
     await tap((search[0] + search[2]) / 2, (search[1] + search[3]) / 2)
-    let card = await runToutiaoAnswerCardAttempts({
-      waitForResult: () => waitForToutiaoAnswerCard(payload.timeout * 1_000, question),
-      repeatExactSearch: async () => {
-        log('stage: 头条结果未召回小荷AI医生，正在用相同问题执行一次受控重试')
-        const retrySearch = await inputToutiaoQuestion(question)
-        log('stage: 已再次精确确认头条搜索词，正在执行唯一一次重试')
-        await tap((retrySearch[0] + retrySearch[2]) / 2, (retrySearch[1] + retrySearch[3]) / 2)
-      },
-    })
+    let card
+    try {
+      card = await runToutiaoAnswerCardAttempts({
+        waitForResult: () => waitForToutiaoAnswerCard(payload.timeout * 1_000, question),
+        repeatExactSearch: async () => {
+          log('stage: 头条结果未召回小荷AI医生，正在用相同问题执行一次受控重试')
+          const retrySearch = await inputToutiaoQuestion(question)
+          log('stage: 已再次精确确认头条搜索词，正在执行唯一一次重试')
+          await tap((retrySearch[0] + retrySearch[2]) / 2, (retrySearch[1] + retrySearch[3]) / 2)
+        },
+      })
+    } catch (error) {
+      if (!(error instanceof ToutiaoAnswerCardNotFoundError)) throw error
+      return saveUnmatchedSearchResult({
+        platform: 'toutiao', artifacts, question, meta, error, observerBaseline, recoveryBaseline,
+      })
+    }
     log('stage: 已找到头条小荷AI医生回答卡片，正在截取搜索结果智能总结')
     let summary = await captureToutiaoSearchSummary(card.size)
     log('stage: 已找到头条小荷AI医生回答卡片，正在点击全文入口')
@@ -281,6 +343,7 @@ function createQuestionWorkflows({
       batch_id: path.basename(artifacts.batchDirectory),
       question_index: index,
       question_directory: directory,
+      ...(payload.taskContext || {}),
       ...activeEntryMetadata(),
       new_session_requested: true,
       new_session_performed: newSessionPerformed,

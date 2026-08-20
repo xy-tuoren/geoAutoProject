@@ -7,6 +7,7 @@ const { createRunner, CancelledError } = require('../automation/runner')
 const { automationEntries, normalizeAutomationEntries } = require('../automation/entry-catalog')
 const { loadQuestionFile } = require('../questions')
 const { parseProductWorkbook } = require('../product-question-import')
+const { normalizeQuestionPlan } = require('../question-plan')
 const { projectRoot, resolveAdbPath } = require('../runtime-paths')
 const { createUpdateManager } = require('./updater')
 
@@ -156,12 +157,15 @@ ipcMain.handle('product-questions:import', async (_event, file) => {
 
 ipcMain.handle('automation:start', async (event, payload) => {
   if (activeTask) throw new Error('已有任务正在执行。')
-  if (!Array.isArray(payload.questions) || payload.questions.length === 0) throw new Error('请至少填写或导入一条问题。')
+  const questionPlan = normalizeQuestionPlan(payload)
+  payload.questions = questionPlan.questions
+  payload.brandGroups = questionPlan.brandGroups
+  payload.questionPlanMode = questionPlan.mode
   if (!payload.serial || !payload.outputDir) throw new Error('请选择 Android 设备和截图目录。')
   const entries = normalizeAutomationEntries(payload.entries)
   payload.entries = entries.map(entry => entry.id)
   payload.newSession = true
-  log('启动任务:', `serial=${payload.serial}`, `entries=${payload.entries.join(',')}`, `questions=${payload.questions.length}`, `output=${payload.outputDir}`)
+  log('启动任务:', `serial=${payload.serial}`, `entries=${payload.entries.join(',')}`, `mode=${questionPlan.mode}`, `questions=${payload.questions.length}`, `output=${payload.outputDir}`)
   const runner = createRunner({
     root: appRoot(),
     isPackaged: app.isPackaged,

@@ -53,7 +53,7 @@
           <div class="questions-head">
             <div class="section-heading">
               <h2>问题队列</h2>
-              <p>每行一题 · 可拖入文件</p>
+              <p>普通列表或品牌分组 · 可拖入文件</p>
             </div>
             <div class="queue-tools">
               <span id="question-count" class="count-pill">0 条问题</span>
@@ -62,7 +62,10 @@
               <button id="import-questions" class="secondary" type="button">导入问题文件</button>
             </div>
           </div>
-          <textarea id="questions" aria-label="问题列表" spellcheck="false" placeholder="在这里输入问题，每行一题；也可直接拖入 TXT / CSV / JSON / XLSX 文件"></textarea>
+          <textarea id="questions" aria-label="问题列表" spellcheck="false" placeholder="普通模式每行一题；品牌分组直接写 #品牌名，然后逐行填写该品牌的问题"></textarea>
+          <section id="question-plan-preview" class="question-plan-preview" aria-live="polite">
+            <p class="question-plan-empty">每行输入一题；需要分品牌存档时，在每组问题前直接填写“#品牌名”。</p>
+          </section>
           <div class="drop-hint" aria-hidden="true">松开以导入问题文件</div>
           <p class="capture-note">自动截图：回答 · 推荐药品 · 引用资料</p>
         </section>
@@ -210,6 +213,7 @@
         </footer>
       </div>
     </dialog>
+    <script src="../question-plan.js"></script>
     <script src="./retry-state.js"></script>
     <script src="./entry-progress.js"></script>
     <script src="./question-generator.js"></script>

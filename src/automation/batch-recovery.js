@@ -57,6 +57,11 @@ function failedRetryItems(summary) {
       if (!result.entry_id || !result.question || !Number.isInteger(result.question_index)) {
         throw new Error('批次汇总中的失败题信息不完整，无法安全重试。')
       }
+      if (summary.question_plan_mode === 'grouped' && (
+        !result.brand
+        || !Number.isInteger(result.brand_index)
+        || !Number.isInteger(result.question_index_in_brand)
+      )) throw new Error('批次汇总中的品牌归档信息不完整，无法安全重试。')
       return result
     })
 }

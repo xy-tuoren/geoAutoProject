@@ -46,6 +46,12 @@ function classifyAutomationLog(message) {
   }
   if (/^capture: 引用资料/.test(text) || /^capture: 在回答截图前展开引用资料/.test(text)) return { event: 'evidence_capture', category: 'capture', details: {} }
   if (/^capture: 抖音小程序入口搜索页.*(?:已保存|并保存)/.test(text)) return { event: 'douyin_miniapp_entry_captured', category: 'capture', details: {} }
+  const unmatchedSearch = text.match(/^capture: (抖音|头条)未召回智能总结或小荷入口，搜索结果已保存 (.+)$/)
+  if (unmatchedSearch) return {
+    event: 'search_results_only_captured',
+    category: 'capture',
+    details: { platform: unmatchedSearch[1], screenshot: unmatchedSearch[2], xiaohe_result_detected: false },
+  }
   const seamSummary = text.match(/^capture: 接缝汇总已保存 (.+)（帧=(\d+)，接缝=(\d+)\/(\d+)，异常证据=(\d+)组）$/)
   if (seamSummary) return {
     event: 'reply_seam_diagnostics_saved',

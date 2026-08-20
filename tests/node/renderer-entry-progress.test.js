@@ -2,6 +2,14 @@ const test = require('node:test')
 const assert = require('node:assert/strict')
 const { initializeEntryProgress, applyEntryProgress } = require('../../src/renderer/entry-progress')
 
+test('分组执行时显示当前品牌顺序', () => {
+  let state = initializeEntryProgress({ entries: [{ id: 'xiaohe-app', label: '小荷' }], question_count: 3 })
+  state = applyEntryProgress(state, { type: 'brand_started', brand: '诺和诺德', brand_sequence: 2, brand_count: 4 })
+  assert.equal(state.current_brand, '诺和诺德')
+  assert.equal(state.brand_sequence, 2)
+  assert.equal(state.brand_count, 4)
+})
+
 test('入口进度分别累计成功失败并显示当前题号', () => {
   let state = initializeEntryProgress({
     entries: [{ id: 'xiaohe-app', label: '小荷AI医生APP' }, { id: 'douyin-xiaohe-miniapp', label: '抖音' }],

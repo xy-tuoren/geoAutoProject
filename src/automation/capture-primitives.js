@@ -252,7 +252,13 @@ function suspiciousEvidenceSummaryOcrTarget(recognition, logicalSize, chatBounds
 }
 
 function evidenceSummaryExpansionSignals(recognition, target) {
-  if (!target) return { expanded: false, arrowExpanded: false, citationRows: false, legacyReferenceLabel: false }
+  if (!target) return {
+    expanded: false,
+    arrowExpanded: false,
+    citationRows: false,
+    bibliographicCitationRow: false,
+    legacyReferenceLabel: false,
+  }
   const arrowExpanded = target.variant !== 'legacy_summary'
     && EVIDENCE_EXPANDED_ARROW_PATTERN.test(target.normalizedText)
   const maximumY = Math.min(
@@ -266,6 +272,7 @@ function evidenceSummaryExpansionSignals(recognition, target) {
       expanded: arrowExpanded || legacyReferenceLabel,
       arrowExpanded,
       citationRows: false,
+      bibliographicCitationRow: false,
       legacyReferenceLabel,
     }
   }
@@ -303,7 +310,19 @@ function evidenceSummaryExpansionSignals(recognition, target) {
     && /(?:\.{2,}|…{1,3})$/u.test(row.normalizedText)
   ))
   if (truncatedCitationRow) {
-    return { expanded: true, arrowExpanded, citationRows: true, legacyReferenceLabel }
+    return { expanded: true, arrowExpanded, citationRows: true, bibliographicCitationRow: false, legacyReferenceLabel }
+  }
+  // A single-reference card can show the complete bibliography title, so it
+  // has neither a truncation mark nor a separate source badge. Require it to
+  // start immediately below the heading and contain publication-like wording
+  // or a publication year. This accepts the real "...指南(2021)" layout while
+  // keeping an ordinary numbered answer paragraph from toggling the card.
+  const bibliographicCitationRow = citationRows.some(row => (
+    row.bounds[1] <= immediateCitationMaximumY
+    && /(?:[(](?:19|20)\d{2}[)]|指南|共识|说明书|临床研究|研究进展|研究报告|综述|随机对照|系统评价|荟萃分析|meta分析)/iu.test(row.normalizedText)
+  ))
+  if (bibliographicCitationRow) {
+    return { expanded: true, arrowExpanded, citationRows: true, bibliographicCitationRow: true, legacyReferenceLabel }
   }
   // The UI can draw the trailing ellipsis separately from the text layer, so
   // OCR may return only the numbered title. In that case a citation row still
@@ -313,10 +332,10 @@ function evidenceSummaryExpansionSignals(recognition, target) {
     && row.bounds[2] - row.bounds[0] >= recognition.image.width * 0.78
   ))
   if (fullWidthCitationRow) {
-    return { expanded: true, arrowExpanded, citationRows: true, legacyReferenceLabel }
+    return { expanded: true, arrowExpanded, citationRows: true, bibliographicCitationRow: false, legacyReferenceLabel }
   }
   if (denseSequentialCitationRows) {
-    return { expanded: true, arrowExpanded, citationRows: true, legacyReferenceLabel }
+    return { expanded: true, arrowExpanded, citationRows: true, bibliographicCitationRow: false, legacyReferenceLabel }
   }
   // RapidOCR sometimes merges the left citation title and the right source
   // badge into one full-width line. The title is visually truncated before
@@ -327,7 +346,7 @@ function evidenceSummaryExpansionSignals(recognition, target) {
     /(?:\.{3}|…{1,3})[\p{Script=Han}]{2,12}$/u.test(row.normalizedText)
   ))
   if (mergedCitationRow) {
-    return { expanded: true, arrowExpanded, citationRows: true, legacyReferenceLabel }
+    return { expanded: true, arrowExpanded, citationRows: true, bibliographicCitationRow: false, legacyReferenceLabel }
   }
   const pairedCitationRow = citationRows.some(row => recognition.results.some(source => {
     if (source === row || source.confidence < 0.8 || source.bounds[0] < row.bounds[2]) return false
@@ -342,6 +361,7 @@ function evidenceSummaryExpansionSignals(recognition, target) {
     expanded: arrowExpanded || legacyReferenceLabel || hasCitationRows,
     arrowExpanded,
     citationRows: hasCitationRows,
+    bibliographicCitationRow: false,
     legacyReferenceLabel,
   }
 }
@@ -491,19 +511,25 @@ async function prepareEmbeddedEvidence({
     return { target: confirmationTarget, expanded: confirmationExpanded, signals }
   }
 
-  let capture = null
+  // This control is a toggle. Once clicked, an inconclusive OCR result must
+  // never authorize another click because the first click may already have
+  // expanded it. Retry only read-only observations and fail closed if all of
+  // them remain ambiguous.
+  const capture = await clickTitle(target, 1)
+  const growth = panelGrowth(capture, target)
   let expanded = false
-  let currentTarget = target
-  for (let attempt = 1; attempt <= 3; attempt += 1) {
-    capture = await clickTitle(currentTarget, attempt)
-    const growth = panelGrowth(capture, currentTarget)
-    const confirmation = await confirmByOcr(attempt, currentTarget, growth)
+  let fallbackTarget = target
+  for (let confirmationAttempt = 1; confirmationAttempt <= 3; confirmationAttempt += 1) {
+    if (confirmationAttempt > 1) {
+      await delay(350)
+      log(`capture: 引用资料点击后状态仍不明确，正在进行第${confirmationAttempt}次只读OCR复核；不会再次点击切换控件`)
+    }
+    const confirmation = await confirmByOcr(confirmationAttempt, fallbackTarget, growth)
     expanded = confirmation.expanded
-    if (expanded || !confirmation.target || attempt === 3) break
-    log(`capture: 第${attempt}次点击后OCR仍确认引用资料处于折叠状态，重新识别位置后安全尝试第${attempt + 1}次标题文字点击`)
-    currentTarget = confirmation.target
+    if (expanded) break
+    if (confirmation.target) fallbackTarget = confirmation.target
   }
-  if (!expanded) throw new Error('OCR已识别并尝试点击引用资料标题最多三次，但未确认资料展开，已停止后续截图。')
+  if (!expanded) throw new Error('引用资料标题已点击一次，但三次只读OCR复核仍未确认资料展开；为避免再次点击将已展开内容收起，已停止后续截图。')
   log('capture: 引用资料已展开并合并到回答截图')
   return { found: true, expanded, capture }
 }

@@ -25,6 +25,9 @@
   function initializeEntryProgress({ entries = [], question_count: questionCount = 0, results = [] } = {}) {
     const state = {
       question_count: Number(questionCount) || 0,
+      current_brand: null,
+      brand_sequence: null,
+      brand_count: null,
       entries: entries.map(entry => ({
         id: entry.id,
         label: entry.label,
@@ -45,6 +48,12 @@
 
   function applyEntryProgress(state, event = {}) {
     if (event.type === 'initialized') return initializeEntryProgress(event)
+    if (event.type === 'brand_started') return {
+      ...state,
+      current_brand: event.brand || null,
+      brand_sequence: event.brand_sequence || null,
+      brand_count: event.brand_count || null,
+    }
     const entries = state.entries.map(previous => {
       if (previous.id !== event.entry_id) return previous
       const entry = { ...previous, outcomes: { ...previous.outcomes } }

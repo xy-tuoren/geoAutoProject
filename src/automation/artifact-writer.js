@@ -4,7 +4,7 @@ const { buildReplyImages } = require('./capture-primitives')
 const { referenceProductsCaptureComplete } = require('./reference-products')
 const { writeReplySeamDiagnostics } = require('./seam-diagnostics')
 
-const ARTIFACT_LAYOUT_VERSION = 5
+const ARTIFACT_LAYOUT_VERSION = 8
 
 function createArtifactWriter({
   defaultCaptureMethod,
@@ -15,7 +15,7 @@ function createArtifactWriter({
   getBatchEventLog,
   log,
 }) {
-  async function saveArtifacts({ artifacts, stem, question, status, xml, meta, stitch = true, captureMethod = defaultCaptureMethod, observerBaseline, recoveryBaseline }) {
+  async function saveArtifacts({ artifacts, stem, question, status, xml, meta, stitch = true, frame = null, captureMethod = defaultCaptureMethod, observerBaseline, recoveryBaseline }) {
     const deliveryDirectory = artifacts.deliveryDirectory
     const diagnosticDirectory = artifacts.diagnosticDirectory
     await Promise.all([
@@ -105,7 +105,7 @@ function createArtifactWriter({
           reference_products_trigger_refreshed: products.triggerRefreshed,
         })
       }
-    } else await fs.writeFile(screenshotPath, await screenshot())
+    } else await fs.writeFile(screenshotPath, frame || await screenshot())
     await fs.writeFile(xmlPath, xml || await normalizedHierarchy(), 'utf8')
     resultMeta = { ...resultMeta, ...observerMetadata(observerBaseline, recoveryBaseline) }
     await fs.writeFile(metadataPath, JSON.stringify({

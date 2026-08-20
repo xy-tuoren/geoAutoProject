@@ -1,5 +1,6 @@
 const fs = require('node:fs/promises')
 const path = require('node:path')
+const { safeDirectorySegment } = require('../question-plan')
 
 const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds))
 
@@ -7,7 +8,8 @@ const DELIVERY_DIRECTORY_NAME = '交付图片'
 const DIAGNOSTIC_DIRECTORY_NAME = '调试产物'
 
 function safeSlug(text, limit = 32) {
-  return String(text).trim().replace(/\s+/g, '_').replace(/[\\/:*?"<>|]+/g, '_').slice(0, limit) || 'question'
+  const value = safeDirectorySegment(text, limit)
+  return value === '未命名' ? 'question' : value
 }
 
 async function createBatchDirectory(outputRoot, now = new Date()) {
@@ -58,6 +60,27 @@ function questionArtifactDirectories(entryArtifacts, index, question) {
   }
 }
 
+function groupedQuestionArtifactDirectories(batchArtifacts, entryIndex, entryLabel, task) {
+  const brandName = safeDirectorySegment(task.brand)
+  const entryName = `${String(entryIndex).padStart(2, '0')}_${safeDirectorySegment(entryLabel)}`
+  const questionName = `${String(task.question_index_in_brand).padStart(3, '0')}_${safeSlug(task.question)}`
+  const append = root => path.join(root, brandName, entryName, questionName)
+  return {
+    ...batchArtifacts,
+    deliveryDirectory: append(batchArtifacts.deliveryDirectory),
+    diagnosticDirectory: append(batchArtifacts.diagnosticDirectory),
+  }
+}
+
+function taskArtifactDirectories(batchArtifacts, entryIndex, entryLabel, entryCount, task, grouped) {
+  if (grouped) return groupedQuestionArtifactDirectories(batchArtifacts, entryIndex, entryLabel, task)
+  return questionArtifactDirectories(
+    entryArtifactDirectories(batchArtifacts, entryIndex, entryLabel, entryCount),
+    task.question_index,
+    task.question,
+  )
+}
+
 module.exports = {
   sleep,
   safeSlug,
@@ -66,6 +89,8 @@ module.exports = {
   batchArtifactDirectories,
   entryArtifactDirectories,
   questionArtifactDirectories,
+  groupedQuestionArtifactDirectories,
+  taskArtifactDirectories,
   DELIVERY_DIRECTORY_NAME,
   DIAGNOSTIC_DIRECTORY_NAME,
 }

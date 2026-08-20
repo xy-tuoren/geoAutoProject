@@ -51,3 +51,17 @@ test('问题队列包含固定商品字段、XLSX 导入和人工确认入口', 
   assert.doesNotMatch(renderer, /上移字段|下移字段|删除字段/)
   assert.doesNotMatch(renderer, /generator-topic-group|generator-field-row/)
 })
+
+test('问题队列提供品牌分组语法、实时预览和分组任务载荷', () => {
+  for (const id of ['questions', 'question-plan-preview', 'question-count', 'plan']) {
+    assert.match(html, new RegExp(`id="${id}"`))
+  }
+  assert.ok(html.indexOf('../question-plan.js') < html.indexOf('renderer.js'))
+  assert.match(html, /#品牌名/)
+  assert.doesNotMatch(html, /# 品牌：名称/)
+  assert.doesNotMatch(html, /## 产品：名称/)
+  assert.match(renderer, /parseQuestionInput/)
+  assert.match(renderer, /renderQuestionPlan/)
+  assert.match(renderer, /brandGroups: questionPlan\.brandGroups/)
+  assert.match(renderer, /品牌目录不加序号/)
+})
