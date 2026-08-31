@@ -33,6 +33,63 @@ const SESSION_TRANSITION = `<hierarchy>
   <node package="com.aurora.xiaohe.aidoctor" bounds="[0,0][1080,2400]" visible-to-user="true" />
 </hierarchy>`
 
+const V4_OLD_CONVERSATION = `<hierarchy>
+  <node package="com.aurora.xiaohe.aidoctor" bounds="[0,0][1080,2400]" visible-to-user="true">
+    <node class="android.view.View" clickable="true" bounds="[917,69][1050,202]" visible-to-user="true">
+      <node class="android.view.View" content-desc="更多" bounds="[953,105][1014,166]" visible-to-user="true" />
+    </node>
+    <node class="android.widget.TextView" text="模拟旧回答正文" bounds="[55,690][610,780]" visible-to-user="true" />
+    <node class="android.widget.EditText" text="" bounds="[171,2213][1036,2378]" visible-to-user="true" />
+    <node class="android.widget.TextView" text="输入问题 或 按住说话" bounds="[204,2255][757,2337]" visible-to-user="true" />
+    <node class="android.widget.Button" content-desc="拍药品" bounds="[685,2056][879,2180]" visible-to-user="true" />
+  </node>
+</hierarchy>`
+
+const V4_MORE_MENU = `<hierarchy>
+  <node package="com.aurora.xiaohe.aidoctor" bounds="[0,0][1080,2400]" visible-to-user="true">
+    <node class="android.view.View" clickable="true" bounds="[292,0][1035,641]" visible-to-user="true">
+      <node class="android.view.View" clickable="true" bounds="[436,98][1035,242]" visible-to-user="true">
+        <node class="android.widget.TextView" text="新会话" bounds="[604,134][769,207]" visible-to-user="true" />
+      </node>
+      <node class="android.view.View" clickable="true" bounds="[436,242][1035,386]" visible-to-user="true">
+        <node class="android.widget.TextView" text="朗读" bounds="[604,278][714,351]" visible-to-user="true" />
+      </node>
+    </node>
+    <node class="android.widget.TextView" text="模拟旧回答正文" bounds="[55,690][610,780]" visible-to-user="true" />
+    <node class="android.widget.EditText" text="" bounds="[171,2213][1036,2378]" visible-to-user="true" />
+  </node>
+</hierarchy>`
+
+const V4_CLEAN = `<hierarchy>
+  <node package="com.aurora.xiaohe.aidoctor" bounds="[0,0][1080,2400]" visible-to-user="true">
+    <node class="android.view.View" clickable="true" bounds="[917,69][1050,202]" visible-to-user="true">
+      <node class="android.view.View" content-desc="更多" bounds="[953,105][1014,166]" visible-to-user="true" />
+    </node>
+    <node class="android.view.View" content-desc="历史记录" bounds="[66,105][127,166]" visible-to-user="true" />
+    <node class="android.view.View" content-desc="不选择咨询人，随便聊聊" bounds="[50,199][314,288]" visible-to-user="true" />
+    <node class="android.widget.Button" content-desc="报告解读" bounds="[77,2056][315,2180]" visible-to-user="true" />
+    <node class="android.widget.Button" content-desc="拍患处" bounds="[403,2056][597,2180]" visible-to-user="true" />
+    <node class="android.widget.Button" content-desc="拍药品" bounds="[685,2056][879,2180]" visible-to-user="true" />
+    <node class="android.widget.EditText" text="" bounds="[171,2213][1036,2378]" visible-to-user="true" />
+    <node class="android.widget.TextView" text="输入问题 或 按住说话" bounds="[204,2255][757,2337]" visible-to-user="true" />
+  </node>
+</hierarchy>`
+
+const V4_CLEAN_SMALL = `<hierarchy>
+  <node package="com.aurora.xiaohe.aidoctor" bounds="[0,0][720,1600]" visible-to-user="true">
+    <node class="android.view.View" clickable="true" bounds="[611,46][700,135]" visible-to-user="true">
+      <node class="android.view.View" content-desc="更多" bounds="[635,70][676,111]" visible-to-user="true" />
+    </node>
+    <node class="android.view.View" content-desc="历史记录" bounds="[44,70][85,111]" visible-to-user="true" />
+    <node class="android.view.View" content-desc="不选择咨询人，随便聊聊" bounds="[33,133][209,192]" visible-to-user="true" />
+    <node class="android.widget.Button" content-desc="报告解读" bounds="[51,1371][210,1453]" visible-to-user="true" />
+    <node class="android.widget.Button" content-desc="拍患处" bounds="[269,1371][398,1453]" visible-to-user="true" />
+    <node class="android.widget.Button" content-desc="拍药品" bounds="[457,1371][586,1453]" visible-to-user="true" />
+    <node class="android.widget.EditText" text="" bounds="[114,1475][691,1585]" visible-to-user="true" />
+    <node class="android.widget.TextView" text="输入问题 或 按住说话" bounds="[136,1503][505,1558]" visible-to-user="true" />
+  </node>
+</hierarchy>`
+
 const DOUYIN_FULL_ANSWER = `<hierarchy>
   <node package="com.ss.android.ugc.aweme" class="android.view.View" content-desc="close" visible-to-user="true" bounds="[978,135][1020,177]" />
   <node package="com.ss.android.ugc.aweme" class="android.view.ViewGroup" visible-to-user="true" bounds="[0,231][1080,2014]" />
@@ -100,7 +157,7 @@ test('新会话入口在转场中消失时继续等待干净页面而不重复�
     if (reads <= 3) return SESSION_TRANSITION
     return NEW_CONVERSATION
   }, { tap: async () => { taps += 1 } })
-  assert.equal(await workflow.tapNewSession({ timeout: 700 }), true)
+  assert.equal(await workflow.tapNewSession({ timeout: 2_000 }), true)
   assert.equal(taps, 1)
 })
 
@@ -114,6 +171,51 @@ test('任务开始时已经是干净的新会话页则直接确认且不重复�
 test('不同竖屏尺寸的干净新会话页使用相同比例规则确认', async () => {
   let taps = 0
   const workflow = workflowWithSource(async () => NEW_CONVERSATION_SMALL, { tap: async () => { taps += 1 } })
+  assert.equal(await workflow.tapNewSession({ timeout: 30 }), true)
+  assert.equal(taps, 0)
+})
+
+test('4.0旧会话没有开启新会话时先点更多再点新会话', async () => {
+  let page = 'old'
+  const taps = []
+  const workflow = workflowWithSource(async () => {
+    if (page === 'old') return V4_OLD_CONVERSATION
+    if (page === 'menu') return V4_MORE_MENU
+    return V4_CLEAN
+  }, {
+    tap: async (x, y) => {
+      taps.push([x, y])
+      if (page === 'old') page = 'menu'
+      else if (page === 'menu') page = 'clean'
+    },
+  })
+  assert.equal(await workflow.tapNewSession({ timeout: 800 }), true)
+  assert.deepEqual(taps, [[984, 136], [736, 170]])
+})
+
+test('4.0更多菜单已打开时只点击新会话行', async () => {
+  let page = 'menu'
+  const taps = []
+  const workflow = workflowWithSource(async () => (page === 'menu' ? V4_MORE_MENU : V4_CLEAN), {
+    tap: async (x, y) => {
+      taps.push([x, y])
+      page = 'clean'
+    },
+  })
+  assert.equal(await workflow.tapNewSession({ timeout: 800 }), true)
+  assert.deepEqual(taps, [[736, 170]])
+})
+
+test('4.0干净新会话页不重复点击更多', async () => {
+  let taps = 0
+  const workflow = workflowWithSource(async () => V4_CLEAN, { tap: async () => { taps += 1 } })
+  assert.equal(await workflow.tapNewSession({ timeout: 30 }), true)
+  assert.equal(taps, 0)
+})
+
+test('不同竖屏尺寸的4.0干净新会话页使用相同比例规则确认', async () => {
+  let taps = 0
+  const workflow = workflowWithSource(async () => V4_CLEAN_SMALL, { tap: async () => { taps += 1 } })
   assert.equal(await workflow.tapNewSession({ timeout: 30 }), true)
   assert.equal(taps, 0)
 })

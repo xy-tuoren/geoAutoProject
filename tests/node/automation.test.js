@@ -20,7 +20,7 @@ const { createDouyinSearchWorkflow, DouyinMiniAppNetworkError, douyinMiniAppAnsw
 const { recoverTimedOutExistingReply } = require('../../src/automation/existing-reply-recovery')
 const { toutiaoAnswerRegionLooksReady } = require('../../src/automation/toutiao-search-workflow')
 const { createReferenceProductCapture } = require('../../src/automation/reference-product-capture')
-const { evidenceSummaryExpandedByOcr, evidenceSummaryOcrTarget, suspiciousEvidenceSummaryOcrTarget } = require('../../src/automation/capture-primitives')
+const { evidenceSummaryExpandedByOcr, evidenceSummaryOcrTarget, suspiciousEvidenceSummaryOcrTarget, differentialCitationExpansion } = require('../../src/automation/capture-primitives')
 
 const CHAT_BOUNDS = [0, 200, 1080, 1800]
 
@@ -2576,6 +2576,45 @@ test('紧邻标题的完整指南题名无需省略号或来源标签也可确�
   }
 })
 
+test('紧邻标题的完整诊疗规范题名含年版时也可确认展开', () => {
+  for (const scale of [1, 2 / 3]) {
+    const target = {
+      normalizedText: '参考1篇医学文献',
+      variant: 'medical_references',
+      physicalBounds: [63, 683, 480, 736].map(value => Math.round(value * scale)),
+    }
+    const recognition = {
+      image: { width: Math.round(1080 * scale), height: Math.round(2400 * scale) },
+      results: [{
+        text: '1.儿童急性感染性腹泻病诊疗规范(2020年版)',
+        normalizedText: '1.儿童急性感染性腹泻病诊疗规范(2020年版)',
+        confidence: 0.992,
+        bounds: [65, 770, 895, 819].map(value => Math.round(value * scale)),
+      }],
+    }
+
+    assert.equal(evidenceSummaryExpandedByOcr(recognition, target), true)
+  }
+})
+
+test('紧邻标题但不含文献题名特征的规范口令不能误判展开', () => {
+  const target = {
+    normalizedText: '参考1篇医学文献',
+    variant: 'medical_references',
+    physicalBounds: [63, 683, 480, 736],
+  }
+  const recognition = {
+    image: { width: 1080, height: 2400 },
+    results: [{
+      text: '1.按规范兑温水后少量多次喝',
+      normalizedText: '1.按规范兑温水后少量多次喝',
+      confidence: 0.999,
+      bounds: [65, 770, 700, 819],
+    }],
+  }
+  assert.equal(evidenceSummaryExpandedByOcr(recognition, target), false)
+})
+
 test('紧邻标题的完整研究进展题名无需来源标签也可确认展开', () => {
   const target = {
     normalizedText: '参考1篇医学文献',
@@ -2593,6 +2632,39 @@ test('紧邻标题的完整研究进展题名无需来源标签也可确认展�
   }
 
   assert.equal(evidenceSummaryExpandedByOcr(recognition, target), true)
+})
+
+test('完整诊疗规范题名在首次点击后确认展开且不会再次切换', async () => {
+  const collapsed = {
+    engine: 'rapidocr', elapsedMs: 300, image: { width: 1080, height: 2400 },
+    results: [{ text: '参考1篇医学文献', normalizedText: '参考1篇医学文献', confidence: 0.99977, bounds: [62, 682, 481, 738] }],
+  }
+  const expanded = {
+    ...collapsed,
+    results: [
+      { text: '参考1篇医学文献', normalizedText: '参考1篇医学文献', confidence: 1, bounds: [63, 683, 480, 736] },
+      {
+        text: '1.儿童急性感染性腹泻病诊疗规范(2020年版)',
+        normalizedText: '1.儿童急性感染性腹泻病诊疗规范(2020年版)',
+        confidence: 0.992,
+        bounds: [65, 770, 895, 819],
+      },
+    ],
+  }
+  const recognitions = [collapsed, expanded]
+  let taps = 0
+  const result = await prepareEmbeddedEvidence({
+    screenshot: async () => Buffer.from('screen'),
+    ocr: { recognize: async () => recognitions.shift() },
+    windowSize: async () => ({ width: 1080, height: 2400 }),
+    tap: async () => { taps += 1 },
+    delay: async () => {},
+    waitForStable: async () => ({ frame: Buffer.from('expanded'), xml: '<hierarchy />' }),
+    log: () => {},
+  }, CHAT_BOUNDS)
+
+  assert.equal(result.expanded, true)
+  assert.equal(taps, 1)
 })
 
 test('完整指南题名在首次点击后确认展开且不会再次切换', async () => {
@@ -2652,6 +2724,115 @@ test('新版医学文献标题下只有编号回答正文时不能误判为展�
     }],
   }
   assert.equal(evidenceSummaryExpandedByOcr(laterTruncatedParagraph, target), false)
+})
+
+const DIFFERENTIAL_BASELINE_ROWS = [
+  { text: '三小荷AI医生', normalizedText: '三小荷AI医生', confidence: 0.987, bounds: [50, 105, 461, 171] },
+  { text: '本人', normalizedText: '本人', confidence: 1, bounds: [53, 237, 234, 297] },
+  { text: '不选择咨询人', normalizedText: '不选择咨询人', confidence: 1, bounds: [242, 239, 596, 293] },
+  { text: '嗓子疼咽干口渴吃什么药', normalizedText: '嗓子疼咽干口渴吃什么药', confidence: 0.993, bounds: [382, 477, 984, 541] },
+  { text: '参考1篇医学文献', normalizedText: '参考1篇医学文献', confidence: 1, bounds: [61, 702, 481, 761] },
+  { text: '嗓子疼、咽干口渴常用药', normalizedText: '嗓子疼、咽干口渴常用药', confidence: 0.998, bounds: [51, 839, 894, 920] },
+]
+
+const DIFFERENTIAL_CONFIRMATION_ROWS = [
+  { text: '三小荷AI医生', normalizedText: '三小荷AI医生', confidence: 0.987, bounds: [50, 105, 461, 171] },
+  { text: '本人', normalizedText: '本人', confidence: 1, bounds: [53, 237, 234, 297] },
+  { text: '不选择咨询人', normalizedText: '不选择咨询人', confidence: 1, bounds: [244, 239, 596, 293] },
+  { text: '嗓子疼咽干口渴吃什么药', normalizedText: '嗓子疼咽干口渴吃什么药', confidence: 0.993, bounds: [382, 477, 984, 541] },
+  { text: '参考1篇医学文献', normalizedText: '参考1篇医学文献', confidence: 1, bounds: [62, 705, 480, 761] },
+  { text: '1.个人防疫手册(第三版)', normalizedText: '1.个人防疫手册(第三版)', confidence: 0.967, bounds: [65, 792, 553, 841] },
+]
+
+function scaledDifferentialRecognition(rows, scale) {
+  return {
+    engine: 'rapidocr',
+    elapsedMs: 300,
+    image: { width: Math.round(1080 * scale), height: Math.round(2400 * scale) },
+    results: rows.map(row => ({ ...row, bounds: row.bounds.map(value => Math.round(value * scale)) })),
+  }
+}
+
+function scaledDifferentialTarget(scale) {
+  return {
+    normalizedText: '参考1篇医学文献',
+    variant: 'medical_references',
+    physicalBounds: [61, 702, 481, 761].map(value => Math.round(value * scale)),
+  }
+}
+
+test('无题名关键词的文献在点击前后差分下仍可确认展开（1080p与720p）', () => {
+  for (const scale of [1, 2 / 3]) {
+    const baseline = scaledDifferentialRecognition(DIFFERENTIAL_BASELINE_ROWS, scale)
+    const confirmation = scaledDifferentialRecognition(DIFFERENTIAL_CONFIRMATION_ROWS, scale)
+    const target = scaledDifferentialTarget(scale)
+    // 单帧关键词规则不认识“个人防疫手册（第三版）”，必须由差分信号兜底。
+    assert.equal(evidenceSummaryExpandedByOcr(confirmation, target), false)
+    const result = differentialCitationExpansion(baseline, target, confirmation)
+    assert.equal(result.confirmed, true, `scale=${scale} reason=${result.reason}`)
+    assert.equal(result.new_citation_row.text, '1.个人防疫手册(第三版)')
+    assert.ok(result.anchors.matched >= 1)
+  }
+})
+
+test('确认帧发生滚动时差分信号因锚点失配拒绝确认', () => {
+  const baseline = scaledDifferentialRecognition(DIFFERENTIAL_BASELINE_ROWS, 1)
+  const scrolled = scaledDifferentialRecognition(
+    DIFFERENTIAL_CONFIRMATION_ROWS.map(row => ({
+      ...row,
+      bounds: [row.bounds[0], row.bounds[1] - 120, row.bounds[2], row.bounds[3] - 120],
+    })),
+    1,
+  )
+  const result = differentialCitationExpansion(baseline, scaledDifferentialTarget(1), scrolled)
+  assert.equal(result.confirmed, false)
+  assert.equal(result.reason, 'no_stable_anchor')
+})
+
+test('点击前标题下方已有文字时差分信号不参与判定', () => {
+  const baseline = scaledDifferentialRecognition([
+    ...DIFFERENTIAL_BASELINE_ROWS,
+    { text: '1.先多喝温水', normalizedText: '1.先多喝温水', confidence: 0.99, bounds: [65, 792, 400, 841] },
+  ], 1)
+  const confirmation = scaledDifferentialRecognition(DIFFERENTIAL_CONFIRMATION_ROWS, 1)
+  const result = differentialCitationExpansion(baseline, scaledDifferentialTarget(1), confirmation)
+  assert.equal(result.confirmed, false)
+  assert.equal(result.reason, 'baseline_strip_not_empty')
+})
+
+test('点击后紧邻区域没有新编号行时差分信号不确认展开', () => {
+  const baseline = scaledDifferentialRecognition(DIFFERENTIAL_BASELINE_ROWS, 1)
+  const confirmation = scaledDifferentialRecognition(DIFFERENTIAL_BASELINE_ROWS, 1)
+  const result = differentialCitationExpansion(baseline, scaledDifferentialTarget(1), confirmation)
+  assert.equal(result.confirmed, false)
+  assert.equal(result.reason, 'no_new_citation_row')
+})
+
+test('点击前后截图尺寸不一致时差分信号直接失效', () => {
+  const baseline = scaledDifferentialRecognition(DIFFERENTIAL_BASELINE_ROWS, 1)
+  const confirmation = scaledDifferentialRecognition(DIFFERENTIAL_CONFIRMATION_ROWS, 2 / 3)
+  const result = differentialCitationExpansion(baseline, scaledDifferentialTarget(1), confirmation)
+  assert.equal(result.confirmed, false)
+  assert.equal(result.reason, 'frame_size_mismatch')
+})
+
+test('无题名关键词的文献在首次点击后由差分信号确认且不再次切换', async () => {
+  const collapsed = scaledDifferentialRecognition(DIFFERENTIAL_BASELINE_ROWS, 1)
+  const expanded = scaledDifferentialRecognition(DIFFERENTIAL_CONFIRMATION_ROWS, 1)
+  const recognitions = [collapsed, expanded]
+  let taps = 0
+  const result = await prepareEmbeddedEvidence({
+    screenshot: async () => Buffer.from('screen'),
+    ocr: { recognize: async () => recognitions.shift() },
+    windowSize: async () => ({ width: 1080, height: 2400 }),
+    tap: async () => { taps += 1 },
+    delay: async () => {},
+    waitForStable: async () => ({ frame: Buffer.from('expanded'), xml: '<hierarchy />' }),
+    log: () => {},
+  }, CHAT_BOUNDS)
+
+  assert.equal(result.expanded, true)
+  assert.equal(taps, 1)
 })
 
 test('首次点击后状态不明确时仅做只读OCR复核且不再次切换', async () => {

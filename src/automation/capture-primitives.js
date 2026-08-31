@@ -315,11 +315,12 @@ function evidenceSummaryExpansionSignals(recognition, target) {
   // A single-reference card can show the complete bibliography title, so it
   // has neither a truncation mark nor a separate source badge. Require it to
   // start immediately below the heading and contain publication-like wording
-  // or a publication year. This accepts the real "...指南(2021)" layout while
-  // keeping an ordinary numbered answer paragraph from toggling the card.
+  // or a publication year. This accepts "...指南(2021)" and
+  // "...诊疗规范(2020年版)" while keeping an ordinary numbered answer
+  // paragraph from toggling the card.
   const bibliographicCitationRow = citationRows.some(row => (
     row.bounds[1] <= immediateCitationMaximumY
-    && /(?:[(](?:19|20)\d{2}[)]|指南|共识|说明书|临床研究|研究进展|研究报告|综述|随机对照|系统评价|荟萃分析|meta分析)/iu.test(row.normalizedText)
+    && /(?:[(](?:19|20)\d{2}(?:年版|年)?[)]|指南|诊疗规范|技术规范|共识|说明书|临床研究|研究进展|研究报告|综述|随机对照|系统评价|荟萃分析|meta分析)/iu.test(row.normalizedText)
   ))
   if (bibliographicCitationRow) {
     return { expanded: true, arrowExpanded, citationRows: true, bibliographicCitationRow: true, legacyReferenceLabel }
@@ -368,6 +369,79 @@ function evidenceSummaryExpansionSignals(recognition, target) {
 
 function evidenceSummaryExpandedByOcr(recognition, target) {
   return evidenceSummaryExpansionSignals(recognition, target).expanded
+}
+
+// Keyword-based single-frame signals cannot enumerate every bibliography
+// style ("个人防疫手册（第三版）" matched no genre word). This differential
+// signal instead proves expansion structurally: before the click the strip
+// immediately below the title was empty, after the click a numbered row
+// appears there, and text anchors above the title confirm neither frame
+// scrolled. It is independent of the citation's wording.
+function differentialCitationExpansion(baseline, baselineTarget, confirmation) {
+  const detail = {
+    confirmed: false,
+    reason: null,
+    anchors: null,
+    baseline_strip_rows: [],
+    new_citation_row: null,
+  }
+  if (!baselineTarget || !baseline?.image || !confirmation?.image) {
+    detail.reason = 'missing_input'
+    return detail
+  }
+  if (!['medical_references', 'drug_instructions', 'combined_references_and_instructions'].includes(baselineTarget.variant)) {
+    detail.reason = 'unsupported_variant'
+    return detail
+  }
+  // Both frames must be full-screen captures of the same physical size,
+  // otherwise the shared pixel coordinate space is not comparable.
+  if (baseline.image.width !== confirmation.image.width
+    || baseline.image.height !== confirmation.image.height) {
+    detail.reason = 'frame_size_mismatch'
+    return detail
+  }
+  const height = baseline.image.height
+  const titleTop = baselineTarget.physicalBounds[1]
+  const titleBottom = baselineTarget.physicalBounds[3]
+  // Same narrow strip the single-frame rules use: card-internal spacing puts
+  // an expanded citation row well inside it, while the answer body below the
+  // collapsed card starts beyond it on every observed density.
+  const stripBottom = titleBottom + height * 0.025
+  const inStrip = item => item.confidence >= 0.8
+    && item.bounds[1] > titleBottom
+    && item.bounds[1] <= stripBottom
+  // Anchor rows above the title prove the click did not scroll the chat; a
+  // scrolled frame could otherwise move a numbered answer paragraph into the
+  // strip and fake an expansion.
+  const anchorTolerance = height * 0.01
+  const anchorCandidates = baseline.results.filter(item => item.confidence >= 0.8
+    && item.bounds[3] <= titleTop
+    && item.normalizedText.length >= 4)
+  const matchedAnchors = anchorCandidates.filter(item => confirmation.results.some(other => (
+    other.confidence >= 0.8
+    && other.normalizedText === item.normalizedText
+    && Math.abs(other.bounds[1] - item.bounds[1]) <= anchorTolerance
+  )))
+  detail.anchors = { checked: anchorCandidates.length, matched: matchedAnchors.length }
+  if (!anchorCandidates.length || !matchedAnchors.length) {
+    detail.reason = 'no_stable_anchor'
+    return detail
+  }
+  const baselineStrip = baseline.results.filter(inStrip)
+  detail.baseline_strip_rows = baselineStrip.map(item => item.normalizedText)
+  if (baselineStrip.length) {
+    detail.reason = 'baseline_strip_not_empty'
+    return detail
+  }
+  const newRow = confirmation.results.find(item => inStrip(item)
+    && /^[0-9]{1,2}[.、．]/.test(item.normalizedText))
+  if (!newRow) {
+    detail.reason = 'no_new_citation_row'
+    return detail
+  }
+  detail.new_citation_row = { text: newRow.normalizedText, bounds: newRow.bounds }
+  detail.confirmed = true
+  return detail
 }
 
 function evidenceSummaryTextCenter(target) {
@@ -492,6 +566,10 @@ async function prepareEmbeddedEvidence({
       confirmation,
       confirmationTarget || fallbackTarget,
     )
+    // The differential signal always compares against the original pre-click
+    // frame and title bounds, not a retried fallback target: only that pair
+    // defines the "empty strip before the click" baseline.
+    const differential = differentialCitationExpansion(recognition, target, confirmation)
     // An explicit upward chevron is the card's own expanded-state indicator.
     // Do not require Compose hierarchy growth as a second condition: this UI
     // frequently exposes no stable card node, and another retry would toggle
@@ -499,15 +577,17 @@ async function prepareEmbeddedEvidence({
     const confirmationExpanded = signals.citationRows
       || signals.legacyReferenceLabel
       || signals.arrowExpanded
+      || differential.confirmed
     diagnostic.confirmations.push({
       attempt,
       recognition: confirmation,
       target: confirmationTarget,
-      expansion_signals: signals,
+      expansion_signals: { ...signals, differentialCitationRow: differential.confirmed },
+      differential,
       panel_growth: growth,
       expanded: confirmationExpanded,
     })
-    log(`ocr: purpose=xiaohe_embedded_evidence_confirmation attempt=${attempt} outcome=${confirmationExpanded ? 'expanded' : (confirmationTarget ? 'collapsed' : 'not_found')} engine=${confirmation.engine} elapsed=${Math.round(confirmation.elapsedMs)}ms`)
+    log(`ocr: purpose=xiaohe_embedded_evidence_confirmation attempt=${attempt} outcome=${confirmationExpanded ? 'expanded' : (confirmationTarget ? 'collapsed' : 'not_found')} differential=${differential.confirmed ? 'confirmed' : differential.reason} engine=${confirmation.engine} elapsed=${Math.round(confirmation.elapsedMs)}ms`)
     return { target: confirmationTarget, expanded: confirmationExpanded, signals }
   }
 
@@ -700,6 +780,7 @@ module.exports = {
   suspiciousEvidenceSummaryOcrTarget,
   evidenceSummaryExpandedByOcr,
   evidenceSummaryTextCenter,
+  differentialCitationExpansion,
   prepareEmbeddedEvidence,
   fillQuestionInput,
   captureStableSandwich,

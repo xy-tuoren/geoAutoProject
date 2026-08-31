@@ -6,6 +6,7 @@ const {
   parseBounds,
   boundsForNodeAttribute,
   visibleLabelBounds,
+  parseNodeTree,
 } = require('./hierarchy')
 const { fillQuestionInput, historyOnboardingVisible } = require('./capture-primitives')
 const {
@@ -17,17 +18,63 @@ const {
 } = require('./miniapp-locators')
 
 const SESSION_FIXED_LABELS = new Set([
-  '开启新会话', '历史记录', '输入问题', '输入', '发送', '拍药品', '上传图片',
+  '开启新会话', '新会话', '更多', '历史记录', '小荷AI医生',
+  '输入问题', '输入', '输入问题 或 按住说话', '发送',
+  '拍药品', '拍患处', '报告解读', '上传图片', '打开相机',
+  '切换语音输入', '展开输入扩展', '朗读', '打电话',
+  '不选咨询人', '不选择咨询人，随便聊聊', '本人', '本人，咨询人档案', '新建咨询人',
 ])
+const NEW_SESSION_CONTROL_LABELS = ['开启新会话', '新会话']
+const MORE_MENU_LABEL = '更多'
 
 function sessionContentLabels(xml) {
   return iterNodes(xml).flatMap(attrs => {
     if (!nodeIsVisible(attrs) || nodeAttr(attrs, 'class') === 'android.widget.EditText') return []
+    if (nodeAttr(attrs, 'package') === 'com.android.systemui') return []
     const label = (nodeAttr(attrs, 'text') || nodeAttr(attrs, 'content-desc')).replace(/\s+/g, ' ').trim()
     if (!label || SESSION_FIXED_LABELS.has(label) || /^\d{1,2}:\d{2}$/.test(label)
       || /^(?:今天|昨天|前天)(?:\s+\d{1,2}:\d{2})?$/.test(label)) return []
     return [label]
   })
+}
+
+function labeledHitBounds(xml, label) {
+  const visit = (node, ancestors) => {
+    const text = nodeAttr(node.attrs, 'text')
+    const description = nodeAttr(node.attrs, 'content-desc')
+    if (nodeIsVisible(node.attrs) && (text === label || description === label)) {
+      const rawBounds = nodeAttr(node.attrs, 'bounds')
+      if (!rawBounds) return null
+      const labelBounds = parseBounds(rawBounds)
+      const labelArea = Math.max(1, (labelBounds[2] - labelBounds[0]) * (labelBounds[3] - labelBounds[1]))
+      if (nodeAttr(node.attrs, 'clickable') === 'true') return labelBounds
+      for (let index = ancestors.length - 1; index >= 0; index -= 1) {
+        if (nodeAttr(ancestors[index].attrs, 'clickable') !== 'true') continue
+        const ancestorRaw = nodeAttr(ancestors[index].attrs, 'bounds')
+        if (!ancestorRaw) continue
+        const ancestorBounds = parseBounds(ancestorRaw)
+        const ancestorArea = (ancestorBounds[2] - ancestorBounds[0]) * (ancestorBounds[3] - ancestorBounds[1])
+        // Prefer the Compose parent hit target, but never a full-screen overlay.
+        if (ancestorArea <= labelArea * 12) return ancestorBounds
+      }
+      return labelBounds
+    }
+    for (const child of node.children) {
+      const found = visit(child, [...ancestors, node])
+      if (found) return found
+    }
+    return null
+  }
+  return visit(parseNodeTree(xml), [])
+}
+
+function findNewSessionTarget(xml) {
+  for (const label of NEW_SESSION_CONTROL_LABELS) {
+    const bounds = labeledHitBounds(xml, label)
+    if (bounds) return { bounds, label, kind: 'session' }
+  }
+  const more = labeledHitBounds(xml, MORE_MENU_LABEL)
+  return more ? { bounds: more, label: MORE_MENU_LABEL, kind: 'more' } : null
 }
 
 function hierarchySize(xml) {
@@ -64,6 +111,7 @@ function cleanNewSessionReady(xml, hints = ['输入问题']) {
   const contentBottom = Math.floor(size.height * 0.82)
   const conversationLabels = iterNodes(xml).filter(attrs => {
     if (!nodeIsVisible(attrs) || nodeAttr(attrs, 'class') === 'android.widget.EditText') return false
+    if (nodeAttr(attrs, 'package') === 'com.android.systemui') return false
     const label = nodeAttr(attrs, 'text') || nodeAttr(attrs, 'content-desc')
     const rawBounds = nodeAttr(attrs, 'bounds')
     if (!label || !rawBounds || SESSION_FIXED_LABELS.has(label)) return false
@@ -186,7 +234,7 @@ function createQuestionInputWorkflow({
         checkCancelled()
         const xml = await source()
         if (allowConfirmation && !confirmationHandled) {
-          for (const text of ['确定', '确认', '开始', '新会话']) {
+          for (const text of ['确定', '确认', '开始']) {
             const button = visibleLabelBounds(xml, text)
             if (!button) continue
             await tap((button[0] + button[2]) / 2, (button[1] + button[3]) / 2)
@@ -215,15 +263,23 @@ function createQuestionInputWorkflow({
     const maxAttempts = 3
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       const currentXml = attempt === 1 ? beforeXml : await source()
-      const newSession = boundsForNodeAttribute(currentXml, 'content-desc', '开启新会话')
-      if (!newSession) {
+      const target = findNewSessionTarget(currentXml)
+      if (!target) {
         if (attempt === 1) return false
         log(`stage: 第${attempt - 1}次点击后新会话入口暂时消失，按界面转场继续等待，不盲目重点击`)
         if (await waitForCleanSession(attempt - 1, false)) return true
         break
       }
-      await tap((newSession[0] + newSession[2]) / 2, (newSession[1] + newSession[3]) / 2)
+      await tap(Math.round((target.bounds[0] + target.bounds[2]) / 2), Math.round((target.bounds[1] + target.bounds[3]) / 2))
       await waitForVisualQuiet({ timeout: 1_200, fallbackMs: 1_000 })
+      if (target.kind === 'more') {
+        log('stage: 已打开右上角更多菜单，正在点击新会话')
+        const opened = findNewSessionTarget(await source())
+        if (opened?.kind === 'session') {
+          await tap(Math.round((opened.bounds[0] + opened.bounds[2]) / 2), Math.round((opened.bounds[1] + opened.bounds[3]) / 2))
+          await waitForVisualQuiet({ timeout: 1_200, fallbackMs: 1_000 })
+        }
+      }
       if (await waitForCleanSession(attempt, true)) return true
       if (attempt < maxAttempts) log(`stage: 第${attempt}次点击后旧会话仍完整存在，重新读取入口并安全尝试第${attempt + 1}次`)
     }
