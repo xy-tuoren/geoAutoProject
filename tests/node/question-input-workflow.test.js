@@ -232,6 +232,38 @@ test('组合输入提示也能被点击并进入真实编辑框', async () => {
   assert.equal(taps, 1)
 })
 
+test('小荷欢迎页忽略外部输入法异常坐标但仍拒绝旧回答，兼容两种竖屏尺寸', async () => {
+  for (const scale of [1, 2 / 3]) {
+    const bounds = values => `[${values.slice(0, 2).map(v => Math.round(v * scale)).join(',')}][${values.slice(2).map(v => Math.round(v * scale)).join(',')}]`
+    const welcome = `<hierarchy>
+      <node package="com.aurora.xiaohe.aidoctor" bounds="${bounds([0, 0, 1080, 2400])}">
+        <node text="HI，晚上好" bounds="${bounds([360, 935, 721, 1030])}" />
+        <node text="有任何健康问题，都可以随时问我" bounds="${bounds([195, 1058, 885, 1120])}" />
+        <node text="小荷AI医生是由小荷健康推出的医疗健康AI大模型服务，回答由AI生成，不构成诊断、处方，仅供参考。" bounds="${bounds([55, 359, 1025, 459])}" />
+        <node class="android.widget.EditText" bounds="${bounds([160, 1287, 1036, 1441])}" />
+      </node>
+      <node package="com.iflytek.inputmethod.miui" content-desc="讯飞输入法小米版" visible-to-user="true" bounds="[2147483647,2147483647][-2147483648,-2147483648]" />
+    </hierarchy>`
+    const workflow = workflowWithSource(async () => welcome, { tap: async () => assert.fail('干净欢迎页不应点击新会话') })
+    assert.equal(await workflow.tapNewSession({ timeout: 30 }), true)
+    const old = welcome.replace('</hierarchy>', `<node text="模拟旧回答" bounds="${bounds([100, 700, 900, 800])}" /></hierarchy>`)
+    assert.equal(await workflowWithSource(async () => old).tapNewSession({ timeout: 30 }), false)
+  }
+})
+
+test('语音模式按层级逻辑坐标切换文字输入且不重复点击', async () => {
+  for (const bounds of [[804, 2180, 898, 2329], [536, 1453, 599, 1553]]) {
+    const raw = `[${bounds[0]},${bounds[1]}][${bounds[2]},${bounds[3]}]`
+    const voice = `<hierarchy><node content-desc="切换文字输入" bounds="${raw}" /></hierarchy>`
+    const edit = `<hierarchy><node class="android.widget.EditText" bounds="${raw}" /></hierarchy>`
+    let reads = 0
+    const taps = []
+    const workflow = workflowWithSource(async () => ++reads < 3 ? voice : edit, { tap: async (...point) => taps.push(point) })
+    assert.deepEqual((await workflow.waitForInput(2_000)).bounds, bounds)
+    assert.deepEqual(taps, [[(bounds[0] + bounds[2]) / 2, (bounds[1] + bounds[3]) / 2]])
+  }
+})
+
 test('抖音下一题识别英文close并只点击一次关闭上一题全文页', async () => {
   let closed = false
   const taps = []
@@ -242,6 +274,25 @@ test('抖音下一题识别英文close并只点击一次关闭上一题全文页
   const input = await workflow.waitForDouyinSearchInput(2_000)
   assert.deepEqual(input.bounds, [132, 90, 754, 210])
   assert.deepEqual(taps, [[999, 156]])
+})
+
+test('抖音首次退出引导按实际按钮边界关闭且不重复点击', async () => {
+  for (const scale of [1, 2 / 3]) {
+    const bounds = [44, 2141, 496, 2262].map(value => Math.round(value * scale))
+    const popup = `<hierarchy><node package="com.ss.android.ugc.aweme" text="如何找到「常用小程序」" bounds="[100,800][600,900]" />
+      <node package="com.ss.android.ugc.aweme" text="不再提示" clickable="true" bounds="[${bounds[0]},${bounds[1]}][${bounds[2]},${bounds[3]}]" /></hierarchy>`
+    let reads = 0
+    const taps = []
+    const workflow = workflowWithSource(async () => ++reads < 3 ? popup : DOUYIN_SEARCH_INPUT, {
+      tap: async (...point) => taps.push(point),
+    })
+    await workflow.waitForDouyinSearchInput(2_000)
+    assert.deepEqual(taps, [[(bounds[0] + bounds[2]) / 2, (bounds[1] + bounds[3]) / 2]])
+    const unrelated = workflowWithSource(async () => popup.replace('如何找到「常用小程序」', '其他提示'), {
+      tap: async () => assert.fail('无引导标题不能点击不再提示'),
+    })
+    await assert.rejects(() => unrelated.waitForDouyinSearchInput(30), /未能在抖音打开/)
+  }
 })
 
 test('抖音题间关闭按钮按竖屏比例定位且不把正文close当作外壳', async () => {

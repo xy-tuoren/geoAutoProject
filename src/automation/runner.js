@@ -742,7 +742,6 @@ function createRunner(options) {
 
   const {
     waitForDouyinSearchResult,
-    refreshDouyinSearchResults,
     captureDouyinSearchTarget,
     openDouyinFullAnswer,
     openDouyinMiniAppEntry,
@@ -856,7 +855,6 @@ function createRunner(options) {
     inputDouyinQuestion,
     tap,
     waitForDouyinSearchResult,
-    refreshDouyinSearchResults,
     source,
     screenshot,
     captureDouyinSearchTarget,

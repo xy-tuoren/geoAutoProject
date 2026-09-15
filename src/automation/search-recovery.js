@@ -20,22 +20,8 @@ class ToutiaoFullAnswerNotOpenedError extends Error {
   }
 }
 
-async function runDouyinSearchResultAttempts({ waitForResult, refreshResults }) {
-  try {
-    return { ...(await waitForResult(1)), attempt: 1, refreshed: false }
-  } catch (error) {
-    if (!(error instanceof DouyinSearchResultNotFoundError)) throw error
-    await refreshResults(error)
-  }
-  try {
-    return { ...(await waitForResult(2)), attempt: 2, refreshed: true }
-  } catch (error) {
-    if (!(error instanceof DouyinSearchResultNotFoundError)) throw error
-    throw new DouyinSearchResultNotFoundError(
-      '抖音当前搜索结果刷新后再次检查首屏，仍未出现小荷AI医生智能总结或可验证的小程序入口卡片。',
-      { cause: error, scanScrolls: error.scanScrolls },
-    )
-  }
+async function runDouyinSearchResultAttempts({ waitForResult }) {
+  return { ...(await waitForResult(1)), attempt: 1, refreshed: false }
 }
 
 async function runToutiaoAnswerCardAttempts({ waitForResult, repeatExactSearch }) {

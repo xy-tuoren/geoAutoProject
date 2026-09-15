@@ -1,5 +1,5 @@
 const { sleep } = require('./utils')
-const { evidencePanelBoundsForTitle, evidenceMinimumHeight, questionVisibleExact } = require('./hierarchy')
+const { evidencePanelBoundsForTitle, evidenceMinimumHeight, questionVisibleExact, boundsListForNodeAttribute } = require('./hierarchy')
 const { imageRegionsStable, composeLongImages } = require('./images')
 const { findOcrText, mapPhysicalBoundsToLogical } = require('./ocr')
 
@@ -191,7 +191,7 @@ const EVIDENCE_UNIT_PATTERN = '(?:篇|份|条|部|本|项|则)'
 const EVIDENCE_TYPE_PATTERN = '(?:药品说明书|药品说明|说明书|医学文献|临床文献|文献|医学资料|临床指南|指南|专家共识)'
 const EVIDENCE_ITEM_PATTERN = `${EVIDENCE_NUMBER_PATTERN}${EVIDENCE_UNIT_PATTERN}${EVIDENCE_TYPE_PATTERN}`
 const EVIDENCE_SEPARATOR_PATTERN = '(?:以及|和|及|与|、|\\+|&)'
-const EVIDENCE_ARROW_PATTERN = '[\\^∧︿⌃˄∨⌄vVへ]?'
+const EVIDENCE_ARROW_PATTERN = '[\\^∧︿⌃˄∨⌄vVへ~～]?'
 const STRUCTURED_EVIDENCE_TITLE_PATTERN = new RegExp(
   `^参考${EVIDENCE_ITEM_PATTERN}(?:${EVIDENCE_SEPARATOR_PATTERN}${EVIDENCE_ITEM_PATTERN})*${EVIDENCE_ARROW_PATTERN}$`,
 )
@@ -468,6 +468,7 @@ async function prepareEmbeddedEvidence({
   ocr,
   windowSize,
   initialCapture = null,
+  source = null,
   setLastOcrDiagnostic = () => {},
   tap,
   delay,
@@ -514,8 +515,11 @@ async function prepareEmbeddedEvidence({
     log('capture: OCR确认引用资料已经展开，直接纳入回答第一帧')
     return { found: true, expanded: true, capture: await waitForStable(bounds) }
   }
+  const baselineXml = source ? await source() : initialCapture?.xml || ''
+  diagnostic.hierarchy_refreshed = Boolean(source)
+  if (source) log('capture: 引用资料点击前已刷新UI层级，使用当前卡片与展开箭头坐标')
   const viewportHeight = bounds[3] - bounds[1]
-  const baselinePanel = evidencePanelBoundsForTitle(initialCapture?.xml || '', target.logicalBounds, minimum)
+  const baselinePanel = evidencePanelBoundsForTitle(baselineXml, target.logicalBounds, minimum)
   const titleHeight = target.logicalBounds[3] - target.logicalBounds[1]
   diagnostic.baseline_panel = baselinePanel
   const panelGrowth = (capture, currentTarget) => {
@@ -537,8 +541,20 @@ async function prepareEmbeddedEvidence({
     }
   }
   const clickTitle = async (currentTarget, attempt) => {
-    const point = evidenceSummaryTapPoint(currentTarget, attempt, logicalSize)
-    const targetPart = attempt === 1 ? '标题文字' : '标题右侧展开箭头'
+    const title = currentTarget.logicalBounds
+    const arrows = baselinePanel ? boundsListForNodeAttribute(baselineXml, 'class', 'android.widget.ImageView').filter(box => {
+      const width = box[2] - box[0], height = box[3] - box[1]
+      return width >= titleHeight * 0.4 && width <= titleHeight * 2
+        && height >= titleHeight * 0.4 && height <= titleHeight * 2
+        && box[0] >= title[2] - titleHeight * 2 && box[2] <= title[2] + titleHeight * 2
+        && Math.abs((box[1] + box[3] - title[1] - title[3]) / 2) <= titleHeight * 0.5
+        && box[0] >= baselinePanel[0] && box[2] <= baselinePanel[2]
+        && box[1] >= baselinePanel[1] && box[3] <= baselinePanel[3]
+    }) : []
+    const arrow = arrows.length === 1 ? arrows[0] : null
+    const point = arrow ? [(arrow[0] + arrow[2]) / 2, (arrow[1] + arrow[3]) / 2] : evidenceSummaryTapPoint(currentTarget, attempt, logicalSize)
+    const targetPart = arrow ? '层级确认的展开箭头' : '标题文字'
+    diagnostic.click_target_method = arrow ? 'hierarchy_arrow' : 'ocr_title'
     // A visually static Compose card can still be completing its nested-scroll
     // gesture state. The same uiautomator2 tap becomes reliable after this
     // short interaction-settle window; it applies only when evidence exists.
@@ -611,7 +627,7 @@ async function prepareEmbeddedEvidence({
   }
   if (!expanded) throw new Error('引用资料标题已点击一次，但三次只读OCR复核仍未确认资料展开；为避免再次点击将已展开内容收起，已停止后续截图。')
   log('capture: 引用资料已展开并合并到回答截图')
-  return { found: true, expanded, capture }
+  return { found: true, expanded, capture, hierarchyRefreshed: Boolean(source) }
 }
 
 async function fillQuestionInput({ ui, tap, source, readText, log = () => {}, delay = sleep }, edit, question) {

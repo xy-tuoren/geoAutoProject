@@ -12,6 +12,7 @@ const { EventLog, classifyAutomationLog } = require('../../src/automation/event-
 const { loadQuestionFile } = require('../../src/questions')
 const { adbConnectionLost, captureFailureDiagnostics, captureStableObserved, captureStableSandwich, calibratedProductFallbackOverlap, chatSwipePlan, conservativeFallbackOverlap, buildReplyImages, CancelledError, confirmPersistentScrollEnd, confirmQuestionAtTop, DOUYIN_MINIAPP_ENTRY_FILENAME, DOUYIN_SEARCH_SUMMARY_FILENAME, TOUTIAO_SEARCH_SUMMARY_FILENAME, douyinGenericAiAnswerBounds, douyinMiniAppCaptureBounds, douyinMiniAppEntryBounds, douyinOcrViewFullTarget, douyinSearchInput, douyinSearchResultTarget, douyinSearchResultsBounds, douyinViewFullBounds, failedRetryItems, fillQuestionInput, groupedBrandSummaries, historyOnboardingVisible, maxLongImageHeight, miniAppQuestionFirstFrameCropBounds, miniAppReferenceProductsTrigger, observerRegionFallbackOptions, prepareDeviceForAutomation, prepareEmbeddedEvidence, referenceProductDrawerBounds, referenceProductsCaptureComplete, referenceProductSheetExpanded, referenceProductsTrigger, referenceProductViewportReadiness, refreshedReferenceProductsTrigger, requireQuestionLocated, retryAttemptCount, runQuestionsWithRecovery, scrollEndConfirmed, scrollSingleQuestionSessionToTop, toutiaoGenericConsultationPage, toutiaoHomeSearchBounds, toutiaoOcrViewMoreTarget, toutiaoSearchInput, toutiaoSearchResultBelongsToQuestion, toutiaoViewMoreBounds, waitForPackageHierarchy } = require('../../src/automation/runner')
 const { toutiaoAddToHomeScreenCancelBounds } = require('../../src/automation/miniapp-locators')
+const { douyinOcrConsultEntryTarget } = require('../../src/automation/miniapp-locators')
 const { automationEntries, ENTRY_DEFINITIONS, entryHierarchyStartupTimeout, hierarchyBelongsToPackage, normalizeAutomationEntries } = require('../../src/automation/entry-catalog')
 const { DouyinSearchResultNotFoundError, ToutiaoAnswerCardNotFoundError, ToutiaoFullAnswerNotOpenedError, runDouyinSearchResultAttempts, runToutiaoAnswerCardAttempts, runToutiaoFullAnswerAttempts } = require('../../src/automation/search-recovery')
 const { createQuestionWorkflows } = require('../../src/automation/question-workflows')
@@ -23,6 +24,24 @@ const { createReferenceProductCapture } = require('../../src/automation/referenc
 const { evidenceSummaryExpandedByOcr, evidenceSummaryOcrTarget, suspiciousEvidenceSummaryOcrTarget, differentialCitationExpansion } = require('../../src/automation/capture-primitives')
 
 const CHAT_BOUNDS = [0, 200, 1080, 1800]
+
+test('原生参考药品等待查看全部药品入口，不点击全宽标题或只采预览卡片', () => {
+  for (const scale of [1, 2 / 3]) {
+    const b = values => `[${values.slice(0, 2).map(v => Math.round(v * scale)).join(',')}][${values.slice(2).map(v => Math.round(v * scale)).join(',')}]`
+    const viewport = [0, 326, 1080, 1574].map(v => Math.round(v * scale))
+    const xml = `<hierarchy>
+      <node package="com.aurora.xiaohe.aidoctor" text="参考药品" clickable="false" bounds="${b([55, 1400, 1025, 1480])}" />
+      <node package="com.aurora.xiaohe.aidoctor" clickable="true" bounds="${b([55, 1520, 1025, 1720])}">
+        <node content-desc="示例药品 处方药 参考价10元" bounds="${b([55, 1520, 1025, 1720])}" />
+        <node bounds="${b([99, 1550, 232, 1683])}" />
+      </node>
+    </hierarchy>`
+    assert.equal(referenceProductsTrigger(xml, viewport), null)
+    const button = `<node package="com.aurora.xiaohe.aidoctor" text="查看全部药品" bounds="${b([408, 1802, 672, 1860])}" />`
+    assert.deepEqual(referenceProductsTrigger(xml.replace('</hierarchy>', `${button}</hierarchy>`), viewport), [Math.round(540 * scale), Math.round(1831 * scale)])
+    assert.equal(referenceProductsTrigger(xml.replace('</hierarchy>', `${button.replace('com.aurora.xiaohe.aidoctor', 'other.app')}</hierarchy>`), viewport), null)
+  }
+})
 
 test('执行前唤醒并设置常亮，锁屏时提示用户且解锁后继续', async () => {
   let now = 0
@@ -131,6 +150,7 @@ test('抖音和头条全文正式采集前先持续确认到底，并记录成�
     log: () => {},
     source: async () => '<hierarchy />',
     screenshot: async () => top,
+    ocr: { recognize: async () => ({ image: { width, height: frameHeight }, results: [] }) },
     windowSize: async () => ({ width, height: frameHeight }),
     waitForVisualQuiet: async () => {},
     waitForFinalVisualQuiet: async () => { visualQuietCalled = true },
@@ -193,6 +213,7 @@ test('抖音全文打开后允许正文和药品图片继续变化，由到底�
       if (!completionProbeStarted) throw new Error('不应在到底探测前要求整屏稳定')
       return frame
     },
+    ocr: { recognize: async () => ({ image: { width, height }, results: [] }) },
     windowSize: async () => ({ width, height }),
     waitForVisualQuiet: async () => {},
     waitForFinalVisualQuiet: async () => {},
@@ -219,6 +240,50 @@ test('抖音全文打开后允许正文和药品图片继续变化，由到底�
   assert.equal(result.captureMetadata.reply_completion_confirmed_before_capture, true)
   assert.equal(completionProbeStarted, true)
   assert.ok(screenshotCalls > 0)
+})
+
+test('小程序首帧前展开引用资料并记录完整性，覆盖两种竖屏尺寸', async () => {
+  for (const scale of [1, 2]) {
+    const width = 240 * scale, height = 500 * scale
+    const bounds = [0, 110, 240, 440].map(v => v * scale)
+    const b = values => `[${values.slice(0, 2).map(v => v * scale).join(',')}][${values.slice(2).map(v => v * scale).join(',')}]`
+    const xml = `<hierarchy><node package="com.ss.android.ugc.aweme" bounds="${b([0, 0, 240, 500])}"/><node class="androidx.compose.ui.viewinterop.ViewFactoryHolder" bounds="${b([0, 150, 240, 230])}" />
+      <node class="android.widget.ImageView" bounds="${b([126, 182, 140, 198])}" /></hierarchy>`
+    let expanded = false
+    let positioned = false
+    let recoveredAfterExpansion = false
+    let bubbleVisible = true
+    const questionBubble = { input: await sharp({ create: { width: 84 * scale, height: 40 * scale, channels: 3, background: '#00c2ae' } }).png().toBuffer(), left: 150 * scale, top: 96 * scale }
+    const floating = { input: Buffer.from(`<svg width="${width}" height="${height}" viewBox="0 0 240 500"><circle cx="120" cy="410" r="16" fill="white"/><path d="M120 402 V418 M115 413 L120 418 L125 413" fill="none" stroke="black" stroke-width="2.5"/></svg>`), left: 0, top: 0 }
+    const collapsedFrame = await sharp({ create: { width, height, channels: 3, background: '#fff' } }).composite([questionBubble, floating]).png().toBuffer()
+    const expandedFrame = await sharp({ create: { width, height, channels: 3, background: '#edf7f6' } }).composite([questionBubble, floating]).png().toBuffer()
+    const taps = []
+    const capture = createReplyCapture({
+      source: async () => xml, windowSize: async () => ({ width, height }), log: () => {},
+      setLastOcrDiagnostic: () => {},
+      screenshot: async () => bubbleVisible ? expanded ? expandedFrame : collapsedFrame : await sharp({ create: { width, height, channels: 3, background: '#fff' } }).png().toBuffer(),
+      ocr: { recognize: async () => ({ engine: 'test', elapsedMs: 1, image: { width, height }, results: [
+        { text: '样例药品', normalizedText: '样例药品', confidence: 0.99, bounds: (positioned ? expanded && !recoveredAfterExpansion ? [160, 5, 225, 35] : [160, 5, 225, 25] : [160, 150, 225, 178]).map(v => v * scale) },
+        { text: expanded ? '参考1篇药品说明书∧' : '参考1篇药品说明书', normalizedText: expanded ? '参考1篇药品说明书∧' : '参考1篇药品说明书', confidence: 0.99, bounds: (positioned ? [12, 180, 132, 200] : [12, 320, 132, 340]).map(v => v * scale) },
+      ] }) },
+      tap: async (...point) => { taps.push(point); expanded = true },
+      waitForVisualQuiet: async () => {},
+      swipeChat: async (_bounds, direction) => { if (direction === 'down') positioned = true; if (direction === 'up' && expanded) recoveredAfterExpansion = true; return { distance: 0, canScrollMore: false } },
+    })
+    const result = await capture.captureMiniAppFullAnswerFrames(xml, bounds, { platformLabel: '抖音', metadataPrefix: 'douyin', openedMetadataKey: 'douyin_view_full_opened', questionStart: '样例药品' })
+    assert.equal(result.evidenceEmbedded, true)
+    assert.equal(result.evidenceExpanded, true)
+    assert.equal(result.captureMetadata.reply_evidence_hierarchy_refreshed, true)
+    assert.equal(result.captureMetadata.douyin_current_question_first_frame_reacquisition_swipes, 1)
+    assert.deepEqual(taps, [[133 * scale, 190 * scale]])
+    assert.equal(result.captureMetadata.reply_floating_control_detection_method, 'image')
+    assert.ok(result.bounds[3] < result.captureMetadata.reply_floating_control_bounds[1])
+    const firstCropTop = result.captureMetadata.douyin_current_question_first_frame_crop[1]
+    assert.ok(firstCropTop < 0)
+    assert.equal(await imagesSimilar(result.frames[0], await sharp(expandedFrame).extract({ left: 0, top: result.bounds[1] + firstCropTop, width, height: result.bounds[3] - result.bounds[1] - firstCropTop }).png().toBuffer(), 0), true)
+    bubbleVisible = false
+    await assert.rejects(capture.captureMiniAppFullAnswerFrames(xml, bounds, { platformLabel: '抖音', metadataPrefix: 'douyin', openedMetadataKey: 'douyin_view_full_opened', questionStart: '样例药品' }), /完整绿色问题气泡/)
+  }
 })
 
 test('抖音回顶忽略下半部没有更多Toast，但正文移动仍会重置确认', async () => {
@@ -261,6 +326,22 @@ test('抖音独立小程序只用右侧完全一致的问题气泡作为本题�
   })
   assert.equal(miniAppQuestionOcrTarget({ ...recognition, results: recognition.results.slice(0, 1) }, '奥利司他胶囊', { width: 720, height: 1129 }), null)
   assert.equal(miniAppQuestionOcrTarget(recognition, '奥利司他胶囊是什么药', { width: 720, height: 1129 })?.bounds[0], 413)
+})
+
+test('右侧宽问题和相邻换行按完整原题匹配，不跨行拼接无关正文', () => {
+  for (const scale of [1, 2 / 3]) {
+    const result = (text, bounds) => ({ text, normalizedText: text, confidence: 0.99, bounds: bounds.map(v => v * scale) })
+    const recognition = { image: { width: 1080 * scale, height: 2400 * scale }, results: [result('非酒精性脂肪肝用什么药?', [449, 560, 980, 609])] }
+    assert.ok(miniAppQuestionOcrTarget(recognition, '非酒精性脂肪肝用什么药？', { width: 720, height: 1600 }))
+    recognition.results = [result('非酒精性单纯性脂肪肝用', [300, 220, 1000, 270]), result('化滞柔肝颗粒有效吗?', [300, 294, 900, 344])]
+    const question = '非酒精性单纯性脂肪肝用化滞柔肝颗粒有效吗？'
+    assert.deepEqual(miniAppQuestionOcrTarget(recognition, question, { width: 720, height: 1600 }).bounds, [200, 147, 667, 229])
+    recognition.results.splice(1, 0, result('其他正文', [300, 279, 500, 290]))
+    assert.equal(miniAppQuestionOcrTarget(recognition, question, { width: 720, height: 1600 }), null)
+    recognition.results.splice(1, 1)
+    recognition.results[1].bounds = [300, 600, 900, 650].map(v => v * scale)
+    assert.equal(miniAppQuestionOcrTarget(recognition, question, { width: 720, height: 1600 }), null)
+  }
 })
 
 test('抖音独立小程序首帧从本题问题气泡上方安全留白开始裁剪并适配物理尺寸', () => {
@@ -311,6 +392,126 @@ test('抖音独立入口必须识别本题上下文，不能把旧会话当作�
   assert.equal(paraphrasedReply.matched, true)
 })
 
+test('小荷内容就绪不按局部片段滚动回查，必须由正式首帧校验完整原题', async () => {
+  for (const scale of [1, 2]) {
+    const width = 360 * scale, height = 800 * scale
+    const raw = Buffer.alloc(width * height * 3)
+    for (let i = 0; i < raw.length; i += 1) raw[i] = Math.floor(i / 3) % width < width / 2 ? 255 : 40
+    const frame = await sharp(raw, { raw: { width, height, channels: 3 } }).png().toBuffer()
+    const b = values => `[${values.slice(0, 2).map(x => x * scale)}][${values.slice(2).map(x => x * scale)}]`
+    const xml = `<hierarchy><node package="com.ss.android.ugc.aweme" content-desc="关闭" bounds="${b([300, 32, 345, 64])}"/><node class="android.view.ViewGroup" bounds="${b([0, 84, 360, 592])}"/></hierarchy>`
+    for (const mode of ['initial_tail', 'stable_tail', 'unrelated']) {
+      let swipes = 0, reads = 0
+      const workflow = createDouyinSearchWorkflow({
+        screenshot: async () => frame, windowSize: async () => ({ width, height }),
+        log: () => {}, checkCancelled: () => {}, setLastOcrDiagnostic: () => {},
+        waitForStableReply: async () => ({ status: 'stable', xml }),
+        swipeChat: async (bounds, direction) => { assert.equal(direction, 'up'); swipes += 1 },
+        ocr: { recognize: async () => {
+          reads += 1
+          const matched = mode !== 'unrelated' && (swipes > 0 || (mode === 'stable_tail' && reads === 1))
+          return { image: { width, height }, results: [
+            { normalizedText: '小荷AI医生', text: '小荷AI医生', bounds: [60,40,220,65].map(v => v * scale), confidence: 0.99 },
+            { text: matched ? '肝脏隐隐作痛' : '疼痛大概持续多久了', confidence: 0.99 },
+          ] }
+        } },
+      })
+      const pending = workflow.waitForDouyinMiniAppAnswer({ bounds: [0, 84 * scale, width, 592 * scale], startedAt: Date.now() }, mode === 'unrelated' ? 500 : 10_000, { question: '肝脏隐隐作痛用什么药？' })
+      const result = await pending
+      assert.equal(result.xml, xml)
+      assert.equal(result.exactQuestionValidationRequired, true)
+      assert.equal(swipes, 0)
+    }
+  }
+})
+
+test('所有小荷卡片入口打开后均不追加新会话或发送，覆盖两种竖屏尺寸', async () => {
+  for (const scale of [1, 2]) {
+    for (const entryKind of ['query_entry', 'brand_card', 'free_consult']) {
+    const width = 360 * scale, height = 800 * scale
+    let taps = 0
+    const b = values => `[${values.slice(0, 2).map(x => x * scale)}][${values.slice(2).map(x => x * scale)}]`
+    const workflow = createDouyinSearchWorkflow({
+      source: async () => `<hierarchy><node package="com.ss.android.ugc.aweme" content-desc="关闭" bounds="${b([318, 40, 350, 70])}"/><node class="android.view.ViewGroup" bounds="${b([0, 84, 360, 592])}"/></hierarchy>`,
+      ui: { foregroundWindow: async () => ({ package: 'com.ss.android.ugc.aweme', activity: 'MiniAppHostActivity0' }) },
+      getActivePackageName: () => 'com.ss.android.ugc.aweme', log: () => {},
+      waitForVisualQuiet: async () => {}, tap: async () => { taps += 1 },
+      waitForStableReply: async () => assert.fail('卡片入口不能执行小程序提问流程'),
+      screenshot: async () => assert.fail('卡片入口不能执行小程序输入流程'),
+    })
+    const full = await workflow.openDouyinMiniAppEntry({ entryKind, tapBounds: [0, 200 * scale, 100 * scale, 250 * scale] }, { width, height }, 12_000, { question: '金藤清痹颗粒' })
+    assert.equal(taps, 1)
+    assert.equal(full.questionSubmitted, false)
+    assert.equal(full.newSessionPerformed, false)
+    assert.deepEqual(full.bounds, [0, 84 * scale, width, 592 * scale])
+    }
+  }
+})
+
+test('小程序加载超时在新会话点击和输入前停止', async () => {
+  const workflow = createDouyinSearchWorkflow({
+    log: () => {}, waitForStableReply: async () => ({ status: 'loading_timeout' }),
+    tap: async () => assert.fail('加载期间不能点击'),
+    screenshot: async () => assert.fail('未就绪不能进入新会话流程'),
+  })
+  await assert.rejects(workflow.submitDouyinConsultQuestion('金藤清痹颗粒'), /加载未完成/)
+})
+
+test('新会话前网络错误复用受控重启错误类型，不点击或输入', async () => {
+  const workflow = createDouyinSearchWorkflow({
+    log: () => {}, waitForStableReply: async () => ({ status: 'stable' }),
+    screenshot: async () => Buffer.from('screen'), source: async () => '<hierarchy/>',
+    windowSize: async () => ({ width: 720, height: 1600 }), setLastOcrDiagnostic: () => {},
+    tap: async () => assert.fail('网络错误不能点击新会话'),
+    ocr: { recognize: async () => ({ image: { width: 1080, height: 2400 }, results: [
+      { text: '网络不稳定，请重试', confidence: 0.99, bounds: [333, 1235, 751, 1292] },
+      { text: '重试', confidence: 0.99, bounds: [489, 1434, 594, 1493] },
+    ] }) },
+  })
+  await assert.rejects(workflow.submitDouyinConsultQuestion('金藤清痹颗粒'), DouyinMiniAppNetworkError)
+})
+
+test('免费咨询必须确认新会话、输入回读和发送箭头，覆盖物理逻辑缩放', async () => {
+  const frame = await sharp(Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="2400"><rect width="100%" height="100%" fill="white"/><circle cx="955" cy="2193" r="32" fill="black"/><path d="M955 2210 V2176 M941 2190 L955 2176 L969 2190" stroke="white" stroke-width="6" fill="none"/></svg>')).png().toBuffer()
+  for (const scale of [1, 2 / 3]) {
+    for (const invalidDialog of [false, true]) {
+      let clock = 0, reads = 0, typed = false, inputs = 0
+      const taps = []
+      const b = values => `[${values.slice(0, 2).map(x => Math.round(x * scale))}][${values.slice(2).map(x => Math.round(x * scale))}]`
+      const source = async () => `<hierarchy><node package="com.ss.android.ugc.aweme" bounds="${b([0, 0, 1080, 2400])}"/><node package="com.ss.android.ugc.aweme" content-desc="关闭" bounds="${b([954, 121, 1058, 209])}"/>${taps.length >= 3 ? `<node class="android.view.ViewGroup" bounds="${b([44, 1940, 1036, 2279])}"/><node package="com.ss.android.ugc.aweme" class="android.widget.EditText" text="${typed ? '非酒精性脂肪肝用什么药？' : '发送消息'}" bounds="${b([91, 1980, 989, 2112])}"/>` : ''}</hierarchy>`
+      const workflow = createDouyinSearchWorkflow({
+        source, screenshot: async () => frame, windowSize: async () => ({ width: 1080 * scale, height: 2400 * scale }),
+        getActivePackageName: () => 'com.ss.android.ugc.aweme', log: () => {}, setLastOcrDiagnostic: () => {},
+        waitForStableReply: async () => { assert.ok([0, 2].includes(taps.length)); return { status: 'stable' } },
+        tap: async (x, y) => taps.push([x, y]), now: () => clock, delay: async ms => { clock += ms },
+        ui: { sendKeys: async (question, options) => { assert.equal(question, '非酒精性脂肪肝用什么药？'); assert.equal(options.clear, true); typed = true; inputs += 1 } },
+        ocr: { recognize: async () => {
+          reads += 1
+          clock += 2_500
+          const items = reads === 1 ? [['く小荷AI医生', [66, 140, 440, 190]]]
+            : reads === 2 && !invalidDialog ? [['开启新会话', [430, 1050, 660, 1100]], ['开启新会话后,当前咨询将自动结束', [200, 1140, 850, 1190]], ['确定', [710, 1280, 780, 1340]]]
+              : invalidDialog ? [['其他确认弹窗', [430, 1050, 660, 1100]]]
+                : reads < 5 ? [] : [['已开始新会话', [450, 1960, 660, 2020]], ['按住说话', [450, 2180, 630, 2229]]]
+          return { image: { width: 1080, height: 2400 }, results: items.map(([text, bounds]) => ({ text, normalizedText: text, bounds, confidence: 0.99 })) }
+        } },
+      })
+      if (invalidDialog) {
+        await assert.rejects(workflow.submitDouyinConsultQuestion('非酒精性脂肪肝用什么药？'), /确认弹窗未出现/)
+        assert.equal(inputs, 0)
+        assert.equal(taps.length, 1)
+      } else {
+        const result = await workflow.submitDouyinConsultQuestion('非酒精性脂肪肝用什么药？')
+        assert.equal(result.questionSubmitted, true)
+        assert.equal(result.newSessionPerformed, true)
+        assert.equal(inputs, 1)
+        assert.equal(taps.length, 5)
+        assert.ok(Math.abs(taps[4][0] - 955 * scale) < 5)
+        assert.ok(Math.abs(taps[4][1] - 2193 * scale) < 8)
+      }
+    }
+  }
+})
+
 test('抖音小程序网络错误必须同时匹配错误文案和其下方重试按钮', () => {
   const recognition = {
     image: { width: 1080, height: 2400 },
@@ -352,7 +553,6 @@ test('抖音小程序网络错误会重启应用并从当前题完整重试一�
     inputDouyinQuestion: async () => { searches += 1; return [600, 40, 710, 120] },
     tap: async () => {},
     waitForDouyinSearchResult: async () => ({ target, size: { width: 720, height: 1600 } }),
-    refreshDouyinSearchResults: async () => {},
     captureDouyinSearchTarget: async () => ({ target, frame: Buffer.from('entry'), detectionMethod: 'hierarchy' }),
     openDouyinMiniAppEntry: async () => ({ xml: '<hierarchy />', bounds: [0, 200, 720, 1200], activity: 'MiniAppHostActivity0' }),
     waitForDouyinMiniAppAnswer: async full => {
@@ -692,6 +892,11 @@ test('抖音入口按真实搜索控件和回答卡片结构定位', () => {
   </hierarchy>`
   assert.deepEqual(douyinSearchInput(xml), { bounds: [144, 96, 868, 204], text: '腹泻脱水用什么药' })
   assert.deepEqual(douyinViewFullBounds(xml, { width: 1080, height: 2408 }), [414, 1348, 666, 1456])
+  for (const scale of [1, 2 / 3]) {
+    const unrelated = xml.replace('text="小荷AI医生"', 'text="AI生成回答"').replace(/\[(\d+),(\d+)\]/g,
+      (_, x, y) => `[${Math.round(Number(x) * scale)},${Math.round(Number(y) * scale)}]`)
+    assert.equal(douyinViewFullBounds(unrelated, { width: Math.round(1080 * scale), height: Math.round(2408 * scale) }), null)
+  }
 })
 
 test('抖音层级缺失时OCR以品牌、智能总结和查看全文三重证据定位', () => {
@@ -711,10 +916,38 @@ test('抖音层级缺失时OCR以品牌、智能总结和查看全文三重证�
 
   assert.deepEqual(douyinOcrViewFullTarget(recognition(1080, 2400), { width: 1080, height: 2400 }).bounds, [431, 982, 641, 1035])
   assert.deepEqual(douyinOcrViewFullTarget(recognition(720, 1600), { width: 1080, height: 2400 }).bounds, [431, 983, 641, 1035])
+  const current = recognition(1080, 2400)
+  current.results[1].normalizedText = '字节跳动旗下医疗大模型应用'
+  assert.deepEqual(douyinOcrViewFullTarget(current, { width: 1080, height: 2400 }).bounds, [431, 982, 641, 1035])
+  assert.deepEqual(douyinOcrViewFullTarget(current, { width: 720, height: 1600 }).bounds, [287, 655, 427, 690])
+  assert.equal(douyinOcrViewFullTarget({ ...current, results: current.results.slice(1) }, { width: 720, height: 1600 }), null)
+  current.results[1].normalizedText = '字节跳动旗下其他应用'
+  assert.equal(douyinOcrViewFullTarget(current, { width: 1080, height: 2400 }), null)
   assert.equal(douyinOcrViewFullTarget({
     ...recognition(1080, 2400),
     results: recognition(1080, 2400).results.filter(item => item.normalizedText !== '小荷AI医生'),
   }, { width: 1080, height: 2400 }), null)
+})
+
+test('抖音免费咨询入口必须同时匹配品牌、说明和同列按钮并映射尺寸', () => {
+  for (const scale of [1, 2 / 3]) {
+    const recognition = {
+      image: { width: 1080 * scale, height: 2400 * scale },
+      results: [
+        ['小荷AI医生', [174, 1681, 373, 1727]],
+        ['为您提供定制化建议,试试咨询', [38, 1744, 506, 1787]],
+        ['免费咨询', [197, 1845, 348, 1892]],
+      ].map(([text, bounds]) => ({ text, normalizedText: text, confidence: 0.99, bounds: bounds.map(x => x * scale) })),
+    }
+    assert.deepEqual(douyinOcrConsultEntryTarget(recognition, { width: 720, height: 1600 }).tapBounds, [131, 1230, 232, 1261])
+    for (let index = 0; index < 3; index += 1) {
+      assert.equal(douyinOcrConsultEntryTarget({ ...recognition, results: recognition.results.filter((_, i) => i !== index) }, { width: 720, height: 1600 }), null)
+    }
+    recognition.results[2].bounds = [750, 1845, 950, 1892].map(x => x * scale)
+    assert.equal(douyinOcrConsultEntryTarget(recognition, { width: 720, height: 1600 }), null)
+    recognition.results[0].normalizedText = '其他AI医生'
+    assert.equal(douyinOcrConsultEntryTarget(recognition, { width: 720, height: 1600 }), null)
+  }
 })
 
 test('抖音无智能总结时识别独立小程序入口卡片，混合页面优先独立入口', () => {
@@ -762,44 +995,45 @@ test('抖音通用AI回答不得冒充小荷智能总结', () => {
   assert.equal(douyinSearchResultTarget(mixed, { width: 1080, height: 2400 }).mode, 'miniapp_entry_card')
 })
 
-test('抖音首轮没有结果时只刷新一次并执行第二轮识别', async () => {
+test('抖音首屏找到结果时只识别一次且不刷新', async () => {
   const calls = []
   const result = await runDouyinSearchResultAttempts({
     waitForResult: async attempt => {
       calls.push(`wait:${attempt}`)
-      if (attempt === 1) throw new DouyinSearchResultNotFoundError('首轮未找到')
       return { target: { mode: 'smart_summary' } }
     },
     refreshResults: async () => calls.push('refresh'),
   })
 
-  assert.equal(result.attempt, 2)
-  assert.equal(result.refreshed, true)
-  assert.deepEqual(calls, ['wait:1', 'refresh', 'wait:2'])
+  assert.equal(result.attempt, 1)
+  assert.equal(result.refreshed, false)
+  assert.deepEqual(calls, ['wait:1'])
 })
 
-test('抖音刷新后仍没有入口时明确失败且不进行第三轮', async () => {
+test('抖音首屏没有入口时保留原始错误且不刷新重试', async () => {
   const calls = []
+  const missing = new DouyinSearchResultNotFoundError('首屏未找到')
   await assert.rejects(() => runDouyinSearchResultAttempts({
     waitForResult: async attempt => {
       calls.push(`wait:${attempt}`)
-      throw new DouyinSearchResultNotFoundError(`第${attempt}轮未找到`)
+      throw missing
     },
     refreshResults: async () => calls.push('refresh'),
-  }), /刷新后再次检查首屏.*仍未出现/)
-  assert.deepEqual(calls, ['wait:1', 'refresh', 'wait:2'])
+  }), error => error === missing)
+  assert.deepEqual(calls, ['wait:1'])
 })
 
-test('抖音两轮未召回智能总结或小荷入口时保存正式搜索结果截图', async () => {
+test('抖音首屏未召回入口时不刷新并保存搜索结果结束本题', async () => {
   let saved = null
+  let waits = 0
   const workflow = createQuestionWorkflows({
     observer: { snapshot: () => ({ active: true }) },
     recoverySnapshot: () => ({}),
     log: () => {},
     inputDouyinQuestion: async () => [600, 40, 710, 120],
     tap: async () => {},
-    waitForDouyinSearchResult: async () => { throw new DouyinSearchResultNotFoundError('未召回') },
-    refreshDouyinSearchResults: async () => {},
+    waitForDouyinSearchResult: async () => { waits += 1; throw new DouyinSearchResultNotFoundError('未召回') },
+    refreshDouyinSearchResults: async () => assert.fail('不应刷新搜索结果'),
     source: async () => '<hierarchy><node text="普通搜索结果" /></hierarchy>',
     screenshot: async () => Buffer.from('douyin-results'),
     saveArtifacts: async options => {
@@ -813,6 +1047,9 @@ test('抖音两轮未召回智能总结或小荷入口时保存正式搜索结�
   const result = await workflow.askOnceDouyin({ serial: 'device', timeout: 1 }, artifacts, '测试问题', 1)
 
   assert.equal(result.search_result_only, true)
+  assert.equal(waits, 1)
+  assert.equal(saved.meta.douyin_search_attempts, 1)
+  assert.equal(saved.meta.douyin_search_refreshed, false)
   assert.equal(saved.stem, '回答_搜索结果')
   assert.equal(saved.stitch, false)
   assert.equal(saved.frame.toString(), 'douyin-results')
@@ -821,7 +1058,7 @@ test('抖音两轮未召回智能总结或小荷入口时保存正式搜索结�
   assert.equal(saved.meta.search_result_capture_complete, true)
 })
 
-test('抖音两轮都只检查首屏且第一次无入口后仅下拉刷新一次', async () => {
+test('抖音首屏无入口时不刷新也不滚动搜索结果', async () => {
   let now = 0
   const swipes = []
   const xml = '<hierarchy>'
@@ -854,21 +1091,12 @@ test('抖音两轮都只检查首屏且第一次无入口后仅下拉刷新一�
   })
 
   await assert.rejects(
-    workflow.waitForDouyinSearchResult(1_000, { attempt: 1 }),
+    workflow.waitForDouyinSearchResult(1_000),
     error => error instanceof DouyinSearchResultNotFoundError && error.scanScrolls === 0,
   )
   assert.deepEqual(swipes, [])
 
-  await workflow.refreshDouyinSearchResults('测试问题', 0)
-  assert.equal(swipes.length, 1)
-  assert.equal(swipes[0].direction, 'up')
-
-  await assert.rejects(
-    workflow.waitForDouyinSearchResult(1_000, { attempt: 2 }),
-    error => error instanceof DouyinSearchResultNotFoundError && error.scanScrolls === 0,
-  )
-  assert.equal(swipes.length, 1)
-  assert.equal(swipes.some(item => item.direction === 'down'), false)
+  assert.equal(workflow.refreshDouyinSearchResults, undefined)
 })
 
 test('抖音搜索读取异常不会被刷新重试掩盖', async () => {
@@ -1580,7 +1808,8 @@ test('小荷新会话复用到底确认帧并用事件驱动稳定截图回顶',
     + '<node class="android.view.View" bounds="[12,120][228,200]"><node class="android.view.View" bounds="[120,122][220,198]">'
     + '<node class="android.widget.TextView" text="测试问题" content-desc="测试问题" visible-to-user="true" bounds="[122,140][218,180]" />'
     + '</node></node></node></hierarchy>'
-  const currentXml = () => position === 'top' ? topXml : bottomXml
+  let referencePreview = false
+  const currentXml = () => position === 'top' ? topXml : bottomXml.replace('</hierarchy>', `${referencePreview ? '<node package="com.aurora.xiaohe.aidoctor" text="参考药品" bounds="[12,220][228,245]" />' : ''}</hierarchy>`)
   let position = 'top'
   let observedStableCaptures = 0
   let strictStableCaptures = 0
@@ -1648,6 +1877,9 @@ test('小荷新会话复用到底确认帧并用事件驱动稳定截图回顶',
   assert.ok(upwardOptions.length >= 3)
   assert.ok(upwardOptions.every(options => options.eventDrivenSettle === true))
   assert.ok(upwardFractions.every(fraction => fraction === 0.55))
+  referencePreview = true
+  position = 'top'
+  await assert.rejects(() => capture.captureFullReplyFrames('测试问题', 30, { singleQuestionSession: true }), /参考药品.*完整列表/)
 })
 
 test('正式截图前以持续不可滚动和画面稳定确认回答已完整生成', async () => {
@@ -2336,6 +2568,53 @@ test('OCR发现医学文献列表时确认资料已经展开且不再点击', as
   assert.equal(result.capture, capture)
 })
 
+test('引用资料优先单击同一卡片内的层级箭头，兼容物理逻辑缩放', async () => {
+  for (const scale of [1, 2 / 3]) {
+    const b = values => `[${values.slice(0, 2).map(v => Math.round(v * scale)).join(',')}][${values.slice(2).map(v => Math.round(v * scale)).join(',')}]`
+    const xml = `<hierarchy><node class="androidx.compose.ui.viewinterop.ViewFactoryHolder" bounds="${b([0, 616, 1080, 832])}" />
+      <node class="android.widget.ImageView" bounds="${b([383, 699, 438, 749])}" />
+      <node class="android.widget.ImageView" bounds="${b([800, 699, 855, 749])}" /></hierarchy>`
+    let reads = 0
+    const taps = []
+    const result = await prepareEmbeddedEvidence({
+      screenshot: async () => Buffer.from('screen'),
+      initialCapture: { xml },
+      windowSize: async () => ({ width: 1080 * scale, height: 2400 * scale }),
+      ocr: { recognize: async () => ({ engine: 'test', elapsedMs: 1, image: { width: 1080, height: 2400 }, results: [
+        { text: ++reads > 1 ? '参考2篇医学文献 ∧' : '参考2篇医学文献', normalizedText: reads > 1 ? '参考2篇医学文献∧' : '参考2篇医学文献', confidence: 0.99, bounds: [59, 697, 425, 743] },
+        ...(reads > 1 ? [{ text: '1.示例疾病诊疗指南', normalizedText: '1.示例疾病诊疗指南', confidence: 0.99, bounds: [60, 790, 950, 840] }] : []),
+      ] }) },
+      tap: async (...point) => taps.push(point), delay: async () => {},
+      waitForStable: async () => ({ xml, frame: Buffer.from('expanded'), stable: true }), log: () => {},
+    }, [0, 384, 1080, 1967].map(v => Math.round(v * scale)))
+    assert.equal(result.expanded, true)
+    assert.deepEqual(taps, [[(Math.round(383 * scale) + Math.round(438 * scale)) / 2, (Math.round(699 * scale) + Math.round(749 * scale)) / 2]])
+  }
+})
+
+test('引用箭头定位刷新回顶过程中的旧层级，不点击无响应标题文字', async () => {
+  for (const scale of [1, 2 / 3]) {
+    const box = values => `[${values.slice(0, 2).map(v => Math.round(v * scale)).join(',')}][${values.slice(2).map(v => Math.round(v * scale)).join(',')}]`
+    const xml = `<hierarchy><node class="androidx.compose.ui.viewinterop.ViewFactoryHolder" bounds="${box([0, 616, 1080, 832])}" />
+      <node class="android.widget.ImageView" bounds="${box([418, 699, 473, 749])}" /></hierarchy>`
+    const taps = []
+    let reads = 0
+    const result = await prepareEmbeddedEvidence({
+      screenshot: async () => Buffer.from('screen'),
+      source: async () => xml,
+      initialCapture: { xml: '<hierarchy />' },
+      windowSize: async () => ({ width: 1080 * scale, height: 2400 * scale }),
+      ocr: { recognize: async () => ({ engine: 'test', elapsedMs: 1, image: { width: 1080, height: 2400 }, results: [
+        { text: ++reads > 1 ? '参考1篇药品说明书∧' : '参考1篇药品说明书', normalizedText: reads > 1 ? '参考1篇药品说明书∧' : '参考1篇药品说明书', confidence: 0.99, bounds: [59, 697, 459, 743] },
+      ] }) },
+      tap: async (...point) => taps.push(point), delay: async () => {},
+      waitForStable: async () => ({ xml, frame: Buffer.from('expanded'), stable: true }), log: () => {},
+    }, [0, 384, 1080, 1967].map(v => Math.round(v * scale)))
+    assert.equal(result.expanded, true)
+    assert.deepEqual(taps, [[(Math.round(418 * scale) + Math.round(473 * scale)) / 2, (Math.round(699 * scale) + Math.round(749 * scale)) / 2]])
+  }
+})
+
 test('新版参考医学文献标题可在不同物理与逻辑尺寸下严格识别', () => {
   const recognition = {
     image: { width: 1080, height: 2400 },
@@ -2350,6 +2629,18 @@ test('新版参考医学文献标题可在不同物理与逻辑尺寸下严格�
   assert.equal(target.text, '参考 1 篇医学文献')
   assert.equal(target.variant, 'medical_references')
   assert.deepEqual(target.logicalBounds, [43, 545, 319, 579])
+})
+
+test('引用箭头被OCR识别为波浪号时仍要求紧邻资料行才能确认展开', () => {
+  for (const scale of [1, 2 / 3]) {
+    const line = (text, bounds) => ({ text, normalizedText: text, confidence: 0.99, bounds: bounds.map(x => x * scale) })
+    const recognition = { image: { width: 1080 * scale, height: 2400 * scale }, results: [line('参考1篇药品说明书～', [64, 707, 481, 761])] }
+    const target = evidenceSummaryOcrTarget(recognition, { width: 720, height: 1600 }, [0, 100, 720, 1400])
+    assert.ok(target)
+    assert.equal(evidenceSummaryExpandedByOcr(recognition, target), false)
+    recognition.results.push(line('1. 金藤清痹颗粒_药品说明书', [64, 792, 600, 846]))
+    assert.equal(evidenceSummaryExpandedByOcr(recognition, target), true)
+  }
 })
 
 test('历史药品题的参考药品说明书标题可识别并确认展开箭头', () => {
@@ -3248,6 +3539,52 @@ test('小荷全文末屏实际滚动较短时仍在名义重叠上方找到真�
     .png().toBuffer()
 
   assert.equal(await verifyReplyFrameOverlap(previous, current, 180), overlap)
+})
+
+test('正文接缝覆盖竖屏滑动惯性但拒绝超出有界搜索的位移', async () => {
+  for (const scale of [1, 2]) {
+    const width = 240 * scale, height = 600 * scale, requestedShift = 270 * scale
+    const raw = Buffer.alloc(width * height * 3)
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const offset = (y * width + x) * 3
+        const row = Math.floor(y / (8 * scale)), column = Math.floor(x / (6 * scale))
+        const value = 30 + ((row * 41 + column * 19 + (row * column) % 113) % 200)
+        raw[offset] = value
+        raw[offset + 1] = (value + 31) % 240
+        raw[offset + 2] = (value + 67) % 240
+      }
+    }
+    const previous = await sharp(raw, { raw: { width, height, channels: 3 } }).png().toBuffer()
+    const moved = shift => sharp(previous).extract({ left: 0, top: shift, width, height: height - shift })
+      .extend({ bottom: shift, background: '#f3f4f5' }).png().toBuffer()
+    const actualShift = 378 * scale
+    const overlap = await verifyReplyFrameOverlap(previous, await moved(actualShift), height - requestedShift)
+    assert.ok(overlap <= height - actualShift && height - actualShift - overlap <= 3 * scale)
+    await assert.rejects(() => moved(486 * scale).then(current => verifyReplyFrameOverlap(previous, current, height - requestedShift)), /连续性/)
+  }
+})
+
+test('正文接缝排除固定居中按钮及阴影但仍严格验证左右正文', async () => {
+  for (const scale of [1, 2]) {
+    const width = 240 * scale, height = 600 * scale, shift = 270 * scale
+    const raw = Buffer.alloc(width * height * 3)
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const value = Math.round(120 + 35 * Math.sin(y / (18 * scale) + x / (23 * scale))
+          + 25 * Math.sin(y * y / (8000 * scale * scale) + x / (13 * scale)))
+        const i = (y * width + x) * 3
+        raw[i] = value; raw[i + 1] = (value + 31) % 240; raw[i + 2] = (value + 67) % 240
+      }
+    }
+    const base = await sharp(raw, { raw: { width, height, channels: 3 } }).png().toBuffer()
+    const moved = await sharp(base).extract({ left: 0, top: shift, width, height: height - shift })
+      .extend({ bottom: shift, background: 'white' }).png().toBuffer()
+    const button = Buffer.from(`<svg width="${width}" height="${height}"><ellipse cx="${width / 2}" cy="${height * 0.65}" rx="${width * 0.095}" ry="${width * 0.1}" fill="#dddddd"/><circle cx="${width / 2}" cy="${height * 0.65}" r="${width * 0.07}" fill="white"/></svg>`)
+    const pinned = image => sharp(image).composite([{ input: button, left: 0, top: 0 }]).png().toBuffer()
+    const overlap = await verifyReplyFrameOverlap(await pinned(base), await pinned(moved), height - shift)
+    assert.ok(overlap <= height - shift && height - shift - overlap <= 3 * scale)
+  }
 })
 
 test('小荷正文三个区域在比例容差内一致时取最小重叠保留安全重复', async () => {

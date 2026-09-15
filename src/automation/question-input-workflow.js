@@ -23,12 +23,24 @@ const SESSION_FIXED_LABELS = new Set([
   '拍药品', '拍患处', '报告解读', '上传图片', '打开相机',
   '切换语音输入', '展开输入扩展', '朗读', '打电话',
   '不选咨询人', '不选择咨询人，随便聊聊', '本人', '本人，咨询人档案', '新建咨询人',
+  'HI，早上好', 'HI，上午好', 'HI，中午好', 'HI，下午好', 'HI，晚上好',
+  '有任何健康问题，都可以随时问我',
+  '小荷AI医生是由小荷健康推出的医疗健康AI大模型服务，回答由AI生成，不构成诊断、处方，仅供参考。',
 ])
 const NEW_SESSION_CONTROL_LABELS = ['开启新会话', '新会话']
 const MORE_MENU_LABEL = '更多'
 
+function sessionNodes(xml) {
+  // IMEs can expose visible nodes with invalid sentinel bounds. They are not
+  // conversation evidence or a source of the target app's logical dimensions.
+  return iterNodes(xml).filter(attrs => {
+    const packageName = nodeAttr(attrs, 'package')
+    return nodeIsVisible(attrs) && (!packageName || packageName === 'com.aurora.xiaohe.aidoctor')
+  })
+}
+
 function sessionContentLabels(xml) {
-  return iterNodes(xml).flatMap(attrs => {
+  return sessionNodes(xml).flatMap(attrs => {
     if (!nodeIsVisible(attrs) || nodeAttr(attrs, 'class') === 'android.widget.EditText') return []
     if (nodeAttr(attrs, 'package') === 'com.android.systemui') return []
     const label = (nodeAttr(attrs, 'text') || nodeAttr(attrs, 'content-desc')).replace(/\s+/g, ' ').trim()
@@ -80,7 +92,7 @@ function findNewSessionTarget(xml) {
 function hierarchySize(xml) {
   let width = 0
   let height = 0
-  for (const attrs of iterNodes(xml)) {
+  for (const attrs of sessionNodes(xml)) {
     const rawBounds = nodeAttr(attrs, 'bounds')
     if (!rawBounds) continue
     const bounds = parseBounds(rawBounds)
@@ -109,7 +121,7 @@ function cleanNewSessionReady(xml, hints = ['输入问题']) {
   if (!inputReady) return false
   const contentTop = Math.floor(size.height * 0.16)
   const contentBottom = Math.floor(size.height * 0.82)
-  const conversationLabels = iterNodes(xml).filter(attrs => {
+  const conversationLabels = sessionNodes(xml).filter(attrs => {
     if (!nodeIsVisible(attrs) || nodeAttr(attrs, 'class') === 'android.widget.EditText') return false
     if (nodeAttr(attrs, 'package') === 'com.android.systemui') return false
     const label = nodeAttr(attrs, 'text') || nodeAttr(attrs, 'content-desc')
@@ -140,6 +152,7 @@ function createQuestionInputWorkflow({
 }) {
   async function waitForInput(timeout = 10_000) {
     const deadline = Date.now() + timeout
+    let textModeSwitchClicked = false
     while (Date.now() < deadline) {
       checkCancelled()
       const xml = await source()
@@ -158,6 +171,16 @@ function createQuestionInputWorkflow({
         setCachedSendBounds(findSubmitBounds(xml))
         const attrs = iterNodes(xml).find(item => nodeAttr(item, 'class') === 'android.widget.EditText')
         return { bounds: editBounds, text: attrs ? nodeAttr(attrs, 'text') : '' }
+      }
+      const textModeSwitch = labeledHitBounds(xml, '切换文字输入')
+      if (textModeSwitch) {
+        if (!textModeSwitchClicked) {
+          textModeSwitchClicked = true
+          await tap((textModeSwitch[0] + textModeSwitch[2]) / 2, (textModeSwitch[1] + textModeSwitch[3]) / 2)
+          log('stage: 已点击切换文字输入，等待真实编辑框就绪')
+        }
+        await sleep(500)
+        continue
       }
       const hint = inputHintBounds(xml, getActiveEntry().inputHints || ['输入问题'])
       if (hint) {
@@ -290,8 +313,21 @@ function createQuestionInputWorkflow({
   async function waitForDouyinSearchInput(timeout = 12_000) {
     const deadline = Date.now() + timeout
     let closeClickedAt = 0
+    let guideDismissed = false
     while (Date.now() < deadline) {
       const xml = await source()
+      const guideNodes = iterNodes(xml).filter(attrs => nodeIsVisible(attrs) && nodeAttr(attrs, 'package') === 'com.ss.android.ugc.aweme')
+      if (guideNodes.some(attrs => nodeAttr(attrs, 'text') === '如何找到「常用小程序」')) {
+        const dismiss = guideNodes.find(attrs => nodeAttr(attrs, 'text') === '不再提示' && nodeAttr(attrs, 'clickable') === 'true')
+        if (dismiss && !guideDismissed) {
+          guideDismissed = true
+          const box = parseBounds(nodeAttr(dismiss, 'bounds'))
+          await tap((box[0] + box[2]) / 2, (box[1] + box[3]) / 2)
+          log('stage: 已关闭抖音常用小程序首次引导，继续确认搜索入口')
+        }
+        await sleep(250)
+        continue
+      }
       const edit = douyinSearchInput(xml)
       if (edit) return edit
       const size = await windowSize()

@@ -13,6 +13,21 @@ const {
   referenceProductImageBounds,
 } = require('./hierarchy')
 const { imageInfo, cropImage, imageLooksLoaded } = require('./images')
+const { findOcrText, mapPhysicalBoundsToLogical } = require('./ocr')
+
+function miniAppReferenceProductsOcrTrigger(recognition, logicalSize) {
+  const headings = findOcrText(recognition, /^(?:参考|推荐)药品$/, { minConfidence: 0.85 })
+  const buttons = findOcrText(recognition, /^(?:查看)?全部药品[>›]?$/, { minConfidence: 0.85 })
+  for (const heading of headings) for (const button of buttons) {
+    const height = heading.bounds[3] - heading.bounds[1]
+    if (button.bounds[0] <= heading.bounds[2]
+      || Math.abs(boundsCenterY(button.bounds) - boundsCenterY(heading.bounds)) > height * 0.8
+      || button.bounds[0] < recognition.image.width * 0.65) continue
+    const bounds = mapPhysicalBoundsToLogical(button.bounds, recognition.image, logicalSize)
+    return [Math.round((bounds[0] + bounds[2]) / 2), Math.round(boundsCenterY(bounds))]
+  }
+  return null
+}
 
 function treeNodes(root, result = []) {
   for (const child of root.children || []) {
@@ -92,6 +107,21 @@ function referenceProductsTrigger(xml, chatBounds) {
   for (const label of ['参考药品', '推荐药品']) {
     const bounds = visibleLabelBounds(xml, label)
     if (!bounds || !boundsIntersect(bounds, chatBounds)) continue
+    const nodes = iterNodes(xml)
+    const nativeHeading = nodes.some(attrs => nodeIsVisible(attrs)
+      && nodeAttr(attrs, 'package') === 'com.aurora.xiaohe.aidoctor'
+      && nodeAttr(attrs, 'text') === label && nodeAttr(attrs, 'clickable') !== 'true'
+      && bounds[2] - bounds[0] >= (chatBounds[2] - chatBounds[0]) * 0.8)
+    if (nativeHeading) {
+      // The capture crop can end above this visible button to exclude a floating
+      // scroll control. Click in UI coordinates, not the cropped image space.
+      const all = nodes.find(attrs => nodeIsVisible(attrs)
+        && nodeAttr(attrs, 'package') === 'com.aurora.xiaohe.aidoctor'
+        && nodeAttr(attrs, 'text') === '查看全部药品')
+      if (!all) return null
+      const target = parseBounds(nodeAttr(all, 'bounds'))
+      return target[1] >= bounds[3] ? [Math.round((target[0] + target[2]) / 2), Math.round((target[1] + target[3]) / 2)] : null
+    }
     const centerY = boundsCenterY(bounds)
     const exact = iterNodes(xml).map(attrs => ({
       clickable: nodeAttr(attrs, 'clickable') === 'true',
@@ -241,6 +271,7 @@ async function referenceProductViewportReadiness(frame, xml, listBounds) {
 }
 
 module.exports = {
+  miniAppReferenceProductsOcrTrigger,
   miniAppReferenceProductsTrigger,
   referenceProductsTrigger,
   refreshedReferenceProductsTrigger,

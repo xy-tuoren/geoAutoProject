@@ -26,7 +26,6 @@ function createQuestionWorkflows({
   inputDouyinQuestion,
   tap,
   waitForDouyinSearchResult,
-  refreshDouyinSearchResults,
   source,
   screenshot,
   captureDouyinSearchTarget,
@@ -70,8 +69,8 @@ function createQuestionWorkflows({
     const platformMeta = platform === 'douyin'
       ? {
           douyin_result_mode: 'search_results_only',
-          douyin_search_attempts: 2,
-          douyin_search_refreshed: true,
+          douyin_search_attempts: 1,
+          douyin_search_refreshed: false,
           douyin_search_summary_captured: false,
           douyin_miniapp_entry_detected: false,
           douyin_question_logical_image_count: 1,
@@ -132,8 +131,7 @@ function createQuestionWorkflows({
     let card
     try {
       card = await runDouyinSearchResultAttempts({
-        waitForResult: attempt => waitForDouyinSearchResult(payload.timeout * 1_000, { attempt }),
-        refreshResults: () => refreshDouyinSearchResults(question),
+        waitForResult: () => waitForDouyinSearchResult(payload.timeout * 1_000),
       })
       Object.assign(meta, {
         douyin_search_attempts: card.attempt,
@@ -182,20 +180,32 @@ function createQuestionWorkflows({
       await fs.writeFile(diagnosticEntryScreenshotPath, searchCapture.frame)
       log(`diagnostic: 抖音小程序入口搜索页已暂存 ${diagnosticEntryScreenshotPath}，通过本题上下文校验后才进入交付区`)
       log('stage: 正在通过独立入口卡片打开小荷AI医生小程序')
-      full = await openDouyinMiniAppEntry(searchCapture.target, card.size)
+      full = await openDouyinMiniAppEntry(searchCapture.target, card.size, 12_000, { question })
+      if (full.submissionEvidence) {
+        await Promise.all([
+          fs.writeFile(path.join(directory, '小程序提问回读.png'), full.submissionEvidence.frame),
+          fs.writeFile(path.join(directory, '小程序提问回读.xml'), full.submissionEvidence.xml, 'utf8'),
+          fs.writeFile(path.join(directory, '小程序提问回读_OCR.json'), JSON.stringify(full.submissionEvidence.recognition, null, 2), 'utf8'),
+        ])
+      }
       Object.assign(meta, {
         douyin_result_mode: 'miniapp_entry_card',
+        douyin_search_target_detection_method: searchCapture.detectionMethod,
         douyin_search_summary_captured: false,
         douyin_miniapp_entry_detected: true,
         douyin_miniapp_entry_screenshot: leadingScreenshotPath,
         douyin_miniapp_entry_card_bounds: searchCapture.target.cardBounds,
         douyin_miniapp_entry_tap_bounds: searchCapture.target.tapBounds,
+        douyin_miniapp_entry_kind: searchCapture.target.entryKind || 'query_entry',
+        douyin_miniapp_entry_identity_confirmed: Boolean(searchCapture.target.identityConfirmed || searchCapture.ocrTarget),
         douyin_miniapp_entry_activity: full.activity,
+        douyin_miniapp_question_submitted: Boolean(full.questionSubmitted),
+        new_session_performed: Boolean(full.newSessionPerformed),
         douyin_question_logical_image_count: 2,
       })
       full = await waitForDouyinMiniAppAnswer(full, payload.timeout * 1_000, { question })
-      await fs.writeFile(leadingScreenshotPath, searchCapture.frame)
-      log(`capture: 抖音小程序入口搜索页已通过本题上下文校验并保存 ${leadingScreenshotPath}`)
+      meta.douyin_miniapp_question_validation_method = 'exact_green_bubble_before_first_frame'
+      log('stage: 小荷页面身份已确认，搜索入口图等待完整原题与回答采集校验后再交付')
       captureMethod = () => captureDouyinMiniAppEntryAnswerFrames(full.xml, full.bounds, question)
     }
     log('stage: 小荷AI医生全文页已打开且回答可截图，开始从上到下完整截图')
@@ -210,6 +220,10 @@ function createQuestionWorkflows({
       observerBaseline,
       recoveryBaseline,
     })
+    if (searchCapture.target.mode !== 'smart_summary') {
+      await fs.writeFile(leadingScreenshotPath, searchCapture.frame)
+      log(`capture: 完整原题和回答已校验，抖音入口搜索页已保存 ${leadingScreenshotPath}`)
+    }
     return searchCapture.target.mode === 'smart_summary'
       ? { summaryScreenshot: leadingScreenshotPath, ...result }
       : { entryScreenshot: leadingScreenshotPath, ...result }
@@ -347,6 +361,7 @@ function createQuestionWorkflows({
       ...activeEntryMetadata(),
       new_session_requested: true,
       new_session_performed: newSessionPerformed,
+      new_session_validation_method: 'target_app_content_excluding_fixed_welcome',
       ui_backend: 'python_uiautomator2_strict',
       ui_fallback_enabled: false,
     }

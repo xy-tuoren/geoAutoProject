@@ -59,7 +59,7 @@ async function detectXiaoheUserQuestionBubble(image, chatBounds, logicalSize) {
     const g = raw.data[offset + 1]
     const b = raw.data[offset + 2]
     return r <= 80 && g >= 165 && g <= 230 && b >= 105 && b <= 195
-      && g - r >= 105 && g - b >= 22 && g - b <= 85
+      && g - r >= 105 && g - b >= 15 && g - b <= 85
   }
 
   const addCandidate = (bottom) => {
@@ -447,6 +447,8 @@ async function findVerticalOverlapWithScore(previous, current, expected = null, 
 }
 
 const REPLY_OVERLAP_BANDS = [[0.04, 0.24], [0.26, 0.46], [0.54, 0.74], [0.76, 0.96]]
+// Wider centre exclusion also covers the pinned button's shadow.
+const REPLY_SHADOW_FREE_BANDS = [[0.04, 0.22], [0.24, 0.4], [0.6, 0.76], [0.78, 0.96]]
 
 function largestOverlapConsensus(results, tolerance = 3) {
   let best = []
@@ -458,7 +460,7 @@ function largestOverlapConsensus(results, tolerance = 3) {
   return best
 }
 
-async function findReplyOverlapWithScore(previous, current, expected = null) {
+async function findReplyOverlapWithScore(previous, current, expected = null, overscrollRatio = 0.3, bands = REPLY_OVERLAP_BANDS) {
   const [previousRaw, currentRaw] = await Promise.all([rawImage(previous), rawImage(current)])
   const maxOverlap = Math.min(previousRaw.height, currentRaw.height) - 8
   const minOverlap = Math.min(40, Math.floor(maxOverlap / 2))
@@ -469,7 +471,7 @@ async function findReplyOverlapWithScore(previous, current, expected = null) {
   let high = maxOverlap
   if (expected !== null) {
     const expectedShift = Math.max(0, previousRaw.height - Math.round(expected))
-    const overscrollAllowance = Math.max(80, Math.round(expectedShift * 0.3))
+    const overscrollAllowance = Math.max(80, Math.round(expectedShift * overscrollRatio))
     low = Math.max(minOverlap, Math.round(expected) - overscrollAllowance)
     // A final swipe can move less than requested when the page reaches its
     // real bottom, so the true overlap may be much larger than the nominal
@@ -478,7 +480,7 @@ async function findReplyOverlapWithScore(previous, current, expected = null) {
     high = maxOverlap
     if (low >= high) { low = minOverlap; high = maxOverlap }
   }
-  const results = REPLY_OVERLAP_BANDS.map(band => ({
+  const results = bands.map(band => ({
     band,
     ...bestBandOverlap(previousRaw, currentRaw, band, low, high),
   }))
@@ -540,7 +542,7 @@ async function analyzeReplyScrollEvidence(previous, current, expected = null) {
   }
 }
 
-async function detectFloatingDownArrow(image, searchBounds = null) {
+async function detectFloatingDownArrow(image, searchBounds = null, { direction = 'down', sizeReferenceWidth = null } = {}) {
   const raw = await rawImage(image)
   const bounds = searchBounds || [0, 0, raw.width, raw.height]
   const left = Math.max(0, Math.floor(bounds[0]))
@@ -551,16 +553,16 @@ async function detectFloatingDownArrow(image, searchBounds = null) {
   const viewportHeight = bottom - top
   if (viewportWidth <= 0 || viewportHeight <= 0) return null
   const centerX = (left + right) / 2
-  const sizes = [0.075, 0.09, 0.105, 0.12].map(ratio => Math.max(28, Math.round(viewportWidth * ratio)))
+  const sizes = [0.075, 0.09, 0.105, 0.12].map(ratio => Math.max(28, Math.round((sizeReferenceWidth || viewportWidth) * ratio)))
   let best = null
   for (const size of sizes) {
     const half = size / 2
     const yStart = Math.round(top + viewportHeight * 0.48)
-    const yEnd = Math.round(bottom - half - viewportHeight * 0.015)
+    const yEnd = Math.round(bottom - half)
     for (let centerY = yStart; centerY <= yEnd; centerY += Math.max(2, Math.round(size * 0.06))) {
       const sample = (xRatio, yRatio, radiusRatio = 0.045) => {
         const cx = centerX + xRatio * size
-        const cy = centerY + yRatio * size
+        const cy = centerY + yRatio * size * (direction === 'up' ? -1 : 1)
         const radius = Math.max(1, Math.round(size * radiusRatio))
         let dark = 0
         let count = 0
@@ -574,13 +576,41 @@ async function detectFloatingDownArrow(image, searchBounds = null) {
         return dark / Math.max(1, count)
       }
       const sampleLight = (xRatio, yRatio, radiusRatio = 0.045) => 1 - sample(xRatio, yRatio, radiusRatio)
+      // A button has a uniform background around its arrow. Character strokes
+      // and the white gaps between them can otherwise mimic either polarity.
+      const backgroundRing = Array.from({ length: 12 }, (_, index) => {
+        const angle = index * Math.PI / 6
+        return sample(Math.cos(angle) * 0.42, Math.sin(angle) * 0.42, 0.025)
+      })
       const shaft = (sample(0, -0.2) + sample(0, -0.08) + sample(0, 0.03)) / 3
       const arrowHead = (sample(-0.13, 0.08) + sample(-0.07, 0.14) + sample(0, 0.2)
         + sample(0.07, 0.14) + sample(0.13, 0.08)) / 5
       const clearSides = 1 - (sample(-0.28, -0.02, 0.07) + sample(0.28, -0.02, 0.07)) / 2
       const clearTop = 1 - (sample(-0.2, -0.28, 0.06) + sample(0.2, -0.28, 0.06)) / 2
       const score = shaft * 0.42 + arrowHead * 0.42 + clearSides * 0.1 + clearTop * 0.06
+      const chevron = [-0.16, -0.08, 0, 0.08, 0.16].map((x, index) => sample(x, [-0.04, 0.04, 0.12, 0.04, -0.04][index]))
+      const chevronScore = chevron.reduce((sum, value) => sum + value, 0) / chevron.length
+      if (direction === 'down' && centerY >= bottom - viewportHeight * 0.25
+        && chevron.every(value => value >= 0.18) && chevronScore >= 0.32
+        && backgroundRing.every(value => value <= 0.12)) {
+        // A shaftless V also needs the light-grey circular button shadow;
+        // isolated text strokes on white must not truncate the viewport.
+        const shadowPoints = Array.from({ length: 12 }, (_, index) => {
+          const angle = index * Math.PI / 6
+          const x = Math.round(centerX + Math.cos(angle) * size * 0.54)
+          const y = Math.round(centerY + Math.sin(angle) * size * 0.54)
+          if (x < left || x >= right || y < top || y >= bottom) return false
+          const offset = (y * raw.width + x) * raw.channels
+          const rgb = [...raw.data.subarray(offset, offset + 3)]
+          const tone = luminosity(raw.data, offset)
+          return tone >= 160 && tone < 250 && Math.max(...rgb) - Math.min(...rgb) < 12
+        })
+        if (shadowPoints.filter(Boolean).length >= 3 && (!best || chevronScore > best.score)) {
+          best = { bounds: [Math.round(centerX - half), Math.round(centerY - half), Math.round(centerX + half), Math.round(centerY + half)], score: chevronScore, shape: 'chevron', arrowHeadRatio: chevronScore }
+        }
+      }
       if (shaft >= 0.18 && arrowHead >= 0.12 && clearSides >= 0.82 && clearTop >= 0.82
+        && backgroundRing.every(value => value <= 0.12)
         && (!best || score > best.score)) {
         best = {
           bounds: [Math.round(centerX - half), Math.round(centerY - half), Math.round(centerX + half), Math.round(centerY + half)],
@@ -596,6 +626,7 @@ async function detectFloatingDownArrow(image, searchBounds = null) {
       const darkTop = 1 - (sampleLight(-0.2, -0.28, 0.06) + sampleLight(0.2, -0.28, 0.06)) / 2
       const inverseScore = lightShaft * 0.42 + lightArrowHead * 0.42 + darkSides * 0.1 + darkTop * 0.06
       if (lightShaft >= 0.52 && lightArrowHead >= 0.38 && darkSides >= 0.58 && darkTop >= 0.58
+        && backgroundRing.every(value => value >= 0.88)
         && (!best || inverseScore > best.score)) {
         best = {
           bounds: [Math.round(centerX - half), Math.round(centerY - half), Math.round(centerX + half), Math.round(centerY + half)],
@@ -633,7 +664,11 @@ async function verifyFrameOverlap(previous, current, expected) {
 }
 
 async function verifyReplyFrameOverlap(previous, current, expected, { measuredShift = null } = {}) {
-  const result = await findReplyOverlapWithScore(previous, current, expected)
+  let result = await findReplyOverlapWithScore(previous, current, expected)
+  // Finger travel is not content travel: the test phone reached 1.39x.
+  // Preserve the normal search, then try a bounded 1.5x range before recapture.
+  if (!result.valid && expected !== null) result = await findReplyOverlapWithScore(previous, current, expected, 0.5)
+  if (!result.valid) result = await findReplyOverlapWithScore(previous, current, expected, 0.5, REPLY_SHADOW_FREE_BANDS)
   if (result.valid) return result.overlap
 
   const candidates = result.candidateOverlaps || []

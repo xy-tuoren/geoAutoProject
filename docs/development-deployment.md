@@ -125,7 +125,7 @@ Windows 打包成功后，`dist/` 中应至少包含：
 
 `Build macOS package` 的行为：
 
-- 手动运行或推送 `v*` 标签：构建 macOS DMG 并上传 Actions Artifact。
+- 仅手动运行：构建 macOS DMG 并上传 Actions Artifact。
 - 当前 macOS 工作流不会把 DMG 上传到 GitHub Release。
 
 ## 发布 Windows 新版本
@@ -183,7 +183,7 @@ git push origin v0.1.2
 
 ## 自动更新机制
 
-Windows 安装包使用 `electron-updater` 从 GitHub Releases 检查更新。
+Windows 安装包使用 `electron-updater` 从 `http://104.168.30.172/geo-updates/win/` 检查更新；GitHub Releases 保留带版本号的安装包备份。标签构建会同步部署固定文件名的安装包、blockmap 和最后发布的 `latest.yml`。
 
 应用行为：
 

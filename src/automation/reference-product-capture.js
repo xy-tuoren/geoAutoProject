@@ -221,8 +221,8 @@ function createReferenceProductCapture({
     if (chatBounds || triggerResolver) {
       const latestXml = await source()
       const refreshed = triggerResolver
-        ? (() => {
-            const latest = triggerResolver(latestXml)
+        ? await (async () => {
+            const latest = await triggerResolver(latestXml)
             if (!latest) throw new Error('推荐药品入口在点击前已离开当前视口；为避免点击错误位置已停止操作')
             return {
               trigger: latest,

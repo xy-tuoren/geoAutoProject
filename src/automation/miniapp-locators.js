@@ -160,7 +160,7 @@ function toutiaoOcrViewMoreTarget(recognition, logicalSize) {
 function douyinOcrViewFullTarget(recognition, logicalSize) {
   const physicalSize = recognition.image
   const brands = findOcrText(recognition, item => /^小荷AI医生(?:AI)?$/.test(item.normalizedText), { minConfidence: 0.85 })
-  const summaries = findOcrText(recognition, item => /^(?:根据)?医学数据智能总结$/.test(item.normalizedText), { minConfidence: 0.85 })
+  const summaries = findOcrText(recognition, item => /^(?:(?:根据)?医学数据智能总结|字节跳动旗下医疗大模型应用)$/.test(item.normalizedText), { minConfidence: 0.85 })
   const viewFullItems = findOcrText(recognition, item => /^查看全文$/.test(item.normalizedText), { minConfidence: 0.85 })
   const candidates = []
   for (const brand of brands) {
@@ -203,10 +203,14 @@ function douyinOcrViewFullTarget(recognition, logicalSize) {
 }
 
 function douyinViewFullBounds(xml, screenSize) {
+  const nodes = iterNodes(xml)
+  if (!nodes.some(attrs => nodeIsVisible(attrs)
+    && nodeAttr(attrs, 'package') === ENTRY_DEFINITIONS['douyin-xiaohe-miniapp'].packageName
+    && [nodeAttr(attrs, 'text'), nodeAttr(attrs, 'content-desc')].some(text => /^小荷AI医生(?:AI)?$/.test(text)))) return null
   const width = screenSize.width
   const height = screenSize.height
   const candidates = []
-  for (const attrs of iterNodes(xml)) {
+  for (const attrs of nodes) {
     if (!nodeIsVisible(attrs)
       || nodeAttr(attrs, 'package') !== ENTRY_DEFINITIONS['douyin-xiaohe-miniapp'].packageName
       || nodeAttr(attrs, 'class') !== 'android.view.ViewGroup'
@@ -226,6 +230,37 @@ function douyinViewFullBounds(xml, screenSize) {
   }
   candidates.sort((a, b) => a[1] - b[1])
   return candidates[0] || null
+}
+
+function douyinOcrConsultEntryTarget(recognition, logicalSize) {
+  const size = recognition.image
+  const brands = findOcrText(recognition, /^小荷AI医生$/, { minConfidence: 0.85 })
+  const subtitles = findOcrText(recognition, /^为您提供定制化建议[,，]试试咨询$/, { minConfidence: 0.85 })
+  const buttons = findOcrText(recognition, /^免费咨询$/, { minConfidence: 0.85 })
+  for (const brand of brands) {
+    for (const subtitle of subtitles) {
+      const gap = subtitle.bounds[1] - brand.bounds[3]
+      const center = (brand.bounds[0] + brand.bounds[2]) / 2
+      if (brand.bounds[1] < size.height * 0.1 || gap < 0 || gap > size.height * 0.04
+        || subtitle.bounds[2] - subtitle.bounds[0] > size.width * 0.55
+        || center < subtitle.bounds[0] || center > subtitle.bounds[2]) continue
+      for (const button of buttons) {
+        const buttonGap = button.bounds[1] - subtitle.bounds[3]
+        const buttonCenter = (button.bounds[0] + button.bounds[2]) / 2
+        if (buttonGap < 0 || buttonGap > size.height * 0.06
+          || Math.abs(buttonCenter - center) > size.width * 0.06
+          || button.bounds[3] > size.height * 0.94) continue
+        const bounds = mapPhysicalBoundsToLogical(button.bounds, size, logicalSize)
+        return {
+          mode: 'miniapp_entry_card', entryKind: 'free_consult', tapBounds: bounds,
+          cardBounds: mapPhysicalBoundsToLogical([subtitle.bounds[0], brand.bounds[1], subtitle.bounds[2], button.bounds[3]], size, logicalSize),
+          bounds, physicalBounds: button.bounds, brandConfidence: brand.confidence,
+          summaryConfidence: subtitle.confidence, viewFullConfidence: button.confidence,
+        }
+      }
+    }
+  }
+  return null
 }
 
 function douyinGenericAiAnswerBounds(xml, screenSize) {
@@ -257,7 +292,7 @@ function treeNodes(root, result = []) {
   return result
 }
 
-function douyinMiniAppEntryBounds(xml, screenSize) {
+function douyinMiniAppEntryBounds(xml, screenSize, { brandBounds = null } = {}) {
   if (!douyinSearchInput(xml) || screenSize.width >= screenSize.height) return null
   const width = screenSize.width
   const height = screenSize.height
@@ -274,8 +309,8 @@ function douyinMiniAppEntryBounds(xml, screenSize) {
     const cardWidth = cardBounds[2] - cardBounds[0]
     const cardHeight = cardBounds[3] - cardBounds[1]
     if (cardWidth < width * 0.4 || cardWidth > width * 0.55
-      || cardHeight < height * 0.22 || cardHeight > height * 0.4
-      || cardBounds[1] < height * 0.38 || cardBounds[3] > height
+      || cardHeight < height * 0.18 || cardHeight > height * (brandBounds ? 0.65 : 0.4)
+      || cardBounds[1] < height * (brandBounds ? 0.12 : 0.38) || cardBounds[3] > height
       || node.children.length < 3 || node.children.length > 6
       || node.children.some(child => nodeAttr(child.attrs, 'class') !== 'android.view.ViewGroup')) continue
     const descendants = treeNodes(node)
@@ -292,6 +327,8 @@ function douyinMiniAppEntryBounds(xml, screenSize) {
     })
     if (!header) continue
     const tapBounds = parseBounds(nodeAttr(header.attrs, 'bounds'))
+    if (brandBounds && (brandBounds[0] < tapBounds[0] || brandBounds[2] > tapBounds[2]
+      || brandBounds[1] < tapBounds[1] || brandBounds[3] > tapBounds[3])) continue
     const actions = node.children.filter(child => {
       const childRaw = nodeAttr(child.attrs, 'bounds')
       if (!childRaw || child === header) return false
@@ -303,6 +340,22 @@ function douyinMiniAppEntryBounds(xml, screenSize) {
   }
   candidates.sort((a, b) => a.cardBounds[1] - b.cardBounds[1] || a.cardBounds[0] - b.cardBounds[0])
   return candidates[0] || null
+}
+
+function douyinOcrBrandEntryTarget(recognition, xml, logicalSize) {
+  if (!recognition.image || logicalSize.width >= logicalSize.height) return null
+  for (const brand of findOcrText(recognition, /^小荷AI医生(?:AI)?$/, { minConfidence: 0.85 })) {
+    const bounds = mapPhysicalBoundsToLogical(brand.bounds, recognition.image, logicalSize)
+    const entry = douyinMiniAppEntryBounds(xml, logicalSize, { brandBounds: bounds })
+    if (!entry) continue
+    return {
+      ...entry, mode: 'miniapp_entry_card', entryKind: 'brand_card',
+      bounds, physicalBounds: brand.bounds, brandConfidence: brand.confidence,
+      summaryConfidence: brand.confidence, viewFullConfidence: brand.confidence,
+      identityConfirmed: true,
+    }
+  }
+  return null
 }
 
 function douyinSearchResultTarget(xml, screenSize) {
@@ -393,6 +446,8 @@ module.exports = {
   hierarchyLogicalSize,
   toutiaoOcrViewMoreTarget,
   douyinOcrViewFullTarget,
+  douyinOcrConsultEntryTarget,
+  douyinOcrBrandEntryTarget,
   douyinViewFullBounds,
   douyinGenericAiAnswerBounds,
   douyinMiniAppEntryBounds,

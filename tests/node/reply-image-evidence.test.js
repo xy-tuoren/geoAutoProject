@@ -55,6 +55,8 @@ async function inverseArrowImage(width, height, centerY, size) {
 for (const fixture of [
   { width: 720, height: 1600, centerY: 1080, size: 72 },
   { width: 1080, height: 2400, centerY: 1580, size: 108 },
+  { width: 720, height: 1600, centerY: 1310, size: 72 },
+  { width: 1080, height: 2400, centerY: 2095, size: 108 },
 ]) {
   test(`floating down-arrow image fallback scales to ${fixture.width}x${fixture.height}`, async () => {
     const image = await arrowImage(fixture.width, fixture.height, fixture.centerY, fixture.size)
@@ -77,6 +79,33 @@ test('floating down-arrow image fallback detects a light arrow on the dark Xiaoh
 test('floating down-arrow fallback does not report a blank viewport', async () => {
   const blank = await sharp({ create: { width: 720, height: 1600, channels: 3, background: '#fff' } }).png().toBuffer()
   assert.equal(await detectFloatingDownArrow(blank, [0, 180, 720, 1340]), null)
+})
+
+test('shaftless miniapp chevron requires a circular shadow and scales across portrait sizes', async () => {
+  for (const scale of [2 / 3, 1]) {
+    const width = Math.round(1080 * scale), height = Math.round(2400 * scale)
+    for (const shadow of [false, true]) {
+      const svg = Buffer.from(`<svg width="${width}" height="${height}" viewBox="0 0 1080 2400"><rect width="1080" height="2400" fill="white"/>
+        ${shadow ? '<circle cx="540" cy="1846" r="72" fill="#dddddd"/><circle cx="540" cy="1840" r="60" fill="white"/>' : ''}
+        <path d="M520 1832 L540 1852 L560 1832" stroke="#171b26" stroke-width="5" stroke-linecap="round" fill="none"/></svg>`)
+      const image = await sharp(svg).png().toBuffer()
+      const detected = await detectFloatingDownArrow(image, [0, height * 0.13, width, height * 0.815])
+      if (!shadow) assert.equal(detected, null)
+      else {
+        assert.equal(detected?.shape, 'chevron')
+        assert.ok(detected.bounds[1] <= 1785 * scale)
+      }
+    }
+  }
+})
+
+test('floating down-arrow fallback rejects text strokes and gaps inside drug controls', async () => {
+  for (const width of [720, 1080]) {
+    const height = width * 20 / 9
+    const svg = Buffer.from(`<svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg"><rect width="100%" height="100%" fill="white"/>
+      <text x="50%" y="75%" text-anchor="middle" font-family="PingFang SC" font-weight="bold" font-size="${width * 0.042}">查看全部药品</text></svg>`)
+    assert.equal(await detectFloatingDownArrow(await sharp(svg).png().toBuffer(), [0, height * 0.14, width, height * 0.82]), null)
+  }
 })
 
 test('ambiguous movement without new-content evidence is not admitted into the frame sequence', () => {
