@@ -8,8 +8,6 @@ const {
   DouyinSearchResultNotFoundError,
   ToutiaoAnswerCardNotFoundError,
   runDouyinSearchResultAttempts,
-  runToutiaoAnswerCardAttempts,
-  runToutiaoFullAnswerAttempts,
 } = require('./search-recovery')
 const { DouyinMiniAppNetworkError } = require('./douyin-search-workflow')
 
@@ -78,8 +76,8 @@ function createQuestionWorkflows({
         }
       : {
           toutiao_result_mode: 'search_results_only',
-          toutiao_search_attempts: 2,
-          toutiao_search_repeated_exact_question: true,
+          toutiao_search_attempts: 1,
+          toutiao_search_repeated_exact_question: false,
           toutiao_search_summary_captured: false,
           toutiao_question_logical_image_count: 1,
           toutiao_search_result_screenshot: screenshotPath,
@@ -266,51 +264,35 @@ function createQuestionWorkflows({
     await tap((search[0] + search[2]) / 2, (search[1] + search[3]) / 2)
     let card
     try {
-      card = await runToutiaoAnswerCardAttempts({
-        waitForResult: () => waitForToutiaoAnswerCard(payload.timeout * 1_000, question),
-        repeatExactSearch: async () => {
-          log('stage: 头条结果未召回小荷AI医生，正在用相同问题执行一次受控重试')
-          const retrySearch = await inputToutiaoQuestion(question)
-          log('stage: 已再次精确确认头条搜索词，正在执行唯一一次重试')
-          await tap((retrySearch[0] + retrySearch[2]) / 2, (retrySearch[1] + retrySearch[3]) / 2)
-        },
-      })
+      card = { ...await waitForToutiaoAnswerCard(payload.timeout * 1_000, question), attempt: 1, repeated: false }
     } catch (error) {
       if (!(error instanceof ToutiaoAnswerCardNotFoundError)) throw error
       return saveUnmatchedSearchResult({
         platform: 'toutiao', artifacts, question, meta, error, observerBaseline, recoveryBaseline,
       })
     }
-    log('stage: 已找到头条小荷AI医生回答卡片，正在截取搜索结果智能总结')
-    let summary = await captureToutiaoSearchSummary(card.size)
-    log('stage: 已找到头条小荷AI医生回答卡片，正在点击全文入口')
-    const opened = await runToutiaoFullAnswerAttempts({
-      initialTarget: { card, summary },
-      canRepeat: card.attempt < 2,
-      openFullAnswer: target => openToutiaoFullAnswer(target.summary.viewMore, target.card.size),
-      repeatExactSearch: async () => {
-        log('stage: 头条全文入口未进入本题全文，正在重新搜索相同问题并执行唯一一次路由重试')
-        const retrySearch = await inputToutiaoQuestion(question)
-        await tap((retrySearch[0] + retrySearch[2]) / 2, (retrySearch[1] + retrySearch[3]) / 2)
-        const retryCard = await waitForToutiaoAnswerCard(payload.timeout * 1_000, question)
-        const retrySummary = await captureToutiaoSearchSummary(retryCard.size)
-        return { card: { ...retryCard, attempt: 2, repeated: true }, summary: retrySummary }
-      },
-    })
-    card = opened.target.card
-    summary = opened.target.summary
+    log('stage: 已找到头条首屏小荷入口，正在保存稳定点击证据')
+    const summary = await captureToutiaoSearchSummary(card.size, card, question)
+    const entryCard = summary.mode === 'miniapp_entry_card'
+    log(`stage: 正在单次点击头条小荷${entryCard ? '小程序' : '查看全文'}入口`)
+    const full = await openToutiaoFullAnswer(summary.viewMore, card.size)
     Object.assign(meta, {
       toutiao_search_attempts: card.attempt,
       toutiao_search_repeated_exact_question: Boolean(card.repeated),
-      toutiao_full_answer_open_attempts: opened.attempt,
-      toutiao_full_answer_route_repeated: opened.repeated,
+      toutiao_full_answer_open_attempts: 1,
+      toutiao_full_answer_route_repeated: false,
+      toutiao_result_mode: entryCard ? 'miniapp_entry_card' : 'smart_summary',
+      toutiao_miniapp_entry_detected: entryCard,
+      toutiao_miniapp_question_submitted: false,
+      toutiao_search_refreshed: false,
+      toutiao_search_scan_scrolls: 0,
     })
     await fs.mkdir(artifacts.deliveryDirectory, { recursive: true })
-    const summaryPath = path.join(artifacts.deliveryDirectory, TOUTIAO_SEARCH_SUMMARY_FILENAME)
-    await fs.writeFile(summaryPath, summary.frame)
+    const summaryPath = path.join(artifacts.deliveryDirectory, entryCard ? DOUYIN_MINIAPP_ENTRY_FILENAME : TOUTIAO_SEARCH_SUMMARY_FILENAME)
     Object.assign(meta, {
-      toutiao_search_summary_captured: true,
-      toutiao_search_summary_screenshot: summaryPath,
+      toutiao_search_summary_captured: !entryCard,
+      toutiao_search_summary_screenshot: entryCard ? null : summaryPath,
+      toutiao_miniapp_entry_screenshot: entryCard ? summaryPath : null,
       toutiao_question_logical_image_count: 2,
       toutiao_answer_card_detection_method: summary.detectionMethod,
       ocr_backend: summary.recognition?.engine || null,
@@ -321,8 +303,6 @@ function createQuestionWorkflows({
       toutiao_ocr_view_more_physical_bounds: summary.ocrTarget?.physicalBounds || null,
       toutiao_view_more_logical_bounds: summary.viewMore,
     })
-    log(`capture: 头条搜索结果智能总结已保存 ${summaryPath}`)
-    const full = opened.full
     log('stage: 头条小荷AI医生全文页已打开，开始从上到下完整截图')
     const result = await saveArtifacts({
       artifacts,
@@ -331,10 +311,12 @@ function createQuestionWorkflows({
       status: 'stable',
       xml: full.xml,
       meta,
-      captureMethod: () => captureToutiaoFullAnswerFrames(full.xml, full.bounds),
+      captureMethod: () => captureToutiaoFullAnswerFrames(full.xml, full.bounds, entryCard ? question : null),
       observerBaseline,
       recoveryBaseline,
     })
+    await fs.writeFile(summaryPath, summary.frame)
+    log(`capture: 头条首屏入口和回答已通过采集校验，搜索结果已保存 ${summaryPath}`)
     return { summaryScreenshot: summaryPath, ...result }
   }
   

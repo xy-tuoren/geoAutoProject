@@ -372,6 +372,7 @@ function createQuestionInputWorkflow({
   }
   
   async function waitForToutiaoSearchInput(timeout = 12_000) {
+    let closeClicked = false
     async function readHierarchyHandlingStartupPopup() {
       try {
         return await source()
@@ -389,10 +390,13 @@ function createQuestionInputWorkflow({
 
     async function inspectHierarchy(xml) {
       if (!xml) return { progressed: true }
-      const close = boundsForNodeAttribute(xml, 'content-desc', '关闭')
+      const close = miniAppShellCloseBounds(xml, await windowSize())
       if (close) {
-        log('stage: 正在关闭上一题的头条小荷AI全文页')
-        await tap((close[0] + close[2]) / 2, (close[1] + close[3]) / 2)
+        if (!closeClicked) {
+          closeClicked = true
+          log('stage: 正在关闭上一题的头条小荷AI全文页')
+          await tap((close[0] + close[2]) / 2, (close[1] + close[3]) / 2)
+        }
         await waitForVisualQuiet({ timeout: 1_500, fallbackMs: 800 })
         return { progressed: true }
       }

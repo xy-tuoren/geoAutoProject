@@ -1210,10 +1210,11 @@ function createReplyCapture({
     })
   }
   
-  function captureToutiaoFullAnswerFrames(initialXml, initialBounds) {
+  function captureToutiaoFullAnswerFrames(initialXml, initialBounds, question = null) {
     return captureMiniAppFullAnswerFrames(initialXml, initialBounds, {
       platformLabel: '头条',
       metadataPrefix: 'toutiao',
+      questionStart: question,
       openedMetadataKey: 'toutiao_view_more_opened',
       confirmCompletionBeforeCapture: true,
       useDirectCandidateSnapshots: true,

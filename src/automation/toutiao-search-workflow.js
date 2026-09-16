@@ -6,6 +6,7 @@ const {
   toutiaoViewMoreBounds,
   hierarchyLogicalSize,
   toutiaoOcrViewMoreTarget,
+  toutiaoOcrMiniAppEntryTarget,
   douyinMiniAppCaptureBounds,
   toutiaoGenericConsultationPage,
 } = require('./miniapp-locators')
@@ -65,15 +66,14 @@ function createToutiaoSearchWorkflow({
         continue
       }
       const viewMore = toutiaoViewMoreBounds(xml)
-      if (viewMore) return { xml, viewMore, size, detectionMethod: 'ui_hierarchy' }
+      if (viewMore) return { xml, viewMore, size, mode: 'smart_summary', detectionMethod: 'ui_hierarchy' }
       if (Date.now() >= nextOcrAt) {
         const frame = await screenshot()
         const logicalSize = hierarchyLogicalSize(xml, size)
         const recognition = await ocr.recognize(frame, {
-          region: [0, Math.floor(size.height * 0.1), size.width, Math.floor(size.height * 0.86)],
           minConfidence: 0.5,
         })
-        const ocrTarget = toutiaoOcrViewMoreTarget(recognition, logicalSize)
+        const ocrTarget = toutiaoOcrViewMoreTarget(recognition, logicalSize) || toutiaoOcrMiniAppEntryTarget(recognition, logicalSize)
         setLastOcrDiagnostic({
           created_at: new Date().toISOString(),
           purpose: 'toutiao_answer_card',
@@ -91,7 +91,7 @@ function createToutiaoSearchWorkflow({
         log(ocrTarget
           ? `ocr: purpose=toutiao_answer_card outcome=matched engine=${recognition.engine} elapsed=${Math.round(recognition.elapsedMs)}ms lines=${recognition.results.length} summary_confidence=${ocrTarget.summaryConfidence.toFixed(3)} view_more_confidence=${ocrTarget.viewMoreConfidence.toFixed(3)} physical_bounds=${ocrTarget.physicalBounds.join(',')} logical_bounds=${ocrTarget.bounds.join(',')}`
           : `ocr: purpose=toutiao_answer_card outcome=not_found engine=${recognition.engine} elapsed=${Math.round(recognition.elapsedMs)}ms lines=${recognition.results.length}`)
-        if (ocrTarget) return { xml, viewMore: ocrTarget.bounds, size, detectionMethod: 'rapidocr', ocrTarget, recognition }
+        if (ocrTarget) return { xml, viewMore: ocrTarget.bounds, size, mode: ocrTarget.mode || 'smart_summary', detectionMethod: 'rapidocr', ocrTarget, recognition }
         nextOcrAt = Date.now() + 2_000
       }
       if (Date.now() - lastProgress >= 5_000) {
@@ -103,24 +103,29 @@ function createToutiaoSearchWorkflow({
     throw new ToutiaoAnswerCardNotFoundError('头条搜索结果中未出现小荷AI医生全文入口卡片。')
   }
   
-  async function captureToutiaoSearchSummary(size) {
+  async function captureToutiaoSearchSummary(size, expectedCard = null, question = null) {
     await waitForVisualQuiet({ timeout: 1_200, fallbackMs: 300 })
     const capture = await captureStableSandwich({
       capture: screenshot,
       hierarchy: source,
-      framesStable: imageRegionsStable,
+      framesStable: async (before, after) => {
+        if (!expectedCard?.ocrTarget) return imageRegionsStable(before, after)
+        const { summaryPhysicalBounds: title, physicalBounds: button } = expectedCard.ocrTarget
+        const region = [Math.min(title[0], button[0]), Math.min(title[1], button[1]), Math.max(title[2], button[2]), Math.max(title[3], button[3])]
+        return imageRegionsStable(await cropImage(before, region), await cropImage(after, region))
+      },
       hierarchyLoading: () => false,
       interval: 120,
     }, 8_000)
     if (!capture.stable) throw new Error('头条搜索结果智能总结持续变化，无法取得稳定截图。')
+    if (question && toutiaoSearchInput(capture.xml)?.text !== question) throw new Error('头条入口点击前搜索词已变化，已停止点击。')
     const hierarchyViewMore = toutiaoViewMoreBounds(capture.xml)
-    if (hierarchyViewMore) return { ...capture, viewMore: hierarchyViewMore, size, detectionMethod: 'ui_hierarchy' }
+    if (hierarchyViewMore) return { ...capture, viewMore: hierarchyViewMore, size, mode: 'smart_summary', detectionMethod: 'ui_hierarchy' }
     const logicalSize = hierarchyLogicalSize(capture.xml, size)
     const recognition = await ocr.recognize(capture.frame, {
-      region: [0, Math.floor(size.height * 0.1), size.width, Math.floor(size.height * 0.86)],
       minConfidence: 0.5,
     })
-    const ocrTarget = toutiaoOcrViewMoreTarget(recognition, logicalSize)
+    const ocrTarget = toutiaoOcrViewMoreTarget(recognition, logicalSize) || toutiaoOcrMiniAppEntryTarget(recognition, logicalSize)
     setLastOcrDiagnostic({
       created_at: new Date().toISOString(),
       purpose: 'toutiao_summary_recapture',
@@ -139,7 +144,7 @@ function createToutiaoSearchWorkflow({
       ? `ocr: purpose=toutiao_summary_recapture outcome=matched engine=${recognition.engine} elapsed=${Math.round(recognition.elapsedMs)}ms lines=${recognition.results.length} summary_confidence=${ocrTarget.summaryConfidence.toFixed(3)} view_more_confidence=${ocrTarget.viewMoreConfidence.toFixed(3)} physical_bounds=${ocrTarget.physicalBounds.join(',')} logical_bounds=${ocrTarget.bounds.join(',')}`
       : `ocr: purpose=toutiao_summary_recapture outcome=not_found engine=${recognition.engine} elapsed=${Math.round(recognition.elapsedMs)}ms lines=${recognition.results.length}`)
     if (!ocrTarget) throw new Error('截取头条智能总结后，UI层级和OCR均未能再次确认小荷AI医生全文入口，已停止点击。')
-    return { ...capture, viewMore: ocrTarget.bounds, size, detectionMethod: 'rapidocr', ocrTarget, recognition }
+    return { ...capture, viewMore: ocrTarget.bounds, size, mode: ocrTarget.mode || 'smart_summary', detectionMethod: 'rapidocr', ocrTarget, recognition }
   }
   
   async function openToutiaoFullAnswer(viewMore, size, timeout = 12_000) {

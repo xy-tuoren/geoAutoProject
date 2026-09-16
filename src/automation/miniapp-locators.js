@@ -54,9 +54,16 @@ function douyinSearchInput(xml) {
 }
 
 function toutiaoSearchInput(xml) {
-  const attrs = iterNodes(xml).find(item => nodeIsVisible(item)
-    && nodeAttr(item, 'package') === ENTRY_DEFINITIONS['toutiao-xiaohe-miniapp'].packageName
-    && nodeAttr(item, 'resource-id').endsWith(':id/cx'))
+  const attrs = iterNodes(xml).find(item => {
+    if (!nodeIsVisible(item) || nodeAttr(item, 'package') !== ENTRY_DEFINITIONS['toutiao-xiaohe-miniapp'].packageName) return false
+    if (nodeAttr(item, 'resource-id').endsWith(':id/cx')) return true
+    if (!/^搜索框[，,]/.test(nodeAttr(item, 'text')) || nodeAttr(item, 'clickable') !== 'true') return false
+    const raw = nodeAttr(item, 'bounds')
+    if (!raw) return false
+    const box = parseBounds(raw)
+    const size = hierarchyLogicalSize(xml, null)
+    return box[1] >= 0 && box[3] <= size.height * 0.16 && box[2] - box[0] >= size.width * 0.35
+  })
   if (!attrs) return null
   const rawBounds = nodeAttr(attrs, 'bounds')
   if (!rawBounds) return null
@@ -78,7 +85,18 @@ function toutiaoHomeSearchBounds(xml) {
     return resourceId.endsWith(':id/kic') && /^搜索框[，,]/.test(description)
   })
   const rawBounds = attrs && nodeAttr(attrs, 'bounds')
-  return rawBounds ? parseBounds(rawBounds) : null
+  if (rawBounds) return parseBounds(rawBounds)
+  for (const node of treeNodes(parseNodeTree(xml))) {
+    if (!nodeIsVisible(node.attrs) || nodeAttr(node.attrs, 'package') !== ENTRY_DEFINITIONS['toutiao-xiaohe-miniapp'].packageName
+      || nodeAttr(node.attrs, 'clickable') !== 'true') continue
+    const children = node.children || []
+    if (!children.some(child => nodeIsVisible(child.attrs)
+      && nodeAttr(child.attrs, 'resource-id').endsWith(':id/search_bar_search_icon'))) continue
+    const size = hierarchyLogicalSize(xml, null)
+    const box = parseBounds(nodeAttr(node.attrs, 'bounds'))
+    if (box[1] >= 0 && box[3] <= size.height * 0.16 && box[2] - box[0] >= size.width * 0.4) return box
+  }
+  return null
 }
 
 function toutiaoAddToHomeScreenCancelBounds(xml) {
@@ -155,6 +173,30 @@ function toutiaoOcrViewMoreTarget(recognition, logicalSize) {
     summaryConfidence: selected.summary.confidence,
     viewMoreConfidence: selected.viewMore.confidence,
   }
+}
+
+function toutiaoOcrMiniAppEntryTarget(recognition, logicalSize) {
+  const size = recognition.image
+  if (!size?.width || !size?.height || size.width >= size.height) return null
+  const brands = findOcrText(recognition, /^小荷AI医生(?:小程序)?$/, { minConfidence: 0.85 })
+  const badges = findOcrText(recognition, /^小程序$/, { minConfidence: 0.85 })
+  for (const brand of brands) {
+    const b = brand.bounds
+    if (b[1] < size.height * 0.12 || b[3] > size.height * 0.94) continue
+    const badge = badges.find(item => {
+      const t = item.bounds
+      const sameRow = Math.abs((t[1] + t[3] - b[1] - b[3]) / 2) <= Math.max(t[3] - t[1], b[3] - b[1])
+      const below = t[1] >= b[3] && t[1] - b[3] <= size.height * 0.06 && Math.abs(t[0] - b[0]) <= size.width * 0.08
+      return (sameRow && t[0] >= b[2] && t[0] - b[2] <= size.width * 0.12) || below
+    })
+    if (!badge && !/小程序$/.test(brand.normalizedText || brand.text)) continue
+    return {
+      mode: 'miniapp_entry_card', bounds: mapPhysicalBoundsToLogical(b, size, logicalSize),
+      physicalBounds: b, summaryPhysicalBounds: b,
+      summaryConfidence: brand.confidence, viewMoreConfidence: (badge || brand).confidence,
+    }
+  }
+  return null
 }
 
 function douyinOcrViewFullTarget(recognition, logicalSize) {
@@ -445,6 +487,7 @@ module.exports = {
   toutiaoViewMoreBounds,
   hierarchyLogicalSize,
   toutiaoOcrViewMoreTarget,
+  toutiaoOcrMiniAppEntryTarget,
   douyinOcrViewFullTarget,
   douyinOcrConsultEntryTarget,
   douyinOcrBrandEntryTarget,
