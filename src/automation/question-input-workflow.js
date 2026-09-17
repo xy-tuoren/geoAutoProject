@@ -15,6 +15,7 @@ const {
   toutiaoSearchInput,
   toutiaoHomeSearchBounds,
   toutiaoAddToHomeScreenCancelBounds,
+  toutiaoLegacyFullAnswerPage,
 } = require('./miniapp-locators')
 
 const SESSION_FIXED_LABELS = new Set([
@@ -390,7 +391,8 @@ function createQuestionInputWorkflow({
 
     async function inspectHierarchy(xml) {
       if (!xml) return { progressed: true }
-      const close = miniAppShellCloseBounds(xml, await windowSize())
+      const size = await windowSize()
+      const close = miniAppShellCloseBounds(xml, size) || toutiaoLegacyFullAnswerPage(xml, size)?.back
       if (close) {
         if (!closeClicked) {
           closeClicked = true

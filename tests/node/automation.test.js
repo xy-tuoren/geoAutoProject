@@ -1795,16 +1795,19 @@ test('小荷新会话复用到底确认帧并用事件驱动稳定截图回顶',
       raw[offset + 2] = (value + 73) % 240
     }
   }
-  const content = sharp(raw, { raw: { width, height: viewportHeight + shift, channels: 3 } })
+  const bubble = await sharp({ create: { width: 100, height: 70, channels: 3, background: '#00c090' } }).png().toBuffer()
+  const content = sharp(await sharp(raw, { raw: { width, height: viewportHeight + shift, channels: 3 } })
+    .composite([{ input: bubble, left: 130, top: 40 }]).png().toBuffer())
   const top = await content.clone().extract({ left: 0, top: 0, width, height: viewportHeight }).png().toBuffer()
   const bottom = await content.clone().extract({ left: 0, top: shift, width, height: viewportHeight }).png().toBuffer()
-  const full = await sharp({ create: { width, height: 500, channels: 3, background: '#f4f4f4' } }).png().toBuffer()
-  const bottomXml = '<hierarchy><node class="android.view.View" scrollable="true" visible-to-user="true" bounds="[0,80][240,440]">'
+  const full = await sharp({ create: { width, height: 500, channels: 3, background: '#f4f4f4' } })
+    .composite([{ input: top, left: 0, top: 80 }]).png().toBuffer()
+  const bottomXml = '<hierarchy><node bounds="[0,0][240,500]"/><node class="android.view.View" scrollable="true" visible-to-user="true" bounds="[0,80][240,440]">'
     + '<node class="android.view.View" clickable="true" bounds="[7,80][233,130]">'
     + '<node class="android.widget.TextView" text="对我的回答满意吗？" bounds="[12,84][228,105]" />'
     + '<node class="android.widget.TextView" text="期待你的反馈" bounds="[12,106][228,126]" />'
     + '</node></node></hierarchy>'
-  const topXml = '<hierarchy><node class="android.view.View" scrollable="true" visible-to-user="true" bounds="[0,80][240,440]">'
+  const topXml = '<hierarchy><node bounds="[0,0][240,500]"/><node class="android.view.View" scrollable="true" visible-to-user="true" bounds="[0,80][240,440]">'
     + '<node class="android.view.View" bounds="[12,120][228,200]"><node class="android.view.View" bounds="[120,122][220,198]">'
     + '<node class="android.widget.TextView" text="测试问题" content-desc="测试问题" visible-to-user="true" bounds="[122,140][218,180]" />'
     + '</node></node></node></hierarchy>'
@@ -1824,7 +1827,7 @@ test('小荷新会话复用到底确认帧并用事件驱动稳定截图回顶',
     waitForFinalVisualQuiet: async () => {},
     waitForStableReplyRegion: async (_bounds, _timeout, options = {}) => {
       observedStableCaptures += 1
-      if (position === 'top' && upwardOptions.length > 0) assert.ok(options.settleSince || observedStableCaptures > 3)
+      if (position === 'top' && observedStableCaptures === 1) assert.ok(options.settleSince)
       return { frame: position === 'top' ? top : bottom, xml: currentXml(), stable: true, attempts: 1, observer: true }
     },
     waitForStableReplyRegionDirect: async () => {
@@ -1854,7 +1857,9 @@ test('小荷新会话复用到底确认帧并用事件驱动稳定截图回顶',
     tap: async () => {},
     captureReferenceProductsAtTrigger: async () => { throw new Error('不应采集药品') },
     ocr: {
-      recognize: async () => ({ image: { width, height: 500 }, results: [], engine: 'test', elapsedMs: 0 }),
+      recognize: async () => ({ image: { width, height: 500 }, results: [
+        { text: '测试问题', confidence: 0.99, bounds: [140, 135, 225, 160] },
+      ], engine: 'test', elapsedMs: 0 }),
     },
     setLastOcrDiagnostic: () => {},
     xiaoheCompletionConfirmationOptions: {
@@ -1870,11 +1875,12 @@ test('小荷新会话复用到底确认帧并用事件驱动稳定截图回顶',
   assert.equal(result.frames.length, 2)
   assert.equal(result.transitions.length, 1)
   assert.equal(result.captureMetadata.reply_completion_confirmed_before_capture, true)
-  assert.equal(result.captureMetadata.reply_top_navigation_method, 'new_session_scroll_boundary_and_exact_question_bubble')
-  assert.equal(result.captureMetadata.reply_question_structure_validation_required, true)
+  assert.equal(result.captureMetadata.reply_top_navigation_method, 'new_session_scroll_boundary_and_visual_question_bubble')
+  assert.equal(result.captureMetadata.reply_current_question_visual_text_verified, true)
+  assert.ok(result.captureMetadata.reply_current_question_first_frame_physical_bounds[1] <= 120)
   assert.equal(strictStableCaptures, 0)
-  assert.ok(observedStableCaptures >= 4)
-  assert.ok(upwardOptions.length >= 3)
+  assert.ok(observedStableCaptures >= 2)
+  assert.ok(upwardOptions.length >= 1)
   assert.ok(upwardOptions.every(options => options.eventDrivenSettle === true))
   assert.ok(upwardFractions.every(fraction => fraction === 0.55))
   referencePreview = true

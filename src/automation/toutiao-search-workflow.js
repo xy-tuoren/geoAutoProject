@@ -9,6 +9,7 @@ const {
   toutiaoOcrMiniAppEntryTarget,
   douyinMiniAppCaptureBounds,
   toutiaoGenericConsultationPage,
+  toutiaoLegacyFullAnswerPage,
 } = require('./miniapp-locators')
 const {
   ToutiaoAnswerCardNotFoundError,
@@ -166,7 +167,11 @@ function createToutiaoSearchWorkflow({
           hierarchyLogicalSize(xml, size),
         )
       }
-      if (bounds && !toutiaoGenericConsultationPage(xml, { answerContentReady })) return { xml, bounds }
+      if (bounds && !toutiaoGenericConsultationPage(xml, { answerContentReady })) {
+        const pageKind = toutiaoLegacyFullAnswerPage(xml, size) ? 'legacy_webview' : 'miniapp'
+        log(`stage: 已确认头条小荷全文页面（${pageKind}）`)
+        return { xml, bounds, pageKind }
+      }
       if (hasMessageInput && !answerContentReady) {
         genericConsultationReads += 1
         if (genericConsultationReads >= 3) {

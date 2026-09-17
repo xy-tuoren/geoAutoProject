@@ -281,6 +281,7 @@ function createQuestionWorkflows({
       toutiao_search_repeated_exact_question: Boolean(card.repeated),
       toutiao_full_answer_open_attempts: 1,
       toutiao_full_answer_route_repeated: false,
+      toutiao_full_answer_page_kind: full.pageKind || 'miniapp',
       toutiao_result_mode: entryCard ? 'miniapp_entry_card' : 'smart_summary',
       toutiao_miniapp_entry_detected: entryCard,
       toutiao_miniapp_question_submitted: false,

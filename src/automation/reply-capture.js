@@ -93,7 +93,7 @@ function miniAppQuestionOcrTarget(recognition, question, logicalSize) {
   if (!physicalSize?.width || !physicalSize?.height || !logicalSize?.width || !logicalSize?.height) return null
   const expected = normalizeOcrText(question).replace(/[^\p{L}\p{N}]/gu, '')
   if (expected.length < 2) return null
-  const lines = (recognition.results || []).filter(item => Number(item.confidence) >= 0.85 && Array.isArray(item.bounds))
+  const lines = (recognition.results || []).filter(item => Number(item.confidence) >= 0.7 && Array.isArray(item.bounds))
     .map(item => ({ ...item, text: normalizeOcrText(item.normalizedText || item.text).replace(/[^\p{L}\p{N}]/gu, '') }))
     .sort((a, b) => a.bounds[1] - b.bounds[1] || a.bounds[0] - b.bounds[0])
   const candidates = lines.flatMap((item, index) => {
@@ -118,9 +118,10 @@ function miniAppQuestionOcrTarget(recognition, question, logicalSize) {
     const bounds = mapPhysicalBoundsToLogical(physicalBounds, physicalSize, logicalSize)
     const centerX = (bounds[0] + bounds[2]) / 2
     const centerY = (bounds[1] + bounds[3]) / 2
-    if (centerX < logicalSize.width * 0.5
+    const rightAligned = centerX >= logicalSize.width * 0.5 && bounds[2] >= logicalSize.width * 0.88
+    const wide = bounds[2] - bounds[0] >= logicalSize.width * 0.65
+    if ((!rightAligned && !wide)
       || bounds[0] < logicalSize.width * 0.05
-      || bounds[2] < logicalSize.width * 0.88
       || centerY < logicalSize.height * 0.03
       || centerY > logicalSize.height * 0.72) return []
     return [{ bounds, physicalBounds, confidence, text }]
@@ -136,6 +137,16 @@ function miniAppQuestionFirstFrameCropBounds(target, physicalSize) {
   if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= width
     || !Number.isFinite(top) || top < 0 || top >= height) return null
   return [0, Math.max(0, Math.floor(top - height * 0.03)), width, height]
+}
+
+async function verifiedQuestionBubble(frame, bounds, logicalSize, question, ocr) {
+  const bubble = await detectXiaoheUserQuestionBubble(frame, bounds, logicalSize)
+  if (!bubble?.fullyVisible) return null
+  const recognition = await ocr.recognize(frame, { minConfidence: 0.5 })
+  const target = miniAppQuestionOcrTarget(recognition, question, logicalSize)
+  if (!target || target.physicalBounds[1] < bubble.physicalBounds[1]
+    || target.physicalBounds[3] > bubble.physicalBounds[3]) return null
+  return bubble
 }
 
 function miniAppQuestionFirstFrameReacquisitionAllowed(completedSwipes) {
@@ -325,7 +336,11 @@ function createReplyCapture({
         }),
         framesStable: replyBoundaryFramesStable,
         verifyVisibleTop: async capture => {
-          visualQuestionBubble = await detectXiaoheUserQuestionBubble(capture.frame, navigationBounds, size)
+          // Region snapshots are cropped; only the raw screen has the coordinate
+          // space required by the bubble detector and exact visible-text check.
+          const frame = await screenshot()
+          visualQuestionBubble = await verifiedQuestionBubble(frame, navigationBounds,
+            hierarchyLogicalSize(capture.xml, size), question, ocr)
           if (!visualQuestionBubble?.fullyVisible) {
             visualQuestionBubble = null
             return false
@@ -379,14 +394,6 @@ function createReplyCapture({
       waitForStable: waitForStableReplyRegion,
       log,
     }, navigationBounds)
-    if (visualQuestionBubble && !questionBubbleFullyVisible) {
-      const finalVisualQuestionBubble = await detectXiaoheUserQuestionBubble(evidence.capture.frame, navigationBounds, size)
-      if (finalVisualQuestionBubble?.fullyVisible) {
-        visualQuestionBubble = finalVisualQuestionBubble
-        questionBubbleFullyVisible = true
-        log(`capture: 引用资料处理后ADB原图已确认用户问题气泡完整露出（physical_bounds=${visualQuestionBubble.physicalBounds.join(',')}）`)
-      }
-    }
     if (topNavigationMethod === 'new_session_scroll_boundary_and_exact_question_bubble'
       && !questionMatcher(evidence.capture.xml || await source(), question, navigationBounds)) {
       requireQuestionLocated(await scrollQuestionIntoView(question, navigationBounds, 25, questionMatcher), question)
@@ -436,6 +443,22 @@ function createReplyCapture({
         ]),
       }
     } else initialCapture = await waitForStableReplyRegion(bounds)
+    let questionFirstFrame = null
+    let questionFirstFramePhysicalBounds = null
+    if (singleQuestionSession) {
+      const fullFrame = await screenshot()
+      const info = await imageInfo(fullFrame)
+      const viewport = bounds.map((value, index) => Math.round(value * (index % 2 ? info.height / logicalSize.height : info.width / logicalSize.width)))
+      const bubble = await verifiedQuestionBubble(fullFrame, bounds, logicalSize, question, ocr)
+      if (!bubble) throw new Error('小荷正式首帧未确认完整原题文字位于可见绿色气泡内，可能被浮层遮挡，已停止交付。')
+      if (!await imageRegionsStable(initialCapture.frame, await cropImage(fullFrame, viewport))) {
+        throw new Error('小荷问题气泡核验期间正文画面发生变化，已停止首帧交付。')
+      }
+      const top = Math.max(0, bubble.physicalBounds[1] - Math.ceil(info.height * 0.002))
+      questionFirstFramePhysicalBounds = [viewport[0], top, viewport[2], viewport[3]]
+      questionFirstFrame = await cropImage(fullFrame, questionFirstFramePhysicalBounds)
+      questionBubbleFullyVisible = true
+    }
     const sequence = new CaptureSequence()
     const seamRecords = []
     const seamDiagnostics = []
@@ -483,7 +506,7 @@ function createReplyCapture({
       }
     }
     let capture = initialCapture
-    sequence.addInitial(capture.frame)
+    sequence.addInitial(questionFirstFrame || capture.frame)
     scrollDecisions.push({ attempt: 1, outcome: 'initial_frame_appended', frame_count: sequence.length })
     log('capture: page 1')
     const captureDeadline = Date.now() + 5 * 60_000
@@ -520,7 +543,9 @@ function createReplyCapture({
       } else {
         const noProgressBeforeScroll = noProgress
         let afterXml = afterCapture.xml || await source()
-        const frameHeight = (await imageInfo(before)).height
+        // The first delivery frame starts at the question; displacement still
+        // belongs to the full scrolling viewport, not that shorter crop.
+        const frameHeight = (await imageInfo(screenBefore)).height
         let measuredShift = estimateVerticalScrollShift(xml, afterXml, bounds)
         let reliableMeasuredShift = measuredShift !== null && measuredShift <= shift * 1.35 ? measuredShift : null
         const expectedShift = reliableMeasuredShift ?? shift
@@ -711,6 +736,8 @@ function createReplyCapture({
       captureMetadata: {
         reply_evidence_hierarchy_refreshed: Boolean(evidence.hierarchyRefreshed),
         reply_top_confirmed: true,
+        reply_current_question_visual_text_verified: Boolean(questionFirstFrame),
+        reply_current_question_first_frame_physical_bounds: questionFirstFramePhysicalBounds,
         reply_top_navigation_method: topNavigationMethod,
         reply_question_structure_validation_required: topNavigationMethod === 'new_session_scroll_boundary_and_exact_question_bubble',
         reply_submitted_question_boundary_verified: false,
@@ -1241,6 +1268,7 @@ module.exports = {
   replyBoundaryFramesStable,
   miniAppTopFramesStable,
   miniAppQuestionOcrTarget,
+  verifiedQuestionBubble,
   miniAppQuestionFirstFrameCropBounds,
   miniAppQuestionFirstFrameReacquisitionAllowed,
   confirmMiniAppTop,

@@ -1,11 +1,35 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
-const { toutiaoHomeSearchBounds, toutiaoSearchInput, toutiaoOcrMiniAppEntryTarget } = require('../../src/automation/miniapp-locators')
+const { toutiaoHomeSearchBounds, toutiaoSearchInput, toutiaoOcrMiniAppEntryTarget, toutiaoLegacyFullAnswerPage, douyinMiniAppCaptureBounds, toutiaoGenericConsultationPage } = require('../../src/automation/miniapp-locators')
 const { createQuestionWorkflows } = require('../../src/automation/question-workflows')
 const { ToutiaoAnswerCardNotFoundError } = require('../../src/automation/search-recovery')
 const fs = require('node:fs/promises')
 const os = require('node:os')
 const path = require('node:path')
+
+test('头条旧版小荷WebView按标题、返回、正文容器和固定输入栏共同识别，适配两种尺寸', () => {
+  for (const scale of [1, 2 / 3]) {
+    const b = values => `[${values.slice(0, 2).map(v => Math.round(v * scale))}][${values.slice(2).map(v => Math.round(v * scale))}]`
+    const node = (attrs, bounds) => `<node package="com.ss.android.article.news" ${attrs} bounds="${b(bounds)}"/>`
+    const xml = `<hierarchy>${node('', [0, 0, 1080, 2400])}
+      ${node('text="小荷AI医生" resource-id="com.ss.android.article.news:id/title"', [234, 122, 846, 186])}
+      ${node('content-desc="返回，按钮" clickable="true"', [0, 94, 129, 215])}
+      ${node('class="android.webkit.WebView" text="小荷AI医生"', [0, 216, 1080, 2356])}
+      ${node('text="AI生成非医疗诊断，仅供参考，不适就医"', [0, 216, 1080, 315])}
+      ${node('scrollable="true"', [0, 216, 1080, 2356])}
+      ${node('class="android.widget.EditText" hint="输入问题AI免费专业解答"', [44, 2165, 1036, 2328])}</hierarchy>`
+    const size = { width: 1080 * scale, height: 2400 * scale }
+    const page = toutiaoLegacyFullAnswerPage(xml, size)
+    assert.deepEqual(page.back, [0, 94, 129, 215].map(v => Math.round(v * scale)))
+    assert.deepEqual(page.bounds, [0, Math.round(315 * scale), size.width, Math.round(2165 * scale) - Math.ceil(size.height * 0.018)])
+    assert.deepEqual(douyinMiniAppCaptureBounds(xml, size), page.bounds)
+    assert.equal(toutiaoGenericConsultationPage(xml), true)
+    assert.equal(toutiaoGenericConsultationPage(xml, { answerContentReady: true }), false)
+    assert.equal(toutiaoLegacyFullAnswerPage(xml.replaceAll('小荷AI医生', '普通网页'), size), null)
+    assert.equal(toutiaoLegacyFullAnswerPage(xml.replaceAll('com.ss.android.article.news', 'other.app'), size), null)
+    assert.equal(toutiaoLegacyFullAnswerPage(xml.replace('返回，按钮', '更多'), size), null)
+  }
+})
 
 test('头条新版首页通过搜索图标与可点击容器定位，兼容竖屏缩放', () => {
   for (const scale of [1, 2 / 3]) {

@@ -429,10 +429,39 @@ function douyinSearchResultsBounds(xml, screenSize) {
   return candidates[0] || null
 }
 
+function toutiaoLegacyFullAnswerPage(xml, screenSize) {
+  const nodes = iterNodes(xml).filter(attrs => nodeIsVisible(attrs)
+    && nodeAttr(attrs, 'package') === ENTRY_DEFINITIONS['toutiao-xiaohe-miniapp'].packageName
+    && nodeAttr(attrs, 'bounds'))
+  if (!nodes.some(attrs => nodeAttr(attrs, 'class') === 'android.webkit.WebView'
+    && nodeAttr(attrs, 'text') === '小荷AI医生')) return null
+  const size = hierarchyLogicalSize(xml, screenSize)
+  if (!size?.width || size.height <= size.width || toutiaoSearchInput(xml)) return null
+  const box = attrs => parseBounds(nodeAttr(attrs, 'bounds'))
+  const title = nodes.find(attrs => nodeAttr(attrs, 'resource-id').endsWith(':id/title')
+    && nodeAttr(attrs, 'text') === '小荷AI医生' && box(attrs)[3] < size.height * 0.12)
+  const web = nodes.find(attrs => nodeAttr(attrs, 'class') === 'android.webkit.WebView'
+    && nodeAttr(attrs, 'text') === '小荷AI医生')
+  const back = nodes.find(attrs => /^返回(?:[，,]按钮)?$/.test(nodeAttr(attrs, 'content-desc'))
+    && nodeAttr(attrs, 'clickable') === 'true' && box(attrs)[2] <= size.width * 0.2
+    && box(attrs)[3] <= size.height * 0.12)
+  const notice = nodes.find(attrs => /^AI生成非医疗诊断/.test(nodeAttr(attrs, 'text'))
+    && box(attrs)[3] < size.height * 0.2)
+  const input = nodes.find(attrs => nodeAttr(attrs, 'class') === 'android.widget.EditText'
+    && /输入问题AI免费专业解答/.test(nodeAttr(attrs, 'hint')) && box(attrs)[1] > size.height * 0.7)
+  const scroll = nodes.find(attrs => nodeAttr(attrs, 'scrollable') === 'true'
+    && box(attrs)[2] - box(attrs)[0] >= size.width * 0.9 && box(attrs)[3] - box(attrs)[1] >= size.height * 0.5)
+  if (!title || !web || !back || !notice || !input || !scroll) return null
+  const bounds = [box(scroll)[0], Math.max(box(web)[1], box(notice)[3]), box(scroll)[2],
+    Math.min(box(scroll)[3], box(input)[1] - Math.ceil(size.height * 0.018))]
+  if (bounds[3] - bounds[1] < size.height * 0.4) return null
+  return { bounds, back: box(back) }
+}
+
 function douyinMiniAppCaptureBounds(xml, screenSize) {
   if (douyinSearchInput(xml)) return null
   const close = miniAppShellCloseBounds(xml, screenSize)
-  if (!close) return null
+  if (!close) return toutiaoLegacyFullAnswerPage(xml, screenSize)?.bounds || null
   const width = screenSize.width
   const height = screenSize.height
   const fixedBottomTops = []
@@ -472,7 +501,7 @@ function toutiaoGenericConsultationPage(xml, { answerContentReady = false } = {}
   const hasMessageInput = iterNodes(xml).some(attrs => nodeIsVisible(attrs)
     && nodeAttr(attrs, 'package') === ENTRY_DEFINITIONS['toutiao-xiaohe-miniapp'].packageName
     && nodeAttr(attrs, 'class') === 'android.widget.EditText'
-    && /发送消息/.test(`${nodeAttr(attrs, 'text')} ${nodeAttr(attrs, 'hint')}`))
+    && /发送消息|输入问题AI免费专业解答/.test(`${nodeAttr(attrs, 'text')} ${nodeAttr(attrs, 'hint')}`))
   return hasMessageInput && !answerContentReady
 }
 
@@ -498,4 +527,5 @@ module.exports = {
   douyinSearchResultsBounds,
   douyinMiniAppCaptureBounds,
   toutiaoGenericConsultationPage,
+  toutiaoLegacyFullAnswerPage,
 }
