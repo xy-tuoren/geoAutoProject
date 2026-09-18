@@ -3,7 +3,7 @@ const assert = require('node:assert/strict')
 const fs = require('node:fs/promises')
 const os = require('node:os')
 const path = require('node:path')
-const { U2Client, OCR_TIMEOUT_MS, SEND_KEYS_TIMEOUT_MS, developmentCommand, packagedCommand, utf8ProcessEnvironment } = require('../../src/automation/u2-client')
+const { U2Client, OCR_TIMEOUT_MS, SEND_KEYS_TIMEOUT_MS, APP_START_TIMEOUT_MS, developmentCommand, packagedCommand, utf8ProcessEnvironment } = require('../../src/automation/u2-client')
 
 const root = path.resolve(__dirname, '../..')
 const fixture = path.join(root, 'tests', 'fixtures', 'u2-sidecar-fixture.js')
@@ -160,6 +160,41 @@ test('只读层级连续遇到瞬时服务断开时有限重启并恢复', async
       if (previous[name] === undefined) delete process.env[name]
       else process.env[name] = previous[name]
     }
+  }
+})
+
+test('应用启动给足解析Activity、冷启动和前台校验的时间', async () => {
+  const client = new U2Client({ root, adbPath: '/bundled/adb', log: () => {} })
+  const calls = []
+  client.request = async (method, params, options) => {
+    calls.push({ method, params, options })
+    return { package: params.package, activity: '.MainActivity' }
+  }
+
+  await client.appStart('com.aurora.xiaohe.aidoctor')
+
+  assert.deepEqual(calls, [{
+    method: 'app_start',
+    params: { package: 'com.aurora.xiaohe.aidoctor' },
+    options: { timeout: APP_START_TIMEOUT_MS },
+  }])
+  assert.equal(APP_START_TIMEOUT_MS, 45_000)
+})
+
+test('并发重启sidecar只会真正拉起一次进程', async () => {
+  const client = fixtureClient()
+  try {
+    await client.start('SERIAL')
+    let starts = 0
+    const originalStart = client.start.bind(client)
+    client.start = async (...args) => {
+      starts += 1
+      return originalStart(...args)
+    }
+    await Promise.all([client.restart(), client.restart(), client.restart()])
+    assert.equal(starts, 1)
+  } finally {
+    await client.stop()
   }
 })
 

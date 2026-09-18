@@ -77,8 +77,4 @@ async function recoverTimedOutReply({
   }
 }
 
-function recoverTimedOutExistingReply(options) {
-  return recoverTimedOutReply(options)
-}
-
-module.exports = { recoverTimedOutExistingReply, recoverTimedOutReply }
+module.exports = { recoverTimedOutReply }

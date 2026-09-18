@@ -134,7 +134,9 @@ function hierarchyLogicalSize(xml, fallback) {
   for (const attrs of iterNodes(xml)) {
     const rawBounds = nodeAttr(attrs, 'bounds')
     if (!rawBounds) continue
-    const bounds = parseBounds(rawBounds)
+    let bounds
+    try { bounds = parseBounds(rawBounds) } catch { continue }
+    if (bounds[2] <= bounds[0] || bounds[3] <= bounds[1]) continue
     width = Math.max(width, bounds[2])
     height = Math.max(height, bounds[3])
   }

@@ -7,21 +7,23 @@ const sharp = require('sharp')
 const XLSX = require('xlsx')
 const { questionVisible, questionVisibleExact, currentQuestionText, replyTailOnScreen, findChatScrollBounds, validateCaptureViewport, floatingScrollControlBounds, replyCaptureBounds, estimateVerticalScrollShift, sharedTextSeam, evidencePanelBounds, evidencePanelBoundsForTitle, visibleLabelBounds, visibleLabelBoundsList, boundsListForNodeAttribute, responseTimeoutRetryTarget, referenceProductsSection, referenceProductImageBounds } = require('../../src/automation/hierarchy')
 const { stackFramesInGroups, verifyFrameOverlap, verifyReplyFrameOverlap, verifyProductGridOverlap, imageInfo, imageLooksLoaded, imagesSimilar, imageRegionsStable, detectXiaoheUserQuestionBubble, alignCropToWhitespace, stitchFramesWithOverlaps, composeLongImages, cropFramesAtTextSeams } = require('../../src/automation/images')
-const { createBatchDirectory, questionArtifactDirectory, batchArtifactDirectories, entryArtifactDirectories, questionArtifactDirectories, groupedQuestionArtifactDirectories } = require('../../src/automation/utils')
+const { createBatchDirectory, batchArtifactDirectories, entryArtifactDirectories, questionArtifactDirectories, groupedQuestionArtifactDirectories } = require('../../src/automation/utils')
 const { EventLog, classifyAutomationLog } = require('../../src/automation/event-log')
 const { loadQuestionFile } = require('../../src/questions')
-const { adbConnectionLost, captureFailureDiagnostics, captureStableObserved, captureStableSandwich, calibratedProductFallbackOverlap, chatSwipePlan, conservativeFallbackOverlap, buildReplyImages, CancelledError, confirmPersistentScrollEnd, confirmQuestionAtTop, DOUYIN_MINIAPP_ENTRY_FILENAME, DOUYIN_SEARCH_SUMMARY_FILENAME, TOUTIAO_SEARCH_SUMMARY_FILENAME, douyinGenericAiAnswerBounds, douyinMiniAppCaptureBounds, douyinMiniAppEntryBounds, douyinOcrViewFullTarget, douyinSearchInput, douyinSearchResultTarget, douyinSearchResultsBounds, douyinViewFullBounds, failedRetryItems, fillQuestionInput, groupedBrandSummaries, historyOnboardingVisible, maxLongImageHeight, miniAppQuestionFirstFrameCropBounds, miniAppReferenceProductsTrigger, observerRegionFallbackOptions, prepareDeviceForAutomation, prepareEmbeddedEvidence, referenceProductDrawerBounds, referenceProductsCaptureComplete, referenceProductSheetExpanded, referenceProductsTrigger, referenceProductViewportReadiness, refreshedReferenceProductsTrigger, requireQuestionLocated, retryAttemptCount, runQuestionsWithRecovery, scrollEndConfirmed, scrollSingleQuestionSessionToTop, toutiaoGenericConsultationPage, toutiaoHomeSearchBounds, toutiaoOcrViewMoreTarget, toutiaoSearchInput, toutiaoSearchResultBelongsToQuestion, toutiaoViewMoreBounds, waitForPackageHierarchy } = require('../../src/automation/runner')
-const { toutiaoAddToHomeScreenCancelBounds } = require('../../src/automation/miniapp-locators')
-const { douyinOcrConsultEntryTarget } = require('../../src/automation/miniapp-locators')
+const { groupedBrandSummaries, prepareDeviceForAutomation, waitForPackageHierarchy } = require('../../src/automation/runner')
+const { adbConnectionLost } = require('../../src/automation/device-bridge')
+const { captureFailureDiagnostics } = require('../../src/automation/failure-diagnostics')
+const { CancelledError, failedRetryItems, retryAttemptCount, runQuestionsWithRecovery } = require('../../src/automation/batch-recovery')
+const { calibratedProductFallbackOverlap, miniAppReferenceProductsTrigger, referenceProductDrawerBounds, referenceProductsCaptureComplete, referenceProductSheetExpanded, referenceProductsTrigger, referenceProductViewportReadiness, refreshedReferenceProductsTrigger } = require('../../src/automation/reference-products')
+const { douyinGenericAiAnswerBounds, douyinMiniAppCaptureBounds, douyinMiniAppEntryBounds, douyinOcrConsultEntryTarget, douyinOcrViewFullTarget, douyinSearchInput, douyinSearchResultTarget, douyinSearchResultsBounds, douyinViewFullBounds, hierarchyLogicalSize, toutiaoAddToHomeScreenCancelBounds, toutiaoGenericConsultationPage, toutiaoHomeSearchBounds, toutiaoOcrViewMoreTarget, toutiaoSearchInput, toutiaoSearchResultBelongsToQuestion, toutiaoViewMoreBounds } = require('../../src/automation/miniapp-locators')
 const { automationEntries, ENTRY_DEFINITIONS, entryHierarchyStartupTimeout, hierarchyBelongsToPackage, normalizeAutomationEntries } = require('../../src/automation/entry-catalog')
-const { DouyinSearchResultNotFoundError, ToutiaoAnswerCardNotFoundError, ToutiaoFullAnswerNotOpenedError, runDouyinSearchResultAttempts, runToutiaoAnswerCardAttempts, runToutiaoFullAnswerAttempts } = require('../../src/automation/search-recovery')
-const { createQuestionWorkflows } = require('../../src/automation/question-workflows')
-const { createReplyCapture, navigateReplyToBottomControl, miniAppTopFramesStable, miniAppQuestionOcrTarget, miniAppQuestionFirstFrameReacquisitionAllowed, confirmMiniAppTop } = require('../../src/automation/reply-capture')
+const { DouyinSearchResultNotFoundError, ToutiaoAnswerCardNotFoundError, runDouyinSearchResultAttempts } = require('../../src/automation/search-recovery')
+const { createQuestionWorkflows, DOUYIN_MINIAPP_ENTRY_FILENAME, DOUYIN_SEARCH_SUMMARY_FILENAME, TOUTIAO_SEARCH_SUMMARY_FILENAME } = require('../../src/automation/question-workflows')
+const { createReplyCapture, navigateReplyToBottomControl, miniAppTopFramesStable, miniAppQuestionOcrTarget, miniAppQuestionFirstFrameCropBounds, miniAppQuestionFirstFrameReacquisitionAllowed, confirmMiniAppTop } = require('../../src/automation/reply-capture')
 const { createDouyinSearchWorkflow, DouyinMiniAppNetworkError, douyinMiniAppAnswerContextEvidence, douyinMiniAppNetworkRetryTarget, douyinSearchTargetStabilityBounds } = require('../../src/automation/douyin-search-workflow')
-const { recoverTimedOutExistingReply } = require('../../src/automation/existing-reply-recovery')
 const { toutiaoAnswerRegionLooksReady } = require('../../src/automation/toutiao-search-workflow')
 const { createReferenceProductCapture } = require('../../src/automation/reference-product-capture')
-const { evidenceSummaryExpandedByOcr, evidenceSummaryOcrTarget, suspiciousEvidenceSummaryOcrTarget, differentialCitationExpansion } = require('../../src/automation/capture-primitives')
+const { buildReplyImages, captureStableObserved, captureStableSandwich, chatSwipePlan, confirmPersistentScrollEnd, confirmQuestionAtTop, conservativeFallbackOverlap, differentialCitationExpansion, evidenceSummaryExpandedByOcr, evidenceSummaryOcrTarget, fillQuestionInput, historyOnboardingVisible, maxLongImageHeight, observerRegionFallbackOptions, prepareEmbeddedEvidence, requireQuestionLocated, scrollEndConfirmed, scrollSingleQuestionSessionToTop, suspiciousEvidenceSummaryOcrTarget } = require('../../src/automation/capture-primitives')
 
 const CHAT_BOUNDS = [0, 200, 1080, 1800]
 
@@ -868,6 +870,42 @@ test('失败现场的单个诊断源失败不会吞掉其他证据或原始错�
   await fs.access(result.hierarchy)
 })
 
+test('失败现场的uiautomator2诊断串行采集，避免并发重启sidecar', async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'geoauto-serial-u2-scene-'))
+  t.after(() => fs.rm(directory, { recursive: true, force: true }))
+  const order = []
+  let dumpFinished = false
+  const result = await captureFailureDiagnostics({
+    directory,
+    error: new Error('原始任务失败'),
+    captureScreenshot: async () => Buffer.from('png'),
+    dumpHierarchy: async () => {
+      order.push('dump-start')
+      await new Promise(resolve => setTimeout(resolve, 20))
+      dumpFinished = true
+      order.push('dump-end')
+      return '<hierarchy><node package="com.aurora.xiaohe.aidoctor" bounds="[0,0][1080,2400]"/></hierarchy>'
+    },
+    currentApp: async () => {
+      order.push('current')
+      assert.equal(dumpFinished, true)
+      return { package: 'com.aurora.xiaohe.aidoctor' }
+    },
+    foregroundWindow: async () => {
+      order.push('window')
+      return { package: 'com.aurora.xiaohe.aidoctor', activity: '.MainActivity' }
+    },
+    deviceState: async () => ({ wm_size: { status: 'captured', value: 'Physical size: 1080x2400' } }),
+    observerSnapshot: () => ({ active: false }),
+    inspectImage: async () => ({ width: 1, height: 1 }),
+  })
+
+  const manifest = JSON.parse(await fs.readFile(result.manifest, 'utf8'))
+  assert.deepEqual(order, ['dump-start', 'dump-end', 'current', 'window'])
+  assert.equal(manifest.hierarchy.status, 'captured')
+  assert.equal(manifest.current_app.status, 'captured')
+})
+
 test('用户停止属于致命错误，不会继续后续问题', async () => {
   const executed = []
   await assert.rejects(() => runQuestionsWithRecovery({
@@ -1108,34 +1146,6 @@ test('抖音搜索读取异常不会被刷新重试掩盖', async () => {
   assert.equal(refreshes, 0)
 })
 
-test('头条只在确认未召回小荷卡片时用相同问题受控重试一次', async () => {
-  const calls = []
-  const result = await runToutiaoAnswerCardAttempts({
-    waitForResult: async attempt => {
-      calls.push(`wait:${attempt}`)
-      if (attempt === 1) throw new ToutiaoAnswerCardNotFoundError('首轮只有药品通结果')
-      return { detectionMethod: 'ui_hierarchy' }
-    },
-    repeatExactSearch: async () => calls.push('repeat-exact'),
-  })
-
-  assert.equal(result.attempt, 2)
-  assert.equal(result.repeated, true)
-  assert.deepEqual(calls, ['wait:1', 'repeat-exact', 'wait:2'])
-})
-
-test('头条同词重试后仍未召回则明确失败且不进行第三次搜索', async () => {
-  const calls = []
-  await assert.rejects(() => runToutiaoAnswerCardAttempts({
-    waitForResult: async attempt => {
-      calls.push(`wait:${attempt}`)
-      throw new ToutiaoAnswerCardNotFoundError(`第${attempt}轮未召回`)
-    },
-    repeatExactSearch: async () => calls.push('repeat-exact'),
-  }), /相同问题受控重试后.*仍未出现/)
-  assert.deepEqual(calls, ['wait:1', 'repeat-exact', 'wait:2'])
-})
-
 test('头条同词重试仍未召回小荷入口时保存正式搜索结果截图', async () => {
   let saved = null
   const workflow = createQuestionWorkflows({
@@ -1164,15 +1174,6 @@ test('头条同词重试仍未召回小荷入口时保存正式搜索结果截�
   assert.equal(saved.meta.toutiao_result_mode, 'search_results_only')
   assert.equal(saved.meta.xiaohe_result_detected, false)
   assert.equal(saved.meta.search_result_capture_complete, true)
-})
-
-test('头条读取或点击异常不会被同词重试掩盖', async () => {
-  let repeats = 0
-  await assert.rejects(() => runToutiaoAnswerCardAttempts({
-    waitForResult: async () => { throw new Error('uiautomator2读取失败') },
-    repeatExactSearch: async () => { repeats += 1 },
-  }), /uiautomator2读取失败/)
-  assert.equal(repeats, 0)
 })
 
 test('头条全文路由拒绝带发送框的通用咨询页', () => {
@@ -1217,51 +1218,6 @@ test('头条冷启动只识别添加到主屏幕弹窗的取消按钮', () => {
   </hierarchy>`
   assert.deepEqual(toutiaoAddToHomeScreenCancelBounds(popup), [84, 2202, 539, 2334])
   assert.equal(toutiaoAddToHomeScreenCancelBounds(popup.replace('今日头条', '其他应用')), null)
-})
-
-test('头条全文误入通用咨询页时只重新搜索并路由一次', async () => {
-  const calls = []
-  const result = await runToutiaoFullAnswerAttempts({
-    initialTarget: { viewMore: 'first' },
-    openFullAnswer: async target => {
-      calls.push(`open:${target.viewMore}`)
-      if (target.viewMore === 'first') throw new ToutiaoFullAnswerNotOpenedError('误入通用咨询页')
-      return { bounds: [0, 300, 1080, 2000] }
-    },
-    repeatExactSearch: async () => {
-      calls.push('repeat-exact')
-      return { viewMore: 'second' }
-    },
-  })
-  assert.equal(result.attempt, 2)
-  assert.equal(result.repeated, true)
-  assert.deepEqual(calls, ['open:first', 'repeat-exact', 'open:second'])
-})
-
-test('头条非路由错误或已用完搜索次数时不重放全文点击', async () => {
-  let repeats = 0
-  await assert.rejects(() => runToutiaoFullAnswerAttempts({
-    initialTarget: {},
-    openFullAnswer: async () => { throw new Error('uiautomator2读取失败') },
-    repeatExactSearch: async () => { repeats += 1 },
-  }), /uiautomator2读取失败/)
-  await assert.rejects(() => runToutiaoFullAnswerAttempts({
-    initialTarget: {},
-    canRepeat: false,
-    openFullAnswer: async () => { throw new ToutiaoFullAnswerNotOpenedError('已用完搜索次数') },
-    repeatExactSearch: async () => { repeats += 1 },
-  }), /已用完搜索次数/)
-  assert.equal(repeats, 0)
-})
-
-test('头条全文二次路由失败保留最后一次底层拒绝原因', async () => {
-  await assert.rejects(() => runToutiaoFullAnswerAttempts({
-    initialTarget: { viewMore: 'first' },
-    openFullAnswer: async target => {
-      throw new ToutiaoFullAnswerNotOpenedError(target.viewMore === 'first' ? '首次页面空白' : '正文区域仍未出现')
-    },
-    repeatExactSearch: async () => ({ viewMore: 'second' }),
-  }), /正文区域仍未出现/)
 })
 
 test('抖音小荷AI全文页排除固定顶部、工具栏和输入区', () => {
@@ -1410,6 +1366,26 @@ test('头条入口按真实搜索框和“查看更多/查看全文”卡片结�
   assert.deepEqual(toutiaoViewMoreBounds(xml), [72, 1323, 1008, 1464])
   assert.deepEqual(toutiaoViewMoreBounds(xml.replace('查看更多', '查看全文')), [72, 1323, 1008, 1464])
   assert.equal(toutiaoViewMoreBounds(xml.replace('小荷AI医生·智能总结', '普通搜索结果')), null)
+})
+
+test('头条逻辑视口忽略输入法溢出边界并兼容不同竖屏尺寸', () => {
+  const xml = (width, height, searchBounds) => `<hierarchy>
+    <node package="com.ss.android.article.news" bounds="[0,0][${width},${height}]" />
+    <node package="com.iflytek.inputmethod.miui" content-desc="讯飞输入法小米版" bounds="[2147483647,2147483647][-2147483648,-2147483648]" />
+    <node package="com.ss.android.article.news" resource-id="com.ss.android.article.news:id/cx" text="搜索框，真机问题" clickable="true" visible-to-user="true" bounds="${searchBounds}" />
+  </hierarchy>`
+
+  for (const sample of [
+    { width: 1080, height: 2400, searchBounds: '[245,102][792,222]' },
+    { width: 720, height: 1600, searchBounds: '[163,68][528,148]' },
+  ]) {
+    const hierarchy = xml(sample.width, sample.height, sample.searchBounds)
+    assert.deepEqual(hierarchyLogicalSize(hierarchy, null), { width: sample.width, height: sample.height })
+    assert.deepEqual(toutiaoSearchInput(hierarchy), {
+      bounds: sample.searchBounds.match(/\d+/g).map(Number),
+      text: '真机问题',
+    })
+  }
 })
 
 test('头条首页搜索入口兼容不同竖屏尺寸并拒绝非搜索框节点', () => {
@@ -2315,52 +2291,6 @@ test('仅在聊天区同时出现响应超时提示和可点击重试按钮时�
 
   const unrelatedRetry = '<hierarchy><node class="android.widget.Button" text="重试" clickable="true" bounds="[40,500][680,590]" /></hierarchy>'
   assert.equal(responseTimeoutRetryTarget(unrelatedRetry, [0, 120, 720, 1460]), null)
-})
-
-test('当前已有回答响应超时时刷新坐标并且只点击一次重试', async () => {
-  const timeoutXml = '<hierarchy><node package="com.aurora.xiaohe.aidoctor" class="android.widget.TextView" text="响应超时，点击重新生成回答。" bounds="[55,643][811,726]" />'
-    + '<node package="com.aurora.xiaohe.aidoctor" class="android.widget.Button" text="重试" clickable="true" bounds="[55,754][1025,887]" /></hierarchy>'
-  const stableXml = '<hierarchy><node package="com.aurora.xiaohe.aidoctor" class="android.widget.TextView" text="回答正文" bounds="[55,643][1025,887]" /></hierarchy>'
-  const events = []
-  const result = await recoverTimedOutExistingReply({
-    xml: timeoutXml,
-    chatBounds: [0, 200, 1080, 2200],
-    timeout: 90_000,
-    source: async () => { events.push('source'); return timeoutXml },
-    tap: async (x, y) => { events.push(['tap', x, y]) },
-    waitForStableReply: async (timeout, options) => {
-      events.push(['wait', timeout, Number.isFinite(options.startedAt)])
-      return { status: 'stable', xml: stableXml }
-    },
-    log: message => events.push(['log', message]),
-    record: async (event, details) => events.push(['record', event, details.retry_bounds || null]),
-  })
-
-  assert.equal(result.xml, stableXml)
-  assert.deepEqual(result.meta, {
-    existing_reply_timeout_detected: true,
-    existing_reply_retry_performed: true,
-    existing_reply_retry_attempts: 1,
-    existing_reply_retry_succeeded: true,
-  })
-  assert.deepEqual(events.filter(event => Array.isArray(event) && event[0] === 'tap'), [['tap', 540, 820]])
-  assert.equal(events.some(event => Array.isArray(event) && event[1] === 'existing_reply_timeout_detected'), true)
-  assert.equal(events.some(event => Array.isArray(event) && event[1] === 'existing_reply_timeout_retry_completed'), true)
-})
-
-test('当前已有回答唯一一次重试后仍响应超时则明确失败且不二次点击', async () => {
-  const timeoutXml = '<hierarchy><node class="android.widget.TextView" text="响应超时，点击重新生成回答。" bounds="[36,420][542,478]" />'
-    + '<node class="android.widget.Button" content-desc="重试" clickable="true" bounds="[36,495][684,585]" /></hierarchy>'
-  let taps = 0
-  await assert.rejects(recoverTimedOutExistingReply({
-    xml: timeoutXml,
-    chatBounds: [0, 120, 720, 1460],
-    timeout: 1_000,
-    source: async () => timeoutXml,
-    tap: async () => { taps += 1 },
-    waitForStableReply: async () => ({ status: 'stable', xml: timeoutXml }),
-  }), /唯一一次重试后仍显示响应超时/)
-  assert.equal(taps, 1)
 })
 
 test('药品卡片里的医保标签不能被误识别为当前问题', () => {
@@ -3321,7 +3251,6 @@ test('批次产物拆分为纯图片交付区和镜像调试区，CSV 默认读�
   try {
     const batch = await createBatchDirectory(directory, new Date(2026, 6, 11, 23, 59, 0))
     assert.equal(path.basename(batch), 'batch_20260711-235900')
-    assert.equal(path.basename(questionArtifactDirectory(batch, 2, '儿童腹泻/脱水用什么药？')), '002_儿童腹泻_脱水用什么药？')
     const batchArtifacts = batchArtifactDirectories(batch)
     assert.equal(path.basename(batchArtifacts.deliveryDirectory), '交付图片')
     assert.equal(path.basename(batchArtifacts.diagnosticDirectory), '调试产物')

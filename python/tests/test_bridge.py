@@ -5,7 +5,15 @@ import json
 
 import pytest
 
-from geoauto_u2.bridge import BridgeError, U2Bridge, configure_utf8_standard_streams, serve
+from geoauto_u2.bridge import (
+    APP_FOREGROUND_WAIT_S,
+    BridgeError,
+    U2Bridge,
+    configure_utf8_standard_streams,
+    parse_dumpsys_launcher_activity,
+    parse_resolved_activity,
+    serve,
+)
 
 
 class FakeJsonRpc:
@@ -85,6 +93,13 @@ class FakeDevice:
                     "output": "mObscuringWindow=Window{123 u0 example.app/example.app.MiniAppHostActivity0}"
                 },
             )()
+        if args[:3] == ["cmd", "package", "resolve-activity"]:
+            package = args[-1]
+            return type(
+                "ShellResult",
+                (),
+                {"output": f"priority=0 preferredOrder=0 match=0x108000\n{package}/.MainActivity\n"},
+            )()
         return type("ShellResult", (), {"output": ""})()
 
     def screen_on(self):
@@ -106,8 +121,8 @@ class FakeDevice:
     def press(self, key):
         self.events.append(("press", key))
 
-    def app_start(self, package, wait=False, use_monkey=False):
-        self.events.append(("app_start", package, wait, use_monkey))
+    def app_start(self, package, activity=None, wait=False, stop=False, use_monkey=False):
+        self.events.append(("app_start", package, activity, wait, use_monkey))
 
     def app_stop(self, package):
         self.events.append(("app_stop", package))
@@ -164,8 +179,8 @@ def test_bridge_configures_dynamic_ui_timeouts_and_dispatches_commands():
     assert ("selector", {"focused": True}) in device.events
     assert ("set_focused_text", "腹泻怎么办") in device.events
     assert ("press", "back") in device.events
-    assert ("app_start", "example.app", True, False) in device.events
-    assert ("app_wait", "example.app", 8.0, True) in device.events
+    assert ("app_start", "example.app", ".MainActivity", False, False) in device.events
+    assert ("app_wait", "example.app", APP_FOREGROUND_WAIT_S, True) in device.events
     assert ("app_stop", "example.app") in device.events
 
 
@@ -296,3 +311,90 @@ def test_protocol_forces_utf8_when_windows_pipe_defaults_to_cp936():
 
     assert ("send_keys", "测试", False) in device.events
     assert '"ok": true' in output_bytes.getvalue().decode("utf-8")
+
+
+def test_parse_resolved_activity_reads_brief_component_line():
+    output = (
+        "priority=2000 preferredOrder=0 match=0x108000 specificIndex=-1 isDefault=true\n"
+        "com.aurora.xiaohe.aidoctor/.splash.SplashActivity\n"
+    )
+    assert parse_resolved_activity(output, "com.aurora.xiaohe.aidoctor") == ".splash.SplashActivity"
+    assert parse_resolved_activity("No activity found", "com.aurora.xiaohe.aidoctor") is None
+    assert parse_resolved_activity(output, "com.other.app") is None
+
+
+def test_parse_dumpsys_launcher_activity_prefers_nearby_launcher_component():
+    output = """
+Activity Resolver Table:
+  Non-Data Actions:
+      android.intent.action.MAIN:
+        31c4d1c example.app/.SplashActivity filter 8a1b2c3
+          Action: "android.intent.action.MAIN"
+          Category: "android.intent.category.LAUNCHER"
+        4ab12 example.app/.TvAlias filter 99aa
+          Action: "android.intent.action.MAIN"
+          Category: "android.intent.category.LEANBACK_LAUNCHER"
+"""
+    assert parse_dumpsys_launcher_activity(output, "example.app") == ".SplashActivity"
+    assert parse_dumpsys_launcher_activity(output, "missing.app") is None
+
+
+def test_app_start_resolves_launcher_activity_and_does_not_use_monkey():
+    device = FakeDevice()
+    bridge = U2Bridge(lambda serial: device)
+    bridge.dispatch("connect", {"serial": "SERIAL"})
+
+    result = bridge.dispatch("app_start", {"package": "example.app"})
+
+    assert result["package"] == "example.app"
+    assert result["launch_activity"] == ".MainActivity"
+    assert ("app_start", "example.app", ".MainActivity", False, False) in device.events
+    assert all(event[0] != "app_start" or event[4] is False for event in device.events if event[0] == "app_start")
+
+
+def test_app_start_falls_back_to_dumpsys_when_resolve_activity_is_empty():
+    class DumpsysOnlyDevice(FakeDevice):
+        def shell(self, args):
+            if args[:3] == ["cmd", "package", "resolve-activity"]:
+                self.events.append(("shell", args))
+                return type("ShellResult", (), {"output": "No activity found"})()
+            if args[:2] == ["dumpsys", "package"]:
+                self.events.append(("shell", args))
+                return type(
+                    "ShellResult",
+                    (),
+                    {
+                        "output": (
+                            "android.intent.action.MAIN:\n"
+                            "  31c4d1c example.app/.SplashActivity filter\n"
+                            '    Category: "android.intent.category.LAUNCHER"\n'
+                        )
+                    },
+                )()
+            return super().shell(args)
+
+    device = DumpsysOnlyDevice()
+    bridge = U2Bridge(lambda serial: device)
+    bridge.dispatch("connect", {"serial": "SERIAL"})
+
+    result = bridge.dispatch("app_start", {"package": "example.app"})
+
+    assert result["launch_activity"] == ".SplashActivity"
+    assert ("app_start", "example.app", ".SplashActivity", False, False) in device.events
+
+
+def test_app_start_does_not_fall_back_to_monkey_when_activity_cannot_be_resolved():
+    class NoLauncherDevice(FakeDevice):
+        def shell(self, args):
+            if args[:3] == ["cmd", "package", "resolve-activity"] or args[:2] == ["dumpsys", "package"]:
+                self.events.append(("shell", args))
+                return type("ShellResult", (), {"output": "No activity found"})()
+            return super().shell(args)
+
+    device = NoLauncherDevice()
+    bridge = U2Bridge(lambda serial: device)
+    bridge.dispatch("connect", {"serial": "SERIAL"})
+
+    with pytest.raises(BridgeError, match="无法解析"):
+        bridge.dispatch("app_start", {"package": "example.app"})
+    assert not any(event[0] == "app_start" for event in device.events)

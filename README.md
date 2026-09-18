@@ -240,10 +240,11 @@ tests/node/      # Node 内置 test runner 测试
 - 悬浮向下箭头的图像兜底同时检查箭头周围一圈背景是否一致，避免把正文笔画或“查看全部药品”的文字空隙当成箭头而过度裁剪；深底浅色箭头和浅底深色箭头均按实时视口比例识别，扫描范围覆盖靠近视口底边的按钮。
 - 小荷原生界面可能在正文下方展示药品预览和“查看全部药品”。全宽的“参考药品”标题不是可点击入口，程序等待同一页面内明确的“查看全部药品”文字，再按实时层级坐标进入完整药品列表，继续执行首项、图片加载、到底和接缝验证；不能将预览卡片当成完整列表。入口的 UI 点击坐标与为避开悬浮按钮而缩小的正文截图裁剪区分别处理。
 - 引用资料卡片点击前重新读取当前 UI 层级，避免回顶过程中保存的旧层级漏掉已出现的箭头。若当前层级中暴露了与 OCR 标题同行且紧邻的唯一展开箭头，首次点击优先使用该箭头的逻辑坐标，避免文字区域不响应；其余情况沿用 OCR 标题位置。仍然只点击一次，再通过只读 OCR 确认展开，诊断字段 `click_target_method` 记录点击依据，`回答.json` 的 `reply_evidence_hierarchy_refreshed` 记录是否刷新了点击层级。
-- 小米手机除 USB 调试外还需开启开发者选项中的“USB 调试（安全设置）”，否则 uiautomator2 点击会被系统以 `INJECT_EVENTS` 权限不足拒绝。如果该开关已经开启、`com.android.shell` 的 `INJECT_EVENTS` 也显示已授权，不能仅凭错误要求重复开关；本次 MIUI 14 真机验收中，重建 sidecar 和重连 ADB 均未恢复，重启手机并首次解锁后点击恢复。先完成两个 App 的首次启动引导与必要登录。小荷处于语音模式时，程序按实时层级中的“切换文字输入”控件切换一次并等待读取到编辑框，不重复点击切换按钮。新会话验证仅使用目标 App 的可见节点，忽略输入法等外部窗口（包括小米输入法的异常坐标），允许已知固定欢迎语，但仍拒绝旧回答；元数据 `new_session_validation_method=target_app_content_excluding_fixed_welcome` 记录该规则。
+- 小米手机除 USB 调试外还需开启开发者选项中的“USB 调试（安全设置）”，否则 uiautomator2 点击会被系统以 `INJECT_EVENTS` 权限不足拒绝。如果该开关已经开启、`com.android.shell` 的 `INJECT_EVENTS` 也显示已授权，不能仅凭错误要求重复开关；本次 MIUI 14 真机验收中，重建 sidecar 和重连 ADB 均未恢复，重启手机并首次解锁后点击恢复。先完成两个 App 的首次启动引导与必要登录。小荷处于语音模式时，程序按实时层级中的“切换文字输入”控件切换一次并等待读取到编辑框，不重复点击切换按钮。新会话验证仅使用目标 App 的可见节点，忽略输入法等外部窗口（包括小米输入法的异常坐标），允许已知固定欢迎语，但仍拒绝旧回答；头条和小程序的逻辑视口计算也会忽略输入法层级中的无效溢出边界。元数据 `new_session_validation_method=target_app_content_excluding_fixed_welcome` 记录该规则。
 - 手机必须完成 USB 调试授权（打包版已内置 adb，无需本机安装）。
 - 每次开始普通批次或失败题重试前，程序都会先通过 uiautomator2 唤醒屏幕，并在任务期间开启“USB 连接时保持唤醒”。若设备仍处于锁屏状态，控制台会提示用户先在手机上解锁并最多等待 60 秒；确认解锁前不会启动入口、点击、输入或发送。任务成功、失败或用户停止时都会恢复任务开始前的常亮设置，但不会在结束后主动熄屏。密码、PIN、图案和生物识别仍必须由用户本人完成，程序不会尝试绕过锁屏。
-- 仓库内置 macOS 与 Windows 两套 Android Platform Tools；打包命令 `npm run dist` 会使用目标平台的ADB，并内置PyInstaller生成的Python uiautomator2 sidecar及校验过的官方scrcpy server。运营不需要安装Node、Python、uv、ADB或scrcpy客户端。
+- 仓库内置 macOS 与 Windows 两套 Android Platform Tools；打包命令 `npm run dist` 只会把目标平台的 ADB 放入安装包，并内置 PyInstaller 生成的 Python uiautomator2 sidecar及校验过的官方scrcpy server。运营不需要安装Node、Python、uv、ADB或scrcpy客户端。
+- 应用启动会先解析目标包真实的 launcher Activity 并直接启动，Node 侧为冷启动和前台确认保留 45 秒边界；失败诊断会串行读取层级、前台应用和窗口，并合并并发 sidecar 重启，避免 Windows 上一次慢启动演变为 `RemoteDisconnected` 和连续超时。
 - UI层没有ADB降级：uiautomator2层级读取失败时只允许重启sidecar并重试一次；点击或输入失败会立即终止当前题且不重放该操作，下一题只能在重新启动并校验入口后继续。
 - 正式截图始终使用ADB原始PNG，不使用uiautomator2截图接口。
 - scrcpy观察器不解码、不保存也不参与拼接，只根据官方视频包的活动情况快速判断页面是否停稳。读取层级和截取PNG期间没有活动时，再经过独立的300ms二次静止确认后直接使用当前无损PNG；检测到全屏活动时不再仅凭视频包判定回答失败，而是复用已取得的回答区域PNG，升级为连续两组“ADB截图→uiautomator2层级→ADB截图”像素夹心校验。只有目标回答区域也持续变化才继续等待或超时失败，状态栏、浮动控件等区域外活动不会误伤正式截图。观察器不可用、没有明确活动证据或截图后二次确认超时时使用普通单组夹心校验，不影响UI后端选择。元数据中的 `scrcpy_observer_activity_region_checks` 和 `scrcpy_observer_question_activity_region_checks` 记录这种严格区域复核发生次数。

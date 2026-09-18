@@ -18,9 +18,91 @@ class BridgeError(RuntimeError):
     """Raised when a bridge request is invalid or the device is unavailable."""
 
 
+_COMPONENT_RE = re.compile(r"^([A-Za-z0-9._]+)/([A-Za-z0-9._$]+)$")
+_DUMPSYS_COMPONENT_RE = re.compile(
+    r"(?P<package>[A-Za-z0-9._]+)/(?P<activity>[A-Za-z0-9._$]+)"
+)
+
+# uiautomator2 3.7 app_wait(front=True) polls once per second. Cold start of
+# Douyin/Toutiao on mid-range phones can exceed the old 8s check.
+APP_FOREGROUND_WAIT_S = 25.0
+
+
 def _shell_output(device: Any, args: list[str]) -> str:
     result = device.shell(args)
     return str(getattr(result, "output", result) or "").strip()
+
+
+def parse_resolved_activity(output: str, package: str) -> str | None:
+    package = str(package or "").strip()
+    if not package:
+        return None
+    for raw in reversed(str(output or "").splitlines()):
+        line = raw.strip()
+        if not line or line.lower().startswith("priority=") or "no activity" in line.lower():
+            continue
+        match = _COMPONENT_RE.match(line)
+        if match and match.group(1) == package:
+            return match.group(2)
+    return None
+
+
+def parse_dumpsys_launcher_activity(output: str, package: str) -> str | None:
+    package = str(package or "").strip()
+    text = str(output or "")
+    if not package or not text:
+        return None
+    for match in re.finditer(r"android\.intent\.category\.LAUNCHER", text):
+        window = text[max(0, match.start() - 500) : match.end() + 80]
+        for component in _DUMPSYS_COMPONENT_RE.finditer(window):
+            if component.group("package") == package:
+                return component.group("activity")
+    return None
+
+
+def _resolve_launcher_activity(device: Any, package: str) -> str:
+    # uiautomator2 3.7 uses monkey whenever activity is omitted, even if the
+    # caller passed use_monkey=False. Huawei/Honor launchers intercept monkey
+    # and report no error, so resolve the launcher Activity and use am start.
+    queries = (
+        [
+            "cmd",
+            "package",
+            "resolve-activity",
+            "--brief",
+            "-a",
+            "android.intent.action.MAIN",
+            "-c",
+            "android.intent.category.LAUNCHER",
+            package,
+        ],
+        [
+            "cmd",
+            "package",
+            "resolve-activity",
+            "--brief",
+            "--user",
+            "0",
+            "-a",
+            "android.intent.action.MAIN",
+            "-c",
+            "android.intent.category.LAUNCHER",
+            package,
+        ],
+    )
+    for args in queries:
+        activity = parse_resolved_activity(_shell_output(device, args), package)
+        if activity:
+            return activity
+    activity = parse_dumpsys_launcher_activity(
+        _shell_output(device, ["dumpsys", "package", package]),
+        package,
+    )
+    if activity:
+        return activity
+    raise BridgeError(
+        f"无法解析 {package} 的启动 Activity；已停止启动，避免桌面拦截 monkey"
+    )
 
 
 def _device_lock_state(device: Any) -> dict[str, Any]:
@@ -201,19 +283,16 @@ class U2Bridge:
             package = str(params.get("package") or "").strip()
             if not package:
                 raise BridgeError("app_start requires a package")
-            # Huawei's launcher/search can intercept the monkey-based launch.
-            # uiautomator2 reports no error in that case, so use the resolved
-            # Activity path and verify that the requested package is actually
-            # in the foreground before allowing the workflow to continue.
-            device.app_start(package, wait=True, use_monkey=False)
-            pid = device.app_wait(package, timeout=8.0, front=True)
+            activity = _resolve_launcher_activity(device, package)
+            device.app_start(package, activity, wait=False, use_monkey=False)
+            pid = device.app_wait(package, timeout=APP_FOREGROUND_WAIT_S, front=True)
             current = device.app_current()
             if not pid or current.get("package") != package:
                 actual = current.get("package") or "unknown"
                 raise BridgeError(
                     f"应用启动后前台应用不正确：expected={package}, actual={actual}"
                 )
-            return current
+            return {**current, "launch_activity": activity}
         if method == "app_stop":
             package = str(params.get("package") or "").strip()
             if not package:

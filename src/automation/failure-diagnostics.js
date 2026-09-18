@@ -75,14 +75,17 @@ async function captureFailureDiagnostics({
   const attempt = async task => {
     try { return { ok: true, value: await task() } } catch (captureError) { return { ok: false, error: diagnosticError(captureError) } }
   }
-  const [frameResult, hierarchyResult, appResult, windowResult, deviceResult, observerResult] = await Promise.all([
+  const [frameResult, deviceResult, observerResult] = await Promise.all([
     attempt(captureScreenshot),
-    attempt(dumpHierarchy),
-    attempt(currentApp),
-    attempt(foregroundWindow),
     attempt(deviceState),
     attempt(async () => observerSnapshot()),
   ])
+  // The sidecar handles one JSON-line at a time. Parallel dump/current_app/
+  // foreground_window retries each restart that same process, so a failed
+  // app_start is followed by RemoteDisconnected and 7s timeouts.
+  const hierarchyResult = await attempt(dumpHierarchy)
+  const appResult = await attempt(currentApp)
+  const windowResult = await attempt(foregroundWindow)
 
   let screenshot = { status: 'failed', path: null, error: frameResult.error || null }
   if (frameResult.ok) {

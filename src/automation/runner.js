@@ -1,11 +1,11 @@
 const fs = require('node:fs/promises')
 const path = require('node:path')
 const { execFileSync } = require('node:child_process')
-const { sleep, createBatchDirectory, batchArtifactDirectories, entryArtifactDirectories, questionArtifactDirectories, taskArtifactDirectories } = require('./utils')
+const { sleep, createBatchDirectory, batchArtifactDirectories, taskArtifactDirectories } = require('./utils')
 const { normalizeQuestionPlan, brandExecutionUnits, safeDirectorySegment } = require('../question-plan')
 const { EventLog } = require('./event-log')
-const { iterNodes, nodeAttr, nodeIsVisible, parseBounds, currentQuestionText, findChatScrollBounds, validateCaptureViewport, visibleLabelBounds, boundsForNodeAttribute, responseTimeoutRetryTarget } = require('./hierarchy')
-const { imageInfo, cropImage, imagesSimilar } = require('./images')
+const { iterNodes, nodeAttr, nodeIsVisible, parseBounds, findChatScrollBounds, validateCaptureViewport, visibleLabelBounds, boundsForNodeAttribute } = require('./hierarchy')
+const { imageInfo, cropImage } = require('./images')
 const { U2Client } = require('./u2-client')
 const { OcrRecognizer } = require('./ocr')
 const { ScrcpyObserver, SCRCPY_VERSION } = require('./scrcpy-observer')
@@ -19,70 +19,23 @@ const {
   entryHierarchyStartupTimeout,
 } = require('./entry-catalog')
 const { bundledScrcpyServer } = require('../runtime-paths')
-const { adbCommand, adbConnectionLost, waitForAdbDevice, adbScreenshot, adbCommandWithReconnect } = require('./device-bridge')
+const { adbCommand, waitForAdbDevice, adbScreenshot, adbCommandWithReconnect } = require('./device-bridge')
 const { CancelledError, fatalBatchError, runQuestionsWithRecovery, failedRetryItems, retryAttemptCount } = require('./batch-recovery')
 const { captureFailureDiagnostics, diagnosticError } = require('./failure-diagnostics')
 const {
-  miniAppReferenceProductsTrigger,
-  referenceProductsTrigger,
-  refreshedReferenceProductsTrigger,
-  referenceProductDrawerBounds,
-  referenceProductsCaptureComplete,
-  referenceProductSheetExpanded,
-  calibratedProductFallbackOverlap,
-  referenceProductViewportReadiness,
-} = require('./reference-products')
-const {
-  douyinSearchInput,
-  toutiaoSearchInput,
-  toutiaoSearchResultBelongsToQuestion,
-  toutiaoHomeSearchBounds,
-  toutiaoViewMoreBounds,
-  hierarchyLogicalSize,
-  toutiaoOcrViewMoreTarget,
-  douyinOcrViewFullTarget,
-  douyinViewFullBounds,
-  douyinGenericAiAnswerBounds,
-  douyinMiniAppEntryBounds,
-  douyinSearchResultTarget,
-  douyinSearchResultsBounds,
-  douyinMiniAppCaptureBounds,
-  toutiaoGenericConsultationPage,
-} = require('./miniapp-locators')
-const {
   DEFAULT_MAX_LONG_IMAGE_HEIGHT,
   maxLongImageHeight,
-  historyOnboardingVisible,
-  conservativeFallbackOverlap,
-  chatSwipePlan,
-  scrollEndConfirmed,
-  requireQuestionLocated,
-  confirmQuestionAtTop,
-  scrollSingleQuestionSessionToTop,
-  confirmPersistentScrollEnd,
-  buildReplyImages,
-  prepareEmbeddedEvidence,
-  fillQuestionInput,
-  captureStableSandwich,
-  captureStableObserved,
-  observerRegionFallbackOptions,
 } = require('./capture-primitives')
 const { createCaptureStability } = require('./capture-stability')
 const { createReferenceProductCapture } = require('./reference-product-capture')
-const { createReplyCapture, miniAppQuestionFirstFrameCropBounds } = require('./reply-capture')
+const { createReplyCapture } = require('./reply-capture')
 const { createQuestionInputWorkflow } = require('./question-input-workflow')
 const { createDouyinSearchWorkflow } = require('./douyin-search-workflow')
 const { createToutiaoSearchWorkflow } = require('./toutiao-search-workflow')
-const { recoverTimedOutExistingReply } = require('./existing-reply-recovery')
 const { createArtifactWriter, ARTIFACT_LAYOUT_VERSION } = require('./artifact-writer')
 const { OperationTelemetry } = require('./operation-telemetry')
 const { ConsoleLogFormatter } = require('./console-log-formatter')
-const {
-  createQuestionWorkflows,
-  DOUYIN_SEARCH_SUMMARY_FILENAME,
-  DOUYIN_MINIAPP_ENTRY_FILENAME,
-  TOUTIAO_SEARCH_SUMMARY_FILENAME,
-} = require('./question-workflows')
+const { createQuestionWorkflows } = require('./question-workflows')
 
 async function waitForPackageHierarchy({
   dumpHierarchy,
@@ -912,218 +865,6 @@ function createRunner(options) {
   }
 
   return {
-    async captureCurrentAnswer(payload) {
-      throw new Error('当前已有回答采集模式已移除；请提供问题并由程序为每题新建会话后发送。')
-      /* c8 ignore start -- retained only to make old packaged callers fail closed during upgrade */
-      activeSerial = payload.serial
-      if ((payload.entries || []).length > 1) throw new Error('当前已有回答模式一次只能指定一个入口。')
-      const requestedEntry = (payload.entries || []).length
-        ? normalizeAutomationEntries(payload.entries)[0]
-        : ENTRY_DEFINITIONS['xiaohe-app']
-      resetEntryState(requestedEntry)
-      payloadMaxLongImageHeight = maxLongImageHeight(payload.maxLongImageHeight)
-      const outputRoot = path.resolve(payload.outputDir)
-      const batchDirectory = await createBatchDirectory(outputRoot)
-      const batchArtifacts = batchArtifactDirectories(batchDirectory)
-      await initializeArtifactLogging(batchArtifacts, payload, 'capture_current_existing_reply')
-      emitProgress({ type: 'initialized', entries: [{ id: requestedEntry.id, label: requestedEntry.label }], question_count: 1, results: [] })
-      emitProgress({ type: 'entry_started', entry_id: requestedEntry.id })
-      try {
-        await waitForDevice()
-        await ui.start(payload.serial)
-        await prepareConnectedDevice()
-        try {
-          await observer.start(payload.serial)
-        } catch (error) {
-          await disableObserver(error)
-        }
-        await waitForVisualQuiet({ timeout: 1_200, fallbackMs: 600 })
-        const observerBaseline = typeof observer.snapshot === 'function' ? observer.snapshot() : {}
-        const recoveryBaseline = recoverySnapshot()
-        let xml = await source()
-        const alreadyOpen = Boolean(referenceProductDrawerBounds(xml).sheet)
-        if (alreadyOpen) throw new Error('当前药品抽屉已经打开，无法证明仍位于第一项；为避免漏药，本次未继续操作，也未输入或发送新问题。')
-        const size = await windowSize()
-        let question = ''
-        let captureMethod = captureFullReplyFrames
-        let existingReplyRecoveryMeta = {
-          existing_reply_timeout_detected: false,
-          existing_reply_retry_performed: false,
-          existing_reply_retry_attempts: 0,
-          existing_reply_retry_succeeded: null,
-        }
-        if (activeEntry.workflow === 'douyin-search' || activeEntry.workflow === 'toutiao-search') {
-          question = String(payload.questions?.[0] || '').trim()
-          if (!question) throw new Error('小程序当前已有回答模式需要在命令末尾提供当前问题文字，仅用于文件夹命名；不会输入或发送。')
-          const bounds = douyinMiniAppCaptureBounds(xml, size)
-          if (!bounds) throw new Error(`当前页面不是${activeEntry.label}的已打开全文页；本次未输入或发送。`)
-          if (activeEntry.workflow === 'douyin-search') {
-            const foreground = await ui.foregroundWindow()
-            if (foreground?.package !== activePackageName() || !/MiniAppHostActivity/.test(foreground?.activity || '')) {
-              throw new Error(`当前前台不是抖音小程序宿主页；本次未输入或发送（activity=${foreground?.activity || 'unknown'}）。`)
-            }
-            captureMethod = () => captureDouyinMiniAppEntryAnswerFrames(xml, bounds, question)
-          } else captureMethod = () => captureToutiaoFullAnswerFrames(xml, bounds)
-        } else {
-          const chatBounds = findChatScrollBounds(xml, size)
-          validateCaptureViewport(size, chatBounds)
-          question = String(payload.questions?.[0] || '').trim()
-          if (!question) question = currentQuestionText(xml, chatBounds) || ''
-          if (responseTimeoutRetryTarget(xml, chatBounds) && !question) {
-            throw new Error('当前已有回答显示响应超时，但无法先确认它对应的问题；为避免对错误会话重新生成，本次未点击重试。')
-          }
-          const recovery = await recoverTimedOutExistingReply({
-            xml,
-            chatBounds,
-            timeout: payload.timeout * 1_000,
-            source,
-            tap,
-            waitForStableReply,
-            log,
-            record: (event, details) => batchEventLog.record(event, {
-              category: 'recovery',
-              details,
-              context: {
-                entry_id: activeEntry.id,
-                entry_label: activeEntry.label,
-                question,
-                question_index: 1,
-              },
-            }),
-          })
-          xml = recovery.xml
-          existingReplyRecoveryMeta = recovery.meta
-          if (question) {
-            if (payload.questions?.[0]) captureMethod = currentQuestion => captureFullReplyFrames(currentQuestion, 30, { singleQuestionSession: true })
-          } else {
-            let unchangedAtTop = 0
-            let locateFrame = question ? null : await cropImage(await screenshot(), chatBounds)
-            while (!question && unchangedAtTop < 2) {
-              const scroll = await swipeChat(chatBounds, 'up', 0.45, { speed: 2_600, settle: 100, eventDrivenSettle: true })
-              const settled = await waitForStableReplyRegion(chatBounds, 3_000, { settleSince: scroll.activityMark })
-              xml = settled.xml || await source()
-              question = currentQuestionText(xml, chatBounds)
-              unchangedAtTop = await imagesSimilar(locateFrame, settled.frame, 3) ? unchangedAtTop + 1 : 0
-              locateFrame = settled.frame
-            }
-            if (!question) {
-              await waitForVisualQuiet({ timeout: 900, fallbackMs: 300 })
-              xml = await source()
-              question = currentQuestionText(xml, chatBounds)
-            }
-          }
-          if (!question) throw new Error('无法从当前已有回答向上定位对应问题；本次未输入、未发送，也未新建会话。')
-        }
-        const artifacts = questionArtifactDirectories(batchArtifacts, 1, question)
-        await startQuestionLogging(artifacts, {
-          batch_id: path.basename(batchDirectory),
-          serial: payload.serial,
-          entry_id: activeEntry.id,
-          entry_label: activeEntry.label,
-          question,
-          question_index: 1,
-        })
-        log(`${payload.questions?.[0]
-          ? `capture: 使用调用方提供的已知问题文字“${question}”`
-          : `capture: 已从当前已有回答识别问题“${question}”`}，开始执行正文、引用资料和完整参考药品归档；不会输入或发送内容`)
-        const result = await saveArtifacts({
-          artifacts,
-          stem: '回答',
-          question,
-          status: 'existing_reply',
-          xml,
-          meta: {
-            serial: payload.serial,
-            batch_id: path.basename(batchDirectory),
-            question_index: 1,
-            question_directory: artifacts.diagnosticDirectory,
-            entry_id: activeEntry.id,
-            entry_label: activeEntry.label,
-            entry_package: activePackageName(),
-            existing_reply_capture: true,
-            input_performed: false,
-            send_performed: false,
-            new_session_performed: false,
-            ...existingReplyRecoveryMeta,
-            ui_backend: 'python_uiautomator2_strict',
-            ui_fallback_enabled: false,
-          },
-          captureMethod,
-          observerBaseline,
-          recoveryBaseline,
-        })
-        await finishQuestionLogging('question_completed', { status: 'existing_reply', screenshot: result.screenshot, metadata: result.metadata })
-        const summaryPath = path.join(batchArtifacts.diagnosticDirectory, 'batch-summary.json')
-        const summary = {
-          created_at: new Date().toISOString(),
-          serial: payload.serial,
-          mode: 'capture_current_existing_reply',
-          question_count: 1,
-          total: 1,
-          completed: 1,
-          failed: 0,
-          status: 'completed',
-          artifact_layout_version: ARTIFACT_LAYOUT_VERSION,
-          batch_directory: batchDirectory,
-          delivery_directory: batchArtifacts.deliveryDirectory,
-          diagnostic_directory: batchArtifacts.diagnosticDirectory,
-          event_log: batchEventLog.filePath,
-          summary: summaryPath,
-          results: [{
-            status: 'completed',
-            entry_id: activeEntry.id,
-            entry_label: activeEntry.label,
-            question,
-            question_index: 1,
-            delivery_directory: artifacts.deliveryDirectory,
-            diagnostic_directory: artifacts.diagnosticDirectory,
-            event_log: path.join(artifacts.diagnosticDirectory, '执行日志.jsonl'),
-            ...result,
-          }],
-        }
-        await fs.writeFile(summaryPath, JSON.stringify(summary, null, 2), 'utf8')
-        await batchEventLog.record('batch_completed', { category: 'lifecycle', details: { completed: 1, failed: 0, summary: summaryPath } })
-        return { ...result, summary: summaryPath }
-      } catch (error) {
-        await writePerformanceReport(activeQuestionArtifacts || batchArtifacts, 'failed').catch(() => {})
-        const diagnostics = await saveFailureDiagnostics(activeQuestionArtifacts || batchArtifacts, error, {
-          stem: activeQuestionArtifacts ? '失败现场' : '自动化失败现场',
-        })
-        await finishQuestionLogging('question_failed', {
-          error_name: error?.name || 'Error',
-          error_message: error?.message || String(error),
-          failure_diagnostics: diagnostics.manifest,
-        }).catch(() => {})
-        await batchEventLog.record('batch_failed', { category: 'error', details: { error_name: error?.name || 'Error', error_message: error?.message || String(error), failure_diagnostics: diagnostics.manifest } }).catch(() => {})
-        await fs.writeFile(path.join(batchArtifacts.diagnosticDirectory, 'automation-failure.json'), JSON.stringify({
-          created_at: new Date().toISOString(),
-          serial: payload.serial,
-          mode: 'capture_current_existing_reply',
-          artifact_layout_version: ARTIFACT_LAYOUT_VERSION,
-          batch_directory: batchDirectory,
-          delivery_directory: batchArtifacts.deliveryDirectory,
-          diagnostic_directory: batchArtifacts.diagnosticDirectory,
-          event_log: batchEventLog.filePath,
-          input_performed: false,
-          send_performed: false,
-          new_session_performed: false,
-          error_name: error?.name || 'Error',
-          error_message: error?.message || String(error),
-          stack: error?.stack || null,
-          ...seamDiagnosticsForError(error),
-          failure_diagnostics: diagnostics,
-          operation_telemetry: { ...telemetry.snapshot(), current_stage: currentStage },
-          performance_report: performanceReportPath(activeQuestionArtifacts || batchArtifacts),
-        }, null, 2), 'utf8').catch(() => {})
-        throw error
-      } finally {
-        await observer.stop().catch(() => {})
-        await restoreConnectedDevice().catch(error => log(`device: 恢复屏幕常亮设置失败：${error.message}`))
-        await ui.stop().catch(() => {})
-        await flushArtifactLogs().catch(() => {})
-      }
-      /* c8 ignore stop */
-    },
     async run(payload) {
       payload = { ...payload, newSession: true }
       activeSerial = payload.serial
@@ -1611,57 +1352,9 @@ function createRunner(options) {
 module.exports = {
   createRunner,
   CancelledError,
-  DOUYIN_MINIAPP_ENTRY_FILENAME,
-  DOUYIN_SEARCH_SUMMARY_FILENAME,
-  TOUTIAO_SEARCH_SUMMARY_FILENAME,
-  ARTIFACT_LAYOUT_VERSION,
   groupedBrandSummaries,
-  douyinSearchInput,
-  douyinGenericAiAnswerBounds,
-  douyinMiniAppEntryBounds,
-  douyinOcrViewFullTarget,
-  douyinSearchResultTarget,
-  douyinSearchResultsBounds,
-  douyinViewFullBounds,
-  douyinMiniAppCaptureBounds,
-  toutiaoGenericConsultationPage,
-  miniAppReferenceProductsTrigger,
-  miniAppQuestionFirstFrameCropBounds,
-  toutiaoHomeSearchBounds,
-  toutiaoSearchInput,
-  toutiaoSearchResultBelongsToQuestion,
-  toutiaoViewMoreBounds,
-  toutiaoOcrViewMoreTarget,
   waitForPackageHierarchy,
   prepareDeviceForAutomation,
   DEVICE_UNLOCK_TIMEOUT_MS,
   DEVICE_UNLOCK_POLL_MS,
-  buildReplyImages,
-  conservativeFallbackOverlap,
-  chatSwipePlan,
-  scrollEndConfirmed,
-  confirmQuestionAtTop,
-  scrollSingleQuestionSessionToTop,
-  confirmPersistentScrollEnd,
-  referenceProductsTrigger,
-  refreshedReferenceProductsTrigger,
-  referenceProductDrawerBounds,
-  referenceProductsCaptureComplete,
-  referenceProductSheetExpanded,
-  requireQuestionLocated,
-  calibratedProductFallbackOverlap,
-  referenceProductViewportReadiness,
-  prepareEmbeddedEvidence,
-  fillQuestionInput,
-  captureStableSandwich,
-  captureStableObserved,
-  observerRegionFallbackOptions,
-  failedRetryItems,
-  retryAttemptCount,
-  fatalBatchError,
-  runQuestionsWithRecovery,
-  captureFailureDiagnostics,
-  adbConnectionLost,
-  historyOnboardingVisible,
-  maxLongImageHeight,
 }

@@ -29,10 +29,6 @@ async function createBatchDirectory(outputRoot, now = new Date()) {
   }
 }
 
-function questionArtifactDirectory(batchDirectory, index, question) {
-  return path.join(batchDirectory, `${String(index).padStart(3, '0')}_${safeSlug(question)}`)
-}
-
 function batchArtifactDirectories(batchDirectory) {
   return {
     batchDirectory,
@@ -85,7 +81,6 @@ module.exports = {
   sleep,
   safeSlug,
   createBatchDirectory,
-  questionArtifactDirectory,
   batchArtifactDirectories,
   entryArtifactDirectories,
   questionArtifactDirectories,

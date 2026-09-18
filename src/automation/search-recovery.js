@@ -24,47 +24,9 @@ async function runDouyinSearchResultAttempts({ waitForResult }) {
   return { ...(await waitForResult(1)), attempt: 1, refreshed: false }
 }
 
-async function runToutiaoAnswerCardAttempts({ waitForResult, repeatExactSearch }) {
-  try {
-    return { ...(await waitForResult(1)), attempt: 1, repeated: false }
-  } catch (error) {
-    if (!(error instanceof ToutiaoAnswerCardNotFoundError)) throw error
-    await repeatExactSearch(error)
-  }
-  try {
-    return { ...(await waitForResult(2)), attempt: 2, repeated: true }
-  } catch (error) {
-    if (!(error instanceof ToutiaoAnswerCardNotFoundError)) throw error
-    throw new ToutiaoAnswerCardNotFoundError(
-      '头条使用相同问题受控重试后，搜索结果仍未出现小荷AI医生全文入口卡片。',
-      { cause: error },
-    )
-  }
-}
-
-async function runToutiaoFullAnswerAttempts({ initialTarget, openFullAnswer, repeatExactSearch, canRepeat = true }) {
-  try {
-    return { full: await openFullAnswer(initialTarget), target: initialTarget, attempt: 1, repeated: false }
-  } catch (error) {
-    if (!(error instanceof ToutiaoFullAnswerNotOpenedError) || !canRepeat) throw error
-    const repeatedTarget = await repeatExactSearch(error)
-    try {
-      return { full: await openFullAnswer(repeatedTarget), target: repeatedTarget, attempt: 2, repeated: true }
-    } catch (retryError) {
-      if (!(retryError instanceof ToutiaoFullAnswerNotOpenedError)) throw retryError
-      throw new ToutiaoFullAnswerNotOpenedError(
-        `头条使用相同问题重新搜索后，全文入口仍未进入可验证的本题全文页；最后一次原因：${retryError.message}`,
-        { cause: retryError },
-      )
-    }
-  }
-}
-
 module.exports = {
   DouyinSearchResultNotFoundError,
   ToutiaoAnswerCardNotFoundError,
   ToutiaoFullAnswerNotOpenedError,
   runDouyinSearchResultAttempts,
-  runToutiaoAnswerCardAttempts,
-  runToutiaoFullAnswerAttempts,
 }

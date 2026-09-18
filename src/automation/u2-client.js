@@ -28,6 +28,10 @@ const SEND_KEYS_TIMEOUT_MS = 45_000;
 // the first OCR request. Later calls reuse the same engine and are much faster.
 const OCR_TIMEOUT_MS = 60_000;
 const READ_RETRY_DELAY_MS = 500;
+// Resolve launcher Activity + am start + 25s foreground wait. The old 20s
+// budget expired inside uiautomator2's wait=True (also 20s) before the
+// sidecar could report a real launch error.
+const APP_START_TIMEOUT_MS = 45_000;
 
 function transientReadFailure(error) {
   if (error instanceof U2RequestTimeoutError) return true;
@@ -73,6 +77,7 @@ class U2Client {
     this.nextId = 1;
     this.stopping = false;
     this.startPromise = null;
+    this.restartPromise = null;
   }
 
   log(message) {
@@ -239,6 +244,14 @@ class U2Client {
   }
 
   async restart() {
+    if (this.restartPromise) return this.restartPromise;
+    this.restartPromise = this.#restartUnlocked().finally(() => {
+      this.restartPromise = null;
+    });
+    return this.restartPromise;
+  }
+
+  async #restartUnlocked() {
     const serial = this.serial;
     await this.stop();
     if (!serial)
@@ -320,7 +333,7 @@ class U2Client {
     return this.request(
       "app_start",
       { package: packageName },
-      { timeout: 20_000 }
+      { timeout: APP_START_TIMEOUT_MS }
     );
   }
 
@@ -363,6 +376,7 @@ module.exports = {
   U2RequestTimeoutError,
   SEND_KEYS_TIMEOUT_MS,
   OCR_TIMEOUT_MS,
+  APP_START_TIMEOUT_MS,
   READ_RETRY_DELAY_MS,
   transientReadFailure,
   developmentCommand,

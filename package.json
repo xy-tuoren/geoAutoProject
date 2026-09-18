@@ -1,6 +1,6 @@
 {
   "name": "question-automation-electron",
-  "version": "0.1.20",
+  "version": "0.1.21",
   "private": true,
   "description": "Cross-platform Electron operator panel for ADB question automation.",
   "repository": {
@@ -41,14 +41,6 @@
     ],
     "extraResources": [
       {
-        "from": "vendor/platform-tools/darwin",
-        "to": "vendor/platform-tools/darwin"
-      },
-      {
-        "from": "vendor/platform-tools/win32",
-        "to": "vendor/platform-tools/win32"
-      },
-      {
         "from": "vendor/u2-runtime",
         "to": "vendor/u2-runtime"
       },
@@ -63,6 +55,12 @@
     ],
     "mac": {
       "icon": "assets/icon.icns",
+      "extraResources": [
+        {
+          "from": "vendor/platform-tools/darwin",
+          "to": "vendor/platform-tools/darwin"
+        }
+      ],
       "target": [
         "dmg"
       ],
@@ -70,6 +68,12 @@
     },
     "win": {
       "icon": "assets/icon.ico",
+      "extraResources": [
+        {
+          "from": "vendor/platform-tools/win32",
+          "to": "vendor/platform-tools/win32"
+        }
+      ],
       "target": [
         "nsis"
       ],

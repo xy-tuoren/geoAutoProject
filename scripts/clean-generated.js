@@ -6,6 +6,8 @@ const generatedPaths = [
   'build',
   'dist',
   '.pytest_cache',
+  '.playwright-cli',
+  '.tmp-spreadsheet-read',
   'python/build',
   'python/dist',
   'python/.pytest_cache',
