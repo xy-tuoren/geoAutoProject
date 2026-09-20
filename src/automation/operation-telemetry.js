@@ -111,6 +111,8 @@ class OperationTelemetry {
         outcome: 'failed',
         error_name: error?.name || 'Error',
         error_message: error?.message || String(error),
+        error_code: error?.code || null,
+        error_details: error?.details || null,
       })
       throw error
     }
@@ -130,7 +132,7 @@ class OperationTelemetry {
       duration_ms: roundMilliseconds(Math.max(0, finishedAtMs - item.startedAtMs)),
       outcome: item.outcome,
       ...(Object.keys(item.details || {}).length ? { details: item.details } : {}),
-      ...(item.error_name ? { error_name: item.error_name, error_message: item.error_message } : {}),
+      ...(item.error_name ? { error_name: item.error_name, error_message: item.error_message, error_code: item.error_code, error_details: item.error_details } : {}),
     }
     this.operations.push(completed)
     if (this.operations.length > this.maxOperations) this.operations.splice(0, this.operations.length - this.maxOperations)

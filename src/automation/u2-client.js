@@ -1,23 +1,29 @@
-const { spawn } = require("node:child_process");
+const { spawn, execFile } = require("node:child_process");
 const readline = require("node:readline");
 const { sleep } = require("./utils");
+const { adbConnectionLost } = require("./device-bridge");
 const {
   bundledU2Executable,
   pythonProjectDirectory
 } = require("../runtime-paths");
 
 class U2ClientError extends Error {
-  constructor(message, { method, cause } = {}) {
+  constructor(message, { method, cause, code, details, remote = false, remoteType } = {}) {
     super(message, { cause });
     this.name = "U2ClientError";
     this.method = method;
+    this.code = code;
+    this.details = details;
+    this.remote = remote;
+    this.remoteType = remoteType;
   }
 }
 
 class U2RequestTimeoutError extends U2ClientError {
   constructor(method, timeout) {
     super(`Python uiautomator2 请求超时：${method}（${timeout}ms）`, {
-      method
+      method,
+      code: "U2_REQUEST_TIMEOUT"
     });
     this.name = "U2RequestTimeoutError";
   }
@@ -34,7 +40,9 @@ const READ_RETRY_DELAY_MS = 500;
 const APP_START_TIMEOUT_MS = 45_000;
 
 function transientReadFailure(error) {
+  if (error?.code === "U2_STOPPED") return false;
   if (error instanceof U2RequestTimeoutError) return true;
+  if (adbConnectionLost(error)) return true;
   return /Remote end closed connection|ECONNRESET|ECONNREFUSED|broken pipe|connection reset|请求超时|进程已退出|尚未启动|已停止/i.test(
     String(error?.message || error)
   );
@@ -75,8 +83,11 @@ class U2Client {
     this.serial = null;
     this.pending = new Map();
     this.nextId = 1;
-    this.stopping = false;
+    this.stopped = false;
+    this.stopGeneration = 0;
+    this.stopPromise = null;
     this.startPromise = null;
+    this.startGeneration = null;
     this.restartPromise = null;
   }
 
@@ -93,17 +104,30 @@ class U2Client {
 
   async start(serial) {
     this.serial = serial;
+    this.stopped = false;
+    const generation = this.stopGeneration;
+    if (this.startPromise && this.startGeneration !== generation) {
+      await this.startPromise.catch(() => {});
+    }
+    if (this.stopPromise) await this.stopPromise;
+    this.#checkActive(generation);
     if (this.startPromise) return this.startPromise;
-    this.startPromise = this.#start(serial).finally(() => {
+    this.startGeneration = generation;
+    this.startPromise = this.#start(serial, generation).finally(() => {
       this.startPromise = null;
     });
     return this.startPromise;
   }
 
-  async #start(serial) {
+  #checkActive(generation = this.stopGeneration) {
+    if (this.stopped || generation !== this.stopGeneration) {
+      throw new U2ClientError("Python uiautomator2已停止", { code: "U2_STOPPED" });
+    }
+  }
+
+  async #start(serial, generation) {
     if (this.process) return;
     const launch = this.command();
-    this.stopping = false;
     const child = spawn(launch.command, launch.args || [], {
       cwd: launch.cwd,
       env: utf8ProcessEnvironment({
@@ -111,6 +135,7 @@ class U2Client {
         ADBUTILS_ADB_PATH: this.options.adbPath
       }),
       stdio: ["pipe", "pipe", "pipe"],
+      detached: process.platform !== "win32",
       windowsHide: true
     });
     this.process = child;
@@ -141,9 +166,10 @@ class U2Client {
         { serial, adb_path: this.options.adbPath },
         this.options.startTimeout || 35_000
       );
+      this.#checkActive(generation);
       this.log(`已连接设备 ${serial}`);
     } catch (error) {
-      await this.stop();
+      await this.#stopProcess();
       throw error;
     }
   }
@@ -165,18 +191,21 @@ class U2Client {
       pending.reject(
         new U2ClientError(
           `Python uiautomator2 ${pending.method}失败：${message.error?.message || "未知错误"}`,
-          { method: pending.method }
+          {
+            method: pending.method,
+            code: message.error?.code || "U2_REMOTE_ERROR",
+            details: message.error?.details,
+            remote: true,
+            remoteType: message.error?.type
+          }
         )
       );
   }
 
   #rejectPending(error) {
-    const wasStopping = this.stopping;
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer);
-      pending.reject(
-        wasStopping ? new U2ClientError("Python uiautomator2已停止") : error
-      );
+      pending.reject(error);
     }
     this.pending.clear();
   }
@@ -192,6 +221,9 @@ class U2Client {
     params = {},
     timeout = this.options.requestTimeout || 7_000
   ) {
+    if (this.stopped) {
+      return Promise.reject(new U2ClientError("Python uiautomator2已停止", { method, code: "U2_STOPPED" }));
+    }
     if (!this.process?.stdin?.writable)
       return Promise.reject(
         new U2ClientError("Python uiautomator2尚未启动", { method })
@@ -221,17 +253,26 @@ class U2Client {
   }
 
   async request(method, params = {}, { timeout, retryRead = false } = {}) {
+    const generation = this.stopGeneration;
     let readRetries = 0;
     while (true) {
+      this.#checkActive(generation);
       try {
-        return await this.#requestOnce(method, params, timeout);
+        const result = await this.#requestOnce(method, params, timeout);
+        this.#checkActive(generation);
+        return result;
       } catch (error) {
+        this.#checkActive(generation);
         if (!retryRead) {
-          await this.restart().catch(() => {});
+          if (transientReadFailure(error)) {
+            await this.restart().catch((restartError) => {
+              this.log(`sidecar恢复失败：${restartError.message}`);
+            });
+          }
+          this.#checkActive(generation);
           throw error;
         }
-        const canRetry = readRetries === 0
-          || (readRetries < 2 && transientReadFailure(error));
+        const canRetry = readRetries < 2 && transientReadFailure(error);
         if (!canRetry) throw error;
         readRetries += 1;
         this.log(
@@ -244,6 +285,7 @@ class U2Client {
   }
 
   async restart() {
+    this.#checkActive();
     if (this.restartPromise) return this.restartPromise;
     this.restartPromise = this.#restartUnlocked().finally(() => {
       this.restartPromise = null;
@@ -253,7 +295,9 @@ class U2Client {
 
   async #restartUnlocked() {
     const serial = this.serial;
-    await this.stop();
+    const generation = this.stopGeneration;
+    await this.#stopProcess();
+    this.#checkActive(generation);
     if (!serial)
       throw new U2ClientError("缺少设备序列号，无法重启Python uiautomator2");
     return this.start(serial);
@@ -329,12 +373,24 @@ class U2Client {
     return this.request("press", { key });
   }
 
-  appStart(packageName) {
-    return this.request(
+  async appStart(packageName) {
+    const launch = () => this.request(
       "app_start",
       { package: packageName },
       { timeout: APP_START_TIMEOUT_MS }
     );
+    try {
+      return await launch();
+    } catch (error) {
+      if (error?.code !== "APP_FOREGROUND_MISMATCH"
+        && !/应用启动后前台应用不正确/.test(String(error?.message || error))) throw error;
+      const current = await this.currentApp();
+      if (current?.package === packageName) {
+        return { ...current, launch_activity: error?.details?.launch_activity, recovery: "late_foreground_confirmation" };
+      }
+      this.log(`目标应用未进入前台，只读复核仍为 ${current?.package || "unknown"}；正在重新拉起一次`);
+      return launch();
+    }
   }
 
   appStop(packageName) {
@@ -346,9 +402,36 @@ class U2Client {
   }
 
   async stop() {
+    this.stopped = true;
+    this.stopGeneration += 1;
+    this.#rejectPending(new U2ClientError("Python uiautomator2已停止", { code: "U2_STOPPED" }));
+    return this.#stopProcess();
+  }
+
+  async #stopProcess() {
+    if (this.stopPromise) return this.stopPromise;
+    this.stopPromise = this.#stopUnlocked().finally(() => {
+      this.stopPromise = null;
+    });
+    return this.stopPromise;
+  }
+
+  async #stopUnlocked() {
     const child = this.process;
     if (!child) return;
-    this.stopping = true;
+    if (this.stopped) {
+      // PyInstaller/uv can own children: stop the task process tree, never ADB's server.
+      if (process.platform === "win32") {
+        await new Promise(resolve => execFile("taskkill", ["/pid", String(child.pid), "/T", "/F"], { windowsHide: true, timeout: 2_000 }, () => {
+          if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+          resolve();
+        }));
+      } else {
+        try { process.kill(-child.pid, "SIGKILL"); } catch { child.kill("SIGKILL"); }
+      }
+      if (this.process === child) this.process = null;
+      return;
+    }
     child.stdin.end();
     const exited = new Promise((resolve) => child.once("exit", resolve));
     await Promise.race([
@@ -366,7 +449,6 @@ class U2Client {
       this.process = null;
       this.#rejectPending(new U2ClientError("Python uiautomator2已停止"));
     }
-    this.stopping = false;
   }
 }
 

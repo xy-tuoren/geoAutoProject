@@ -34,6 +34,10 @@ function diagnosticError(error, depth = 0) {
     name: error?.name || 'Error',
     message: error?.message || String(error),
     stack: error?.stack || null,
+    code: error?.code || null,
+    details: error?.details || null,
+    method: error?.method || null,
+    remote_type: error?.remoteType || null,
     ...(error?.cause && depth < 4 ? { cause: diagnosticError(error.cause, depth + 1) } : {}),
     ...(error?.replySeamDiagnostics ? {
       reply_seam_diagnostics: {
@@ -73,7 +77,9 @@ async function captureFailureDiagnostics({
   const hierarchyPath = path.join(directory, `${stem}.xml`)
   const ocrPath = path.join(directory, `${stem}_OCR.json`)
   const attempt = async task => {
-    try { return { ok: true, value: await task() } } catch (captureError) { return { ok: false, error: diagnosticError(captureError) } }
+    const started_at = now().toISOString()
+    try { return { ok: true, value: await task(), started_at, finished_at: now().toISOString() } }
+    catch (captureError) { return { ok: false, error: diagnosticError(captureError), started_at, finished_at: now().toISOString() } }
   }
   const [frameResult, deviceResult, observerResult] = await Promise.all([
     attempt(captureScreenshot),
@@ -125,6 +131,7 @@ async function captureFailureDiagnostics({
     entry_package: entry?.packageName || null,
     context,
     original_error: diagnosticError(error),
+    evidence_times: Object.fromEntries(Object.entries({ screenshot: frameResult, hierarchy: hierarchyResult, current_app: appResult, foreground_window: windowResult, device_state: deviceResult }).map(([key, value]) => [key, { started_at: value.started_at, finished_at: value.finished_at }])),
     screenshot,
     hierarchy,
     current_app: appResult.ok ? { status: 'captured', value: appResult.value } : { status: 'failed', error: appResult.error },

@@ -1,3 +1,6 @@
+const { createHash } = require('node:crypto')
+const { checkCancellation } = require('./cancellation')
+
 function normalizeOcrText(value) {
   return String(value || '')
     .normalize('NFKC')
@@ -48,14 +51,31 @@ function normalizeRecognition(result) {
 }
 
 class OcrRecognizer {
-  constructor({ transport }) {
+  constructor({ transport, onRecognition = () => {} }) {
     if (!transport || typeof transport.ocrRecognize !== 'function') throw new Error('OCR需要支持ocrRecognize的sidecar传输层。')
     this.transport = transport
+    this.onRecognition = onRecognition
+    this.cache = null
+    this.evidence = new WeakMap()
   }
 
   async recognize(image, options = {}) {
-    return normalizeRecognition(await this.transport.ocrRecognize(image, options))
+    checkCancellation()
+    const hash = createHash('sha256').update(image).digest('hex')
+    const key = `${hash}:${JSON.stringify(options)}`
+    const hit = this.cache?.key === key
+    if (!hit) {
+      const value = normalizeRecognition(await this.transport.ocrRecognize(image, options))
+      this.cache = { key, value, created_at: new Date().toISOString() }
+    }
+    const recognition = structuredClone(this.cache.value)
+    recognition.cacheHit = hit
+    this.evidence.set(recognition, { frame: image, sha256: hash, created_at: this.cache.created_at, options })
+    this.onRecognition(recognition)
+    return recognition
   }
+
+  evidenceFor(recognition) { return this.evidence.get(recognition) }
 }
 
 function findOcrText(recognition, matcher, { minConfidence = 0 } = {}) {

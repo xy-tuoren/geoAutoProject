@@ -36,3 +36,19 @@ test('OCR物理坐标按两个竖屏空间分别缩放到UI逻辑坐标', () => 
   )
   assert.throws(() => mapPhysicalBoundsToLogical([1, 1, 10, 10], { width: 1600, height: 720 }, { width: 1600, height: 720 }), /竖屏/)
 })
+
+test('只复用完全相同图片和选项的OCR结果，图像变化必须重新识别', async () => {
+  let calls = 0
+  const recognizer = new OcrRecognizer({ transport: { ocrRecognize: async () => { calls++; return rawRecognition } } })
+  const frame = Buffer.from('first')
+  const first = await recognizer.recognize(frame)
+  const repeat = await recognizer.recognize(Buffer.from('first'))
+  assert.equal(repeat.cacheHit, true)
+  repeat.results[0].text = 'modified'
+  assert.notEqual(first.results[0].text, 'modified')
+  assert.equal(calls, 1)
+  await recognizer.recognize(frame, { minConfidence: 0.8 })
+  await recognizer.recognize(Buffer.from('changed'), { minConfidence: 0.8 })
+  assert.equal(calls, 3)
+  assert.equal(recognizer.evidenceFor(first).frame, frame)
+})

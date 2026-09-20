@@ -17,6 +17,9 @@
       ...entry,
       succeeded: outcomes.filter(value => value === 'completed').length,
       failed: outcomes.filter(value => value === 'failed').length,
+      search_results_only: Object.values(entry.qualities || {}).filter(value => value.content_type === 'search_results_only').length,
+      app_limited: Object.values(entry.qualities || {}).filter(value => value.content_type === 'app_limited').length,
+      needs_review: Object.values(entry.qualities || {}).filter(value => value.quality_status === 'needs_review').length,
       finished: outcomes.length,
       status: statusFor(entry),
     }
@@ -33,6 +36,7 @@
         label: entry.label,
         total: Number(questionCount) || 0,
         outcomes: {},
+        qualities: {},
         active_question_index: null,
         active_question: null,
         started: false,
@@ -42,6 +46,7 @@
       const entry = state.entries.find(candidate => candidate.id === result.entry_id)
       if (!entry || !Number.isInteger(result.question_index)) continue
       if (result.status === 'completed' || result.status === 'failed') entry.outcomes[result.question_index] = result.status
+      if (result.status === 'completed') entry.qualities[result.question_index] = result
     }
     return { ...state, entries: state.entries.map(summarize) }
   }
@@ -56,7 +61,7 @@
     }
     const entries = state.entries.map(previous => {
       if (previous.id !== event.entry_id) return previous
-      const entry = { ...previous, outcomes: { ...previous.outcomes } }
+      const entry = { ...previous, outcomes: { ...previous.outcomes }, qualities: { ...previous.qualities } }
       if (event.type === 'entry_started') entry.started = true
       if (event.type === 'question_started') {
         entry.started = true
@@ -66,6 +71,8 @@
       if (event.type === 'question_completed' || event.type === 'question_failed') {
         entry.started = true
         entry.outcomes[event.question_index] = event.type === 'question_completed' ? 'completed' : 'failed'
+        if (event.type === 'question_completed') entry.qualities[event.question_index] = event
+        else delete entry.qualities[event.question_index]
         entry.active_question_index = null
         entry.active_question = null
       }

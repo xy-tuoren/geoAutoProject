@@ -49,6 +49,7 @@ function createQuestionWorkflows({
   getActiveEntry,
   getActivePackageName,
   restartDouyinEntry,
+  beforeQuestionSubmission = async () => {},
 }) {
   function activeEntryMetadata() {
     const entry = getActiveEntry()
@@ -125,6 +126,7 @@ function createQuestionWorkflows({
       ui_fallback_enabled: false,
     }
     log('stage: 正在执行抖音搜索')
+    await beforeQuestionSubmission()
     await tap((search[0] + search[2]) / 2, (search[1] + search[3]) / 2)
     let card
     try {
@@ -158,7 +160,6 @@ function createQuestionWorkflows({
     if (searchCapture.target.mode === 'smart_summary') {
       log('stage: 已找到小荷AI医生回答卡片，正在截取搜索结果智能总结')
       leadingScreenshotPath = path.join(artifacts.deliveryDirectory, DOUYIN_SEARCH_SUMMARY_FILENAME)
-      await fs.writeFile(leadingScreenshotPath, searchCapture.frame)
       Object.assign(meta, {
         douyin_result_mode: 'smart_summary',
         douyin_search_target_detection_method: searchCapture.detectionMethod,
@@ -167,7 +168,6 @@ function createQuestionWorkflows({
         douyin_miniapp_entry_detected: false,
         douyin_question_logical_image_count: 2,
       })
-      log(`capture: 抖音搜索结果智能总结已保存 ${leadingScreenshotPath}`)
       log('stage: 已找到小荷AI医生回答卡片，正在点击查看全文')
       full = await openDouyinFullAnswer(searchCapture.target.viewFull, card.size)
       captureMethod = () => captureDouyinFullAnswerFrames(full.xml, full.bounds)
@@ -218,10 +218,8 @@ function createQuestionWorkflows({
       observerBaseline,
       recoveryBaseline,
     })
-    if (searchCapture.target.mode !== 'smart_summary') {
-      await fs.writeFile(leadingScreenshotPath, searchCapture.frame)
-      log(`capture: 完整原题和回答已校验，抖音入口搜索页已保存 ${leadingScreenshotPath}`)
-    }
+    await fs.writeFile(leadingScreenshotPath, searchCapture.frame)
+    log(`capture: 完整原题和回答已校验，抖音入口搜索页已保存 ${leadingScreenshotPath}`)
     return searchCapture.target.mode === 'smart_summary'
       ? { summaryScreenshot: leadingScreenshotPath, ...result }
       : { entryScreenshot: leadingScreenshotPath, ...result }
@@ -261,6 +259,7 @@ function createQuestionWorkflows({
       ui_fallback_enabled: false,
     }
     log('stage: 正在执行头条搜索')
+    await beforeQuestionSubmission()
     await tap((search[0] + search[2]) / 2, (search[1] + search[3]) / 2)
     let card
     try {
@@ -351,6 +350,7 @@ function createQuestionWorkflows({
     log('stage: 正在发送问题')
     const sendMark = observer.active ? observer.mark() : null
     const replyStartedAt = Date.now()
+    await beforeQuestionSubmission()
     await tapSend()
     log('stage: 问题已发送，等待回答稳定')
     if (sendMark && observer.active && typeof observer.waitForActivity === 'function') {

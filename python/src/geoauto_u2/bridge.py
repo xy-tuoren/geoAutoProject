@@ -17,6 +17,17 @@ from geoauto_u2.ocr import OcrService
 class BridgeError(RuntimeError):
     """Raised when a bridge request is invalid or the device is unavailable."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "BRIDGE_ERROR",
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.details = details or {}
+
 
 _COMPONENT_RE = re.compile(r"^([A-Za-z0-9._]+)/([A-Za-z0-9._$]+)$")
 _DUMPSYS_COMPONENT_RE = re.compile(
@@ -290,7 +301,14 @@ class U2Bridge:
             if not pid or current.get("package") != package:
                 actual = current.get("package") or "unknown"
                 raise BridgeError(
-                    f"应用启动后前台应用不正确：expected={package}, actual={actual}"
+                    f"应用启动后前台应用不正确：expected={package}, actual={actual}",
+                    code="APP_FOREGROUND_MISMATCH",
+                    details={
+                        "expected_package": package,
+                        "actual_package": actual,
+                        "actual_activity": current.get("activity"),
+                        "launch_activity": activity,
+                    },
                 )
             return {**current, "launch_activity": activity}
         if method == "app_stop":
@@ -331,11 +349,20 @@ def serve(
             result = bridge.dispatch(method, params)
             response = {"id": request_id, "ok": True, "result": result}
         except Exception as error:  # noqa: BLE001 - protocol must report every failure
-            traceback.print_exc(file=sys.stderr)
+            if not isinstance(error, BridgeError):
+                traceback.print_exc(file=sys.stderr)
             response = {
                 "id": request_id,
                 "ok": False,
-                "error": {"type": type(error).__name__, "message": str(error)},
+                "error": {
+                    "type": type(error).__name__,
+                    "message": str(error),
+                    **(
+                        {"code": error.code, "details": error.details}
+                        if isinstance(error, BridgeError)
+                        else {}
+                    ),
+                },
             }
         output_stream.write(json.dumps(response, ensure_ascii=False) + "\n")
         output_stream.flush()

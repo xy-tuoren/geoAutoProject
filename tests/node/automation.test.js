@@ -13,7 +13,7 @@ const { loadQuestionFile } = require('../../src/questions')
 const { groupedBrandSummaries, prepareDeviceForAutomation, waitForPackageHierarchy } = require('../../src/automation/runner')
 const { adbConnectionLost } = require('../../src/automation/device-bridge')
 const { captureFailureDiagnostics } = require('../../src/automation/failure-diagnostics')
-const { CancelledError, failedRetryItems, retryAttemptCount, runQuestionsWithRecovery } = require('../../src/automation/batch-recovery')
+const { CancelledError, automationErrorInfo, failedRetryItems, fatalBatchError, retryAttemptCount, runQuestionsWithRecovery } = require('../../src/automation/batch-recovery')
 const { calibratedProductFallbackOverlap, miniAppReferenceProductsTrigger, referenceProductDrawerBounds, referenceProductsCaptureComplete, referenceProductSheetExpanded, referenceProductsTrigger, referenceProductViewportReadiness, refreshedReferenceProductsTrigger } = require('../../src/automation/reference-products')
 const { douyinGenericAiAnswerBounds, douyinMiniAppCaptureBounds, douyinMiniAppEntryBounds, douyinOcrConsultEntryTarget, douyinOcrViewFullTarget, douyinSearchInput, douyinSearchResultTarget, douyinSearchResultsBounds, douyinViewFullBounds, hierarchyLogicalSize, toutiaoAddToHomeScreenCancelBounds, toutiaoGenericConsultationPage, toutiaoHomeSearchBounds, toutiaoOcrViewMoreTarget, toutiaoSearchInput, toutiaoSearchResultBelongsToQuestion, toutiaoViewMoreBounds } = require('../../src/automation/miniapp-locators')
 const { automationEntries, ENTRY_DEFINITIONS, entryHierarchyStartupTimeout, hierarchyBelongsToPackage, normalizeAutomationEntries } = require('../../src/automation/entry-catalog')
@@ -918,6 +918,43 @@ test('用户停止属于致命错误，不会继续后续问题', async () => {
     recordFailure: async () => assert.fail('停止任务不应写成单题失败'),
   }), /任务已停止/)
   assert.deepEqual(executed, ['第一题'])
+})
+
+test('设备、sidecar和错误前台属于致命错误，不会级联到下一题', async () => {
+  const cases = [
+    new Error("adb.exe: device 'SERIAL' not found"),
+    new Error('error: device SERIAL not online'),
+    new Error('Python uiautomator2尚未启动'),
+    new Error('Python uiautomator2 current_app失败：Remote end closed connection without response'),
+    new Error('应用启动后前台应用不正确：expected=com.aurora.xiaohe.aidoctor, actual=com.ss.android.ugc.aweme'),
+  ]
+  for (const failure of cases) {
+    const executed = []
+    await assert.rejects(() => runQuestionsWithRecovery({
+      questions: ['第一题', '第二题'],
+      prepare: async () => { executed.push('prepare'); throw failure },
+      execute: async () => assert.fail('入口准备失败后不应执行题目'),
+      recordFailure: async () => assert.fail('基础设施故障不应记录成普通单题失败'),
+    }), error => error === failure)
+    assert.deepEqual(executed, ['prepare'])
+    assert.equal(fatalBatchError(failure), true)
+  }
+})
+
+test('用户错误摘要提供稳定错误码、处理建议和技术原文', () => {
+  assert.equal(automationErrorInfo(Object.assign(new Error('Python uiautomator2已停止'), { code: 'U2_STOPPED' })).code, 'TASK_CANCELLED')
+  const error = new Error('Python uiautomator2尚未启动')
+  error.diagnosticPath = 'C:\\batch\\调试产物\\失败现场.json'
+  assert.deepEqual(automationErrorInfo(error), {
+    code: 'UI_CONTROL_UNAVAILABLE',
+    title: '手机控制服务未恢复',
+    message: 'uiautomator2 控制服务不可用，任务已停止以避免继续操作错误页面。',
+    action: '请保持手机解锁并重新连接 USB；仍失败时重启手机后再试。',
+    fatal: true,
+    technical_message: 'Python uiautomator2尚未启动',
+    diagnostic_path: 'C:\\batch\\调试产物\\失败现场.json',
+    batch_directory: null,
+  })
 })
 
 test('抖音入口按真实搜索控件和回答卡片结构定位', () => {
@@ -2469,6 +2506,7 @@ test('到顶后通过OCR识别引用资料标题并按物理与逻辑尺寸映�
     'stable',
     'screenshot',
     'ocr',
+    ['diagnostic', [60, 400, 400, 440]],
   ])
   assert.equal(result.found, true)
   assert.equal(result.expanded, true)
@@ -2745,6 +2783,22 @@ test('展开文献只有紧邻标题的整行截断条目时仍可确认', () =>
   }
 
   assert.equal(evidenceSummaryExpandedByOcr(recognition, target), true)
+})
+
+test('多篇引用仅显示两条预览后接正文时不能算展开，覆盖两种竖屏尺寸', () => {
+  for (const scale of [1, 2 / 3]) {
+    const line = (text, bounds) => ({ text, normalizedText: text, confidence: 0.99, bounds: bounds.map(v => v * scale) })
+    const recognition = { image: { width: 1080 * scale, height: 2400 * scale }, results: [
+      line('参考6篇医学文献', [83, 632, 446, 678]),
+      line('1.非酒精性脂肪性肝病中医诊疗指南(患者科普版)', [85, 711, 853, 752]),
+      line('2.化滞柔肝颗粒联合硫普罗宁治疗非酒精性脂肪肝的...', [80, 776, 935, 817]),
+      line('非酒精性脂肪肝用药说明', [77, 832, 683, 888]),
+    ] }
+    const target = evidenceSummaryOcrTarget(recognition, { width: 1080 * scale, height: 2400 * scale }, [0, 300 * scale, 1080 * scale, 2200 * scale])
+    assert.equal(evidenceSummaryExpandedByOcr(recognition, target), false)
+    recognition.results.splice(3, 0, line('3.其他医学文献', [80, 825, 800, 865]))
+    assert.equal(evidenceSummaryExpandedByOcr(recognition, target), true)
+  }
 })
 
 test('组合引用卡无来源标签且OCR漏掉上箭头时用紧邻连续文献行确认展开', () => {
@@ -3839,6 +3893,9 @@ test('普通资料卡（Compose 面板但无横向药品列表）不会被误判
 
 test('仅为 ADB 短暂断连启用安装重试', () => {
   assert.equal(adbConnectionLost(new Error('adb: device offline')), true)
+  assert.equal(adbConnectionLost(new Error('error: device ljhassmnwst8lnvc not online')), true)
+  assert.equal(adbConnectionLost(new Error("adb.exe: device 'ljhassmnwst8lnvc' not found")), true)
+  assert.equal(adbConnectionLost(new Error('error: device unauthorized')), true)
   assert.equal(adbConnectionLost(new Error('Remote end closed connection without response')), false)
   assert.equal(adbConnectionLost(new Error('INSTALL_FAILED_UPDATE_INCOMPATIBLE')), false)
 })

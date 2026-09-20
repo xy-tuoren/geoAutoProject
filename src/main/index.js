@@ -3,7 +3,9 @@ const { autoUpdater } = require('electron-updater')
 const { execFile } = require('node:child_process')
 const fs = require('node:fs/promises')
 const path = require('node:path')
-const { createRunner, CancelledError } = require('../automation/runner')
+const { createRunner } = require('../automation/runner')
+const { automationErrorInfo } = require('../automation/batch-recovery')
+const { interruptRunning } = require('../automation/batch-state')
 const { automationEntries, normalizeAutomationEntries } = require('../automation/entry-catalog')
 const { loadQuestionFile } = require('../questions')
 const { parseProductWorkbook } = require('../product-question-import')
@@ -181,16 +183,19 @@ ipcMain.handle('automation:start', async (event, payload) => {
   updateManager?.notify()
   void runner.run(payload)
     .then(summary => {
+      if (activeTask === runner) activeTask = null
       log('执行完成')
       event.sender.send('automation:finished', { code: 0, summary })
     })
     .catch(error => {
-      logError('任务失败:', error.message)
-      event.sender.send('automation:log', `${error.stack || error.message}\n`)
-      event.sender.send('automation:finished', { code: error instanceof CancelledError ? 130 : 1 })
+      const info = automationErrorInfo(error)
+      if (info.code !== 'TASK_CANCELLED') logError('任务失败:', error.message)
+      event.sender.send('automation:log', `${info.code === 'TASK_CANCELLED' ? '停止' : '错误'}：${info.title}｜${info.message}\n处理：${info.action}${info.diagnostic_path ? `\n诊断：${info.diagnostic_path}` : ''}\n`)
+      if (activeTask === runner) activeTask = null
+      event.sender.send('automation:finished', { code: info.code === 'TASK_CANCELLED' ? 130 : 1, error: info, summary: error.batchSummary })
     })
     .finally(() => {
-      activeTask = null
+      if (activeTask === runner) activeTask = null
       updateManager?.notify()
     })
   return true
@@ -200,6 +205,20 @@ ipcMain.handle('automation:retry-failed', async (event, payload) => {
   if (activeTask) throw new Error('已有任务正在执行。')
   if (!payload?.serial || !payload?.batchDirectory) throw new Error('请选择 Android 设备并保留原批次后再重试。')
   payload.newSession = true
+  if (payload.resume) {
+    const summary = interruptRunning(JSON.parse(await fs.readFile(path.join(payload.batchDirectory, '调试产物', 'batch-summary.json'), 'utf8')))
+    if (summary.needs_confirmation) {
+      const choice = await dialog.showMessageBox({
+        type: 'question', title: '中断题目需要确认',
+        message: `有 ${summary.needs_confirmation} 题在中断时可能已输入或发送。`,
+        detail: '默认只继续未开始和已失败的题。选择重新采集中断题会重新搜索或提问，可能产生重复记录。',
+        buttons: ['仅继续未开始和失败题', '同时重新采集中断题', '取消'], defaultId: 0, cancelId: 2,
+      })
+      if (choice.response === 2) return false
+      payload.includeUncertain = choice.response === 1
+    } else payload.includeUncertain = false
+  }
+  if (activeTask) throw new Error('已有任务正在执行。')
   log('重试失败题:', `serial=${payload.serial}`, `batch=${payload.batchDirectory}`)
   const runner = createRunner({
     root: appRoot(),
@@ -216,16 +235,19 @@ ipcMain.handle('automation:retry-failed', async (event, payload) => {
   updateManager?.notify()
   void runner.retryFailedBatch(payload)
     .then(summary => {
+      if (activeTask === runner) activeTask = null
       log('失败题重试完成')
       event.sender.send('automation:finished', { code: 0, summary, retried: true })
     })
     .catch(error => {
-      logError('失败题重试失败:', error.message)
-      event.sender.send('automation:log', `${error.stack || error.message}\n`)
-      event.sender.send('automation:finished', { code: error instanceof CancelledError ? 130 : 1, retried: true })
+      const info = automationErrorInfo(error)
+      if (info.code !== 'TASK_CANCELLED') logError('失败题重试失败:', error.message)
+      event.sender.send('automation:log', `${info.code === 'TASK_CANCELLED' ? '停止' : '错误'}：${info.title}｜${info.message}\n处理：${info.action}${info.diagnostic_path ? `\n诊断：${info.diagnostic_path}` : ''}\n`)
+      if (activeTask === runner) activeTask = null
+      event.sender.send('automation:finished', { code: info.code === 'TASK_CANCELLED' ? 130 : 1, error: info, summary: error.batchSummary, retried: true })
     })
     .finally(() => {
-      activeTask = null
+      if (activeTask === runner) activeTask = null
       updateManager?.notify()
     })
   return true
@@ -237,7 +259,8 @@ ipcMain.handle('automation:stop', async () => {
     return
   }
   log('正在停止任务…')
-  await activeTask.stop()
+  void activeTask.stop().catch(error => logError('停止控制服务失败:', error.message))
+  return { stopping: true }
 })
 
 ipcMain.handle('clipboard:write', (_event, text) => {

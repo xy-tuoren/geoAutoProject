@@ -289,6 +289,20 @@ function evidenceSummaryExpansionSignals(recognition, target) {
     && /^[0-9]{1,2}[.、．]/.test(item.normalizedText)
     && item.bounds[1] >= target.physicalBounds[3]
     && item.bounds[1] <= citationMaximumY)
+  // The collapsed miniapp card can already preview citations 1 and 2.
+  // If the answer starts next, those rows do not prove the whole list opened.
+  const declaredCount = [...target.normalizedText.matchAll(/([0-9]+)(?:篇|份|条|部|本|项|则)/g)]
+    .reduce((total, match) => total + Number(match[1]), 0)
+  const secondCitation = citationRows.find(row => /^2[.、．]/.test(row.normalizedText))
+  const nextRow = secondCitation && recognition.results.filter(row => row.confidence >= 0.8
+    && row.bounds[1] > secondCitation.bounds[3]
+    && row.bounds[1] <= secondCitation.bounds[3] + recognition.image.height * 0.04
+    && Math.abs(row.bounds[0] - target.physicalBounds[0]) <= recognition.image.width * 0.04)
+    .sort((a, b) => a.bounds[1] - b.bounds[1])[0]
+  if (!arrowExpanded && declaredCount > 2 && citationRows.some(row => /^1[.、．]/.test(row.normalizedText))
+    && nextRow && !/^3[.、．]/.test(nextRow.normalizedText)) {
+    return { expanded: false, arrowExpanded: false, citationRows: false, bibliographicCitationRow: false, legacyReferenceLabel: false }
+  }
   // Combined cards can render a single-column bibliography without a source
   // badge, and RapidOCR may omit the tiny upward chevron. In that layout the
   // first two sequential citation rows start immediately below the title.
@@ -488,6 +502,7 @@ async function prepareEmbeddedEvidence({
   const diagnostic = {
     created_at: new Date().toISOString(),
     purpose: 'xiaohe_embedded_evidence',
+    chat_bounds: bounds,
     matcher: {
       patterns: EVIDENCE_SUMMARY_OCR_MATCHERS.map(item => ({
         variant: item.variant,
@@ -603,6 +618,7 @@ async function prepareEmbeddedEvidence({
       panel_growth: growth,
       expanded: confirmationExpanded,
     })
+    setLastOcrDiagnostic({ ...diagnostic, purpose: 'xiaohe_embedded_evidence_confirmation', recognition: confirmation, target: confirmationTarget, confirmation_attempt: attempt })
     log(`ocr: purpose=xiaohe_embedded_evidence_confirmation attempt=${attempt} outcome=${confirmationExpanded ? 'expanded' : (confirmationTarget ? 'collapsed' : 'not_found')} differential=${differential.confirmed ? 'confirmed' : differential.reason} engine=${confirmation.engine} elapsed=${Math.round(confirmation.elapsedMs)}ms`)
     return { target: confirmationTarget, expanded: confirmationExpanded, signals }
   }

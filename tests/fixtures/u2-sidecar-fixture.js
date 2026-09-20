@@ -9,14 +9,17 @@ function countedFailure(method) {
   const count = fs.existsSync(stateFile) ? Number(fs.readFileSync(stateFile, 'utf8')) || 0 : 0
   if (count >= limit) return null
   fs.writeFileSync(stateFile, String(count + 1))
-  return process.env.U2_FIXTURE_COUNTED_FAIL_MESSAGE || 'forced counted failure'
+  return {
+    message: process.env.U2_FIXTURE_COUNTED_FAIL_MESSAGE || 'forced counted failure',
+    code: process.env.U2_FIXTURE_COUNTED_FAIL_CODE || undefined,
+  }
 }
 
 readline.createInterface({ input: process.stdin }).on('line', line => {
   const request = JSON.parse(line)
-  const countedFailureMessage = countedFailure(request.method)
-  if (countedFailureMessage) {
-    process.stdout.write(`${JSON.stringify({ id: request.id, ok: false, error: { type: 'FixtureError', message: countedFailureMessage } })}\n`)
+  const countedFailureResult = countedFailure(request.method)
+  if (countedFailureResult) {
+    process.stdout.write(`${JSON.stringify({ id: request.id, ok: false, error: { type: 'FixtureError', ...countedFailureResult } })}\n`)
     return
   }
   if (request.method === process.env.U2_FIXTURE_FAIL_METHOD) {

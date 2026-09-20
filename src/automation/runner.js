@@ -1,5 +1,10 @@
 const fs = require('node:fs/promises')
 const path = require('node:path')
+const { randomUUID } = require('node:crypto')
+const { withCancellation } = require('./cancellation')
+const { writeJsonAtomic, updateResult, refreshSummary, interruptRunning, resumeItems, createQuestionAttempt, publishQuestion } = require('./batch-state')
+const { hasAppLimitedNotice } = require('./result-quality')
+const { captureEnvironment } = require('./environment-report')
 const { execFileSync } = require('node:child_process')
 const { sleep, createBatchDirectory, batchArtifactDirectories, taskArtifactDirectories } = require('./utils')
 const { normalizeQuestionPlan, brandExecutionUnits, safeDirectorySegment } = require('../question-plan')
@@ -19,8 +24,8 @@ const {
   entryHierarchyStartupTimeout,
 } = require('./entry-catalog')
 const { bundledScrcpyServer } = require('../runtime-paths')
-const { adbCommand, waitForAdbDevice, adbScreenshot, adbCommandWithReconnect } = require('./device-bridge')
-const { CancelledError, fatalBatchError, runQuestionsWithRecovery, failedRetryItems, retryAttemptCount } = require('./batch-recovery')
+const { adbCommand, waitForAdbDevice, adbScreenshot, adbCommandWithReconnect, adbCommandOnceConnected } = require('./device-bridge')
+const { CancelledError, automationErrorInfo, fatalBatchError, runQuestionsWithRecovery, failedRetryItems, retryAttemptCount } = require('./batch-recovery')
 const { captureFailureDiagnostics, diagnosticError } = require('./failure-diagnostics')
 const {
   DEFAULT_MAX_LONG_IMAGE_HEIGHT,
@@ -141,6 +146,16 @@ function groupedBrandSummaries(brandGroups, entries, results) {
 
 function createRunner(options) {
   let cancelled = false
+  const controller = new AbortController()
+  let stopPromise = null
+  let batchState = null
+  let observedLimitation = false
+  let runId = randomUUID()
+  let evidencePending = Promise.resolve()
+  let evidenceError = null
+  let latestHierarchy = null
+  let inFlightScreenshot = null
+  const screenshotTimes = new WeakMap()
   let activeSerial = null
   let activeEntry = ENTRY_DEFINITIONS[DEFAULT_ENTRY_ID]
   let cachedInputBounds = null
@@ -222,14 +237,46 @@ function createRunner(options) {
       const value = Reflect.get(object, property, object)
       const operation = operations[property]
       if (!operation || typeof value !== 'function') return typeof value === 'function' ? value.bind(object) : value
-      return (...args) => telemetry.measure(operation, () => value.apply(object, args), {
+      return (...args) => telemetry.measure(operation, async () => {
+        if (!['stop', 'restoreDevicePower'].includes(property)) checkCancelled()
+        if (['click', 'sendKeys', 'setFocusedText', 'press', 'appStart', 'appStop'].includes(property)) {
+          await evidencePending
+          if (evidenceError) throw evidenceError
+          checkCancelled()
+        }
+        return value.apply(object, args)
+      }, {
         backend,
         details: detailsFor(property, args),
       })
     },
   })
   const ui = measuredProxy(rawUi, 'python_uiautomator2', uiOperations, uiDetails)
-  const ocr = options.ocrRecognizer || new OcrRecognizer({ transport: ui })
+  const ocr = options.ocrRecognizer || new OcrRecognizer({ transport: ui, onRecognition: recognition => {
+    observedLimitation ||= hasAppLimitedNotice(recognition.results.map(item => item.text).join(''))
+    if (recognition.cacheHit) batchEventLog?.record('ocr_exact_frame_reused', { category: 'performance', context: activeQuestionContext })
+  } })
+  function rememberRecognition(value) {
+    lastOcrDiagnostic = value
+    if (!activeQuestionArtifacts) return
+    const evidence = ocr.evidenceFor?.(value.recognition)
+    const directory = path.join(activeQuestionArtifacts.diagnosticDirectory, '关键识别')
+    const stem = `${value.purpose || 'ocr'}${value.phase ? `_${value.phase}` : ''}`.replace(/[^a-zA-Z0-9_-]/g, '_')
+    const detail = structuredClone({ ...value, question: activeQuestionContext.question,
+      logical_size: value.logical_size || (latestHierarchy ? require('./miniapp-locators').hierarchyLogicalSize(latestHierarchy.xml, value.recognition?.image) : null),
+      hierarchy: latestHierarchy?.xml || '', hierarchy_captured_at: latestHierarchy?.created_at || null,
+      frame_file: evidence ? `${stem}.png` : null, frame_sha256: evidence?.sha256 || null,
+      frame_captured_at: evidence ? screenshotTimes.get(evidence.frame) || null : null,
+      ocr_completed_at: evidence?.created_at || null,
+      rejection_reason: value.target ? null : '未同时满足定位器的身份、置信度与空间位置规则',
+      attempt_id: activeQuestionArtifacts.attempt_id,
+    })
+    evidencePending = evidencePending.then(async () => {
+      await fs.mkdir(directory, { recursive: true })
+      if (evidence) await fs.writeFile(path.join(directory, `${stem}.png`), evidence.frame)
+      await writeJsonAtomic(path.join(directory, `${stem}.json`), detail)
+    }).catch(error => { evidenceError ||= error })
+  }
   const rawObserver = options.scrcpyObserver || new ScrcpyObserver({
     adbPath: options.adbPath,
     serverPath: bundledScrcpyServer(options),
@@ -256,6 +303,10 @@ function createRunner(options) {
   }
 
   async function prepareConnectedDevice() {
+    // Preserve the original setting before the sidecar can be interrupted mid-request.
+    const original = (await adbCommand(options.adbPath, activeSerial, ['shell', 'settings', 'get', 'global', 'stay_on_while_plugged_in'], { timeout: 3_000 })).trim()
+    if (!/^(?:null|\d+)$/.test(original)) throw new Error('无法读取任务开始前的常亮设置，未更改设备。')
+    preparedDevicePower = { stay_awake_original: original === 'null' ? null : Number(original) }
     await prepareDeviceForAutomation({
       ui,
       log,
@@ -279,7 +330,7 @@ function createRunner(options) {
       const settingArgs = preparation.stay_awake_original === null
         ? ['shell', 'settings', 'delete', 'global', 'stay_on_while_plugged_in']
         : ['shell', 'settings', 'put', 'global', 'stay_on_while_plugged_in', String(preparation.stay_awake_original)]
-      await telemetry.measure('adb.restore_device_power', () => adbCommandWithReconnect(options.adbPath, activeSerial, settingArgs), {
+      await telemetry.measure('adb.restore_device_power', () => adbCommand(options.adbPath, activeSerial, settingArgs, { timeout: 3_000 }), {
         backend: 'adb',
         details: { reason: 'uiautomator2_sidecar_unavailable_during_cleanup' },
       })
@@ -301,7 +352,7 @@ function createRunner(options) {
     batchEventLog = new EventLog({
       filePath: path.join(artifacts.diagnosticDirectory, '执行日志.jsonl'),
       scope: 'batch',
-      context: { batch_id: path.basename(artifacts.batchDirectory), serial: payload.serial, mode },
+      context: { batch_id: path.basename(artifacts.batchDirectory), serial: payload.serial, mode, run_id: runId },
     })
     await batchEventLog.record('batch_started', {
       category: 'lifecycle',
@@ -314,15 +365,19 @@ function createRunner(options) {
   }
 
   async function startQuestionLogging(artifacts, context) {
+    await evidencePending
+    if (evidenceError) throw evidenceError
     activeQuestionArtifacts = artifacts
     lastOcrDiagnostic = null
     currentStage = null
-    activeQuestionContext = { ...context }
-    telemetry.beginQuestion(context)
+    observedLimitation = false
+    latestHierarchy = null
+    activeQuestionContext = { ...context, run_id: runId, attempt_id: artifacts.attempt_id, attempt_number: artifacts.attempt_number }
+    telemetry.beginQuestion(activeQuestionContext)
     activeQuestionEventLog = new EventLog({
       filePath: path.join(artifacts.diagnosticDirectory, '执行日志.jsonl'),
       scope: 'question',
-      context,
+      context: activeQuestionContext,
     })
     await activeQuestionEventLog.record('question_context_ready', {
       category: 'lifecycle',
@@ -349,6 +404,8 @@ function createRunner(options) {
 
   async function finishQuestionLogging(event, details = {}) {
     if (!activeQuestionEventLog) return
+    await evidencePending
+    if (evidenceError) throw evidenceError
     let performanceResult = null
     let performanceError = null
     try {
@@ -369,7 +426,7 @@ function createRunner(options) {
     })
     await activeQuestionEventLog.record(event, { category: event === 'question_failed' ? 'error' : 'lifecycle', details: finalDetails })
     await activeQuestionEventLog.flush()
-    emitProgress({ type: event, ...activeQuestionContext })
+    emitProgress({ type: event, ...activeQuestionContext, ...details })
     activeQuestionEventLog = null
     activeQuestionContext = {}
     activeQuestionArtifacts = null
@@ -551,10 +608,16 @@ function createRunner(options) {
   async function screenshot() {
     checkCancelled()
     adbPngCaptures += 1
-    return telemetry.measure('adb.screenshot', () => adbScreenshot(options.adbPath, activeSerial), {
+    const pending = telemetry.measure('adb.screenshot', () => adbScreenshot(options.adbPath, activeSerial), {
       backend: 'adb',
       details: { format: 'png', coordinate_space: 'adb_screenshot_physical_pixels' },
     })
+    inFlightScreenshot = pending
+    try {
+      const frame = await pending
+      screenshotTimes.set(frame, new Date().toISOString())
+      return frame
+    } finally { if (inFlightScreenshot === pending) inFlightScreenshot = null }
   }
 
   async function source() {
@@ -565,6 +628,7 @@ function createRunner(options) {
     // in front. Retry only this read-only operation; clicks are never replayed.
     for (let attempt = 0; attempt < 3; attempt += 1) {
       xml = await ui.dumpHierarchy()
+      latestHierarchy = { xml, created_at: new Date().toISOString() }
       if (hierarchyBelongsToPackage(xml, activePackageName())) return xml
       if (attempt < 2) {
         await telemetry.measure('wait.hierarchy_retry_backoff', () => sleep(120), {
@@ -589,14 +653,14 @@ function createRunner(options) {
 
   async function swipe(x, fromY, toY, duration = 250) {
     checkCancelled()
-    await telemetry.measure('adb.swipe', () => adbCommandWithReconnect(options.adbPath, activeSerial, ['shell', 'input', 'swipe', String(Math.round(x)), String(Math.round(fromY)), String(Math.round(x)), String(Math.round(toY)), String(Math.round(duration))]), {
+    await telemetry.measure('adb.swipe', () => adbCommandOnceConnected(options.adbPath, activeSerial, ['shell', 'input', 'swipe', String(Math.round(x)), String(Math.round(fromY)), String(Math.round(x)), String(Math.round(toY)), String(Math.round(duration))]), {
       backend: 'adb',
       details: { x: Math.round(x), from_y: Math.round(fromY), to_y: Math.round(toY), requested_duration_ms: Math.round(duration), coordinate_space: 'uiautomator2_logical_pixels' },
     })
   }
 
   async function windowSize() {
-    const { width, height } = await imageInfo(await screenshot())
+    const { width, height } = await imageInfo(await (inFlightScreenshot || screenshot()))
     return { width, height }
   }
 
@@ -618,6 +682,11 @@ function createRunner(options) {
   }
 
   async function saveFailureDiagnostics(artifacts, error, { stem = '失败现场' } = {}) {
+    if (cancelled) {
+      const manifest = path.join(artifacts.diagnosticDirectory, `${stem}.json`)
+      await writeJsonAtomic(manifest, { created_at: new Date().toISOString(), original_error: diagnosticError(error), context: activeQuestionContext, current_stage: currentStage, operation_telemetry: telemetry.snapshot(), live_capture_skipped: '用户停止：不再请求手机现场' })
+      return { manifest, screenshot: null, hierarchy: null, ocr: null }
+    }
     try {
       const diagnostics = await captureFailureDiagnostics({
         directory: artifacts.diagnosticDirectory,
@@ -705,7 +774,7 @@ function createRunner(options) {
     log,
     screenshot,
     ocr,
-    setLastOcrDiagnostic: value => { lastOcrDiagnostic = value },
+    setLastOcrDiagnostic: rememberRecognition,
     swipeChat,
     waitForVisualQuiet,
     tap,
@@ -725,7 +794,7 @@ function createRunner(options) {
     log,
     screenshot,
     ocr,
-    setLastOcrDiagnostic: value => { lastOcrDiagnostic = value },
+    setLastOcrDiagnostic: rememberRecognition,
     waitForVisualQuiet,
     tap,
     ui,
@@ -769,7 +838,7 @@ function createRunner(options) {
     waitForFinalVisualQuiet,
     waitForVisualQuiet,
     ocr,
-    setLastOcrDiagnostic: value => { lastOcrDiagnostic = value },
+    setLastOcrDiagnostic: rememberRecognition,
   })
   const {
     scrollQuestionIntoView,
@@ -798,6 +867,8 @@ function createRunner(options) {
     observerMetadata,
     getBatchEventLog: () => batchEventLog,
     log,
+    getObservedLimitation: () => observedLimitation,
+    checkCancelled,
   })
 
 
@@ -843,6 +914,12 @@ function createRunner(options) {
       await sleep(800)
       await prepareEntry(entry)
     },
+    beforeQuestionSubmission: async () => {
+      checkCancelled()
+      updateResult(batchState.results, { ...activeQuestionContext, status: 'running', submission_started: true })
+      await checkpoint()
+      checkCancelled()
+    },
   })
 
 
@@ -864,8 +941,50 @@ function createRunner(options) {
     else await waitForInput(15_000)
   }
 
-  return {
-    async run(payload) {
+  async function checkpoint(status = 'running') {
+    if (!batchState) return
+    refreshSummary(batchState, status)
+    batchState.brands = batchState.question_plan_mode === 'grouped'
+      ? groupedBrandSummaries(batchState.brand_groups, batchState.entries, batchState.results) : []
+    await writeJsonAtomic(batchState.summary, batchState)
+  }
+
+  async function cleanup() {
+    await withCancellation(null, async () => {
+      await observer.stop().catch(() => {})
+      await restoreConnectedDevice().catch(error => log(`device: 恢复屏幕常亮设置失败：${error.message}`))
+      await ui.stop().catch(() => {})
+      await evidencePending
+      await flushArtifactLogs().catch(error => options.log(`日志保存失败：${error.message}\n`))
+    })
+  }
+
+  const runner = {
+    run(payload) { return withCancellation(controller.signal, () => runBatch(payload)) },
+    retryFailedBatch(payload) { return withCancellation(controller.signal, () => retryBatch(payload)) },
+    async stop() {
+      if (stopPromise) return stopPromise
+      cancelled = true
+      batchEventLog?.record('stop_requested', { category: 'lifecycle', context: activeQuestionContext, details: { current_stage: currentStage } })
+      controller.abort(new CancelledError())
+      emitProgress({ type: 'stopping' })
+      // Interrupt pending UI/OCR first; power restoration belongs to run's finally.
+      stopPromise = Promise.allSettled([rawUi.stop(), rawObserver.stop()])
+      return stopPromise
+    },
+    restoreDevicePowerOnProcessExit() {
+      const preparation = preparedDevicePower
+      preparedDevicePower = null
+      if (!preparation || !activeSerial) return false
+      const settingArgs = preparation.stay_awake_original === null
+        ? ['shell', 'settings', 'delete', 'global', 'stay_on_while_plugged_in']
+        : ['shell', 'settings', 'put', 'global', 'stay_on_while_plugged_in', String(preparation.stay_awake_original)]
+      execFileSync(options.adbPath, ['-s', activeSerial, ...settingArgs], { encoding: 'utf8', timeout: 3_000, windowsHide: true })
+      return true
+    },
+  }
+
+  async function runBatch(payload) {
       payload = { ...payload, newSession: true }
       activeSerial = payload.serial
       payloadMaxLongImageHeight = maxLongImageHeight(payload.maxLongImageHeight)
@@ -880,6 +999,19 @@ function createRunner(options) {
       const batchArtifacts = batchArtifactDirectories(batchDirectory)
       await initializeArtifactLogging(batchArtifacts, payload, 'batch_questions')
       const brandManifestPath = grouped ? path.join(batchArtifacts.diagnosticDirectory, '品牌执行清单.json') : null
+      batchState = {
+        created_at: new Date().toISOString(), serial: payload.serial, artifact_layout_version: ARTIFACT_LAYOUT_VERSION,
+        batch_directory: batchDirectory, delivery_directory: batchArtifacts.deliveryDirectory,
+        diagnostic_directory: batchArtifacts.diagnosticDirectory, event_log: batchEventLog.filePath,
+        entries: entries.map(entry => ({ id: entry.id, label: entry.label, package: entry.packageName })),
+        question_plan_mode: questionPlan.mode, brand_groups: questionPlan.brandGroups, brand_manifest: brandManifestPath,
+        question_count: questionPlan.tasks.length, total: entries.length * questionPlan.tasks.length,
+        results: executionUnits.flatMap(unit => entries.flatMap(entry => unit.tasks.map(task => ({
+          ...task, entry_id: entry.id, entry_label: entry.label, status: 'pending',
+        })))),
+        summary: path.join(batchArtifacts.diagnosticDirectory, 'batch-summary.json'),
+      }
+      await checkpoint()
       if (brandManifestPath) {
         await fs.writeFile(brandManifestPath, JSON.stringify({
           created_at: new Date().toISOString(),
@@ -899,6 +1031,10 @@ function createRunner(options) {
         await waitForDevice()
         await ui.start(payload.serial)
         await prepareConnectedDevice()
+        const environmentPath = path.join(batchArtifacts.diagnosticDirectory, `环境_${runId}.json`)
+        await writeJsonAtomic(environmentPath, await captureEnvironment(options.adbPath, activeSerial, entries))
+        batchState.environment_reports = [environmentPath]
+        await checkpoint()
         try {
           await observer.start(payload.serial)
         } catch (error) {
@@ -907,7 +1043,7 @@ function createRunner(options) {
         log(`device=${payload.serial} entries=${entries.map(entry => entry.id).join(',')} batch=${batchDirectory}`)
         let completed = 0
         let failed = 0
-        const results = []
+        const results = batchState.results
         const failures = []
         for (const [unitIndex, unit] of executionUnits.entries()) {
           if (grouped) {
@@ -930,7 +1066,7 @@ function createRunner(options) {
             const entryResult = await runQuestionsWithRecovery({
               questions: unit.tasks,
               beforeQuestion: async task => {
-                const artifacts = taskArtifactDirectories(batchArtifacts, entryIndex + 1, entry.label, entries.length, task, grouped)
+                const artifacts = await createQuestionAttempt(taskArtifactDirectories(batchArtifacts, entryIndex + 1, entry.label, entries.length, task, grouped))
                 const taskContext = grouped ? {
                   brand: task.brand,
                   brand_index: task.brand_index,
@@ -946,11 +1082,13 @@ function createRunner(options) {
                   question_index: task.question_index,
                   ...taskContext,
                 })
+                updateResult(results, { ...task, entry_id: entry.id, status: 'running', submission_started: false, diagnostic_directory: artifacts.diagnosticDirectory, attempt_id: artifacts.attempt_id })
+                await checkpoint()
                 log(`[${entryIndex + 1}/${entries.length} ${task.question_index}/${questionPlan.tasks.length}] task ready via ${entry.label}: ${task.question}`)
               },
               prepare: () => prepareEntry(entry),
               execute: async task => {
-                const artifacts = taskArtifactDirectories(batchArtifacts, entryIndex + 1, entry.label, entries.length, task, grouped)
+                const artifacts = activeQuestionArtifacts
                 const taskContext = grouped ? {
                   brand: task.brand,
                   brand_index: task.brand_index,
@@ -958,24 +1096,27 @@ function createRunner(options) {
                   global_question_index: task.global_question_index,
                 } : {}
                 log(`[${entryIndex + 1}/${entries.length} ${task.question_index}/${questionPlan.tasks.length}] asking via ${entry.label}: ${task.question}`)
-                const result = await askOnce({ ...payload, taskContext }, artifacts, task.question, task.question_index)
+                const captured = await askOnce({ ...payload, taskContext }, artifacts, task.question, task.question_index)
+                checkCancelled()
+                const result = await publishQuestion(artifacts, captured)
                 log(JSON.stringify(result))
-                results.push({
+                updateResult(results, {
                   status: 'completed',
                   entry_id: entry.id,
                   entry_label: entry.label,
                   question: task.question,
                   question_index: task.question_index,
                   ...taskContext,
-                  delivery_directory: artifacts.deliveryDirectory,
+                  delivery_directory: artifacts.finalDeliveryDirectory,
                   diagnostic_directory: artifacts.diagnosticDirectory,
                   event_log: path.join(artifacts.diagnosticDirectory, '执行日志.jsonl'),
                   ...result,
                 })
-                await finishQuestionLogging('question_completed', { screenshot: result.screenshot, metadata: result.metadata })
+                await checkpoint()
+                await finishQuestionLogging('question_completed', result)
               },
               recordFailure: async (error, task) => {
-                const artifacts = taskArtifactDirectories(batchArtifacts, entryIndex + 1, entry.label, entries.length, task, grouped)
+                const artifacts = activeQuestionArtifacts
                 const taskContext = grouped ? {
                   brand: task.brand,
                   brand_index: task.brand_index,
@@ -985,6 +1126,7 @@ function createRunner(options) {
                 const directory = artifacts.diagnosticDirectory
                 const failurePath = path.join(directory, '失败.json')
                 const diagnostics = await saveFailureDiagnostics(artifacts, error)
+                const errorInfo = automationErrorInfo(error)
                 const failure = {
                   created_at: new Date().toISOString(),
                   status: 'failed',
@@ -1007,6 +1149,9 @@ function createRunner(options) {
                   batch_continued: true,
                   error_name: error?.name || 'Error',
                   error_message: error?.message || String(error),
+                  error_code: errorInfo.code,
+                  user_message: errorInfo.message,
+                  recommended_action: errorInfo.action,
                   stack: error?.stack || null,
                   ...seamDiagnosticsForError(error),
                   failure_diagnostics: diagnostics,
@@ -1025,7 +1170,7 @@ function createRunner(options) {
                   error_message: failure.error_message,
                   failure_diagnostics: diagnostics.manifest,
                 })
-                results.push({
+                updateResult(results, {
                   status: 'failed',
                   entry_id: entry.id,
                   entry_label: entry.label,
@@ -1038,7 +1183,9 @@ function createRunner(options) {
                   performance_report: performanceReportPath(artifacts),
                   failure: failurePath,
                   failure_diagnostics: diagnostics.manifest,
+                  error_code: errorInfo.code, result_label: errorInfo.title, recommended_action: errorInfo.action,
                 })
+                await checkpoint()
                 log(`failed: [${entryIndex + 1}/${entries.length} ${task.question_index}/${questionPlan.tasks.length}] ${entry.label} / ${task.question}: ${failure.error_message}`)
                 log(`recovery: 本题已记录到 ${failurePath}；下一题将重新启动并校验当前入口`)
                 await finishQuestionLogging('question_failed', { failure: failurePath, failure_diagnostics: diagnostics.manifest, error_name: failure.error_name, error_message: failure.error_message })
@@ -1074,17 +1221,28 @@ function createRunner(options) {
           failures,
           summary: summaryPath,
         }
-        await fs.writeFile(summaryPath, JSON.stringify(summary, null, 2), 'utf8')
+        batchState = { ...batchState, ...summary }
+        await checkpoint(summary.status)
         log(`执行完成：计划=${total}，成功=${completed}，失败=${failed}，批次汇总=${summaryPath}`)
         await batchEventLog.record('batch_result_saved', { category: 'lifecycle', details: { total, completed, failed, summary: summaryPath } })
-        return summary
+        return batchState
       } catch (error) {
+        if (cancelled) error = new CancelledError()
+        interruptRunning(batchState)
+        await checkpoint(cancelled ? 'stopped' : 'interrupted').catch(saveError => {
+          error.checkpointError = diagnosticError(saveError)
+          log(`diagnostic: 中断进度保存失败：${saveError.message}`)
+        })
+        error.batchSummary = batchState
         await writePerformanceReport(activeQuestionArtifacts || batchArtifacts, 'failed').catch(() => {})
         const diagnostics = await saveFailureDiagnostics(activeQuestionArtifacts || batchArtifacts, error, {
           stem: activeQuestionArtifacts ? '失败现场_致命' : '自动化失败现场',
         })
         await finishQuestionLogging('question_failed', { error_name: error?.name || 'Error', error_message: error?.message || String(error), fatal: true, failure_diagnostics: diagnostics.manifest }).catch(() => {})
         await batchEventLog.record('batch_failed', { category: 'error', details: { error_name: error?.name || 'Error', error_message: error?.message || String(error), failure_diagnostics: diagnostics.manifest } }).catch(() => {})
+        error.diagnosticPath ||= diagnostics.manifest
+        error.batchDirectory ||= batchDirectory
+        const errorInfo = automationErrorInfo(error)
         await fs.writeFile(path.join(batchArtifacts.diagnosticDirectory, 'automation-failure.json'), JSON.stringify({
           created_at: new Date().toISOString(),
           serial: payload.serial,
@@ -1101,6 +1259,9 @@ function createRunner(options) {
           ui_fallback_enabled: false,
           error_name: error?.name || 'Error',
           error_message: error?.message || String(error),
+          error_code: errorInfo.code,
+          user_message: errorInfo.message,
+          recommended_action: errorInfo.action,
           stack: error?.stack || null,
           ...seamDiagnosticsForError(error),
           failure_diagnostics: diagnostics,
@@ -1109,14 +1270,13 @@ function createRunner(options) {
         }, null, 2), 'utf8').catch(() => {})
         throw error
       } finally {
-        await observer.stop().catch(() => {})
-        await restoreConnectedDevice().catch(error => log(`device: 恢复屏幕常亮设置失败：${error.message}`))
-        await ui.stop().catch(() => {})
-        await flushArtifactLogs().catch(() => {})
+        await cleanup()
       }
-    },
-    async retryFailedBatch(payload) {
+    }
+    async function retryBatch(payload) {
       payload = { ...payload, newSession: true }
+      if (!Number.isFinite(Number(payload.timeout)) || Number(payload.timeout) <= 0) throw new Error('单题超时必须大于 0 秒。')
+      if (!String(payload.batchDirectory || '').trim()) throw new Error('请选择要继续的原批次目录。')
       activeSerial = payload.serial
       payloadMaxLongImageHeight = maxLongImageHeight(payload.maxLongImageHeight)
       const batchDirectory = path.resolve(String(payload.batchDirectory || ''))
@@ -1129,8 +1289,12 @@ function createRunner(options) {
       } catch (error) {
         throw new Error(`无法读取原批次汇总：${error.message}`)
       }
-      const retryItems = failedRetryItems(previousSummary)
-      if (!retryItems.length) throw new Error('该批次没有可重试的失败题。')
+      interruptRunning(previousSummary)
+      // Validate task identity before any device operation, including resumed pending items.
+      const candidates = resumeItems(previousSummary, payload)
+      failedRetryItems({ ...previousSummary, results: candidates.map(item => ({ ...item, status: 'failed' })) })
+      const retryItems = candidates
+      if (!retryItems.length) throw new Error('没有可继续的题目；中断题需要先明确确认重新采集。')
       if (!payload.serial) throw new Error('请选择 Android 设备后再重试失败题。')
       const entriesById = new Map(automationEntries().map(entry => [entry.id, entry]))
       for (const item of retryItems) {
@@ -1144,6 +1308,10 @@ function createRunner(options) {
       let completed = Number(previousSummary.completed) || results.filter(result => result.status === 'completed').length
       let failed = 0
       await initializeArtifactLogging(batchArtifacts, payload, 'retry_failed_questions')
+      batchState = { ...previousSummary, artifact_layout_version: ARTIFACT_LAYOUT_VERSION, results, retry_count: retryAttempt,
+        batch_directory: batchDirectory, diagnostic_directory: batchArtifacts.diagnosticDirectory,
+        delivery_directory: batchArtifacts.deliveryDirectory, summary: summaryPath }
+      await checkpoint()
       emitProgress({
         type: 'initialized',
         entries: (previousSummary.entries || []).map(entry => ({ id: entry.id, label: entry.label })),
@@ -1154,6 +1322,10 @@ function createRunner(options) {
         await waitForDevice()
         await ui.start(payload.serial)
         await prepareConnectedDevice()
+        const environmentPath = path.join(batchArtifacts.diagnosticDirectory, `环境_${runId}.json`)
+        await writeJsonAtomic(environmentPath, await captureEnvironment(options.adbPath, activeSerial, previousSummary.entries))
+        batchState.environment_reports = [...(previousSummary.environment_reports || []), environmentPath]
+        await checkpoint()
         try {
           await observer.start(payload.serial)
         } catch (error) {
@@ -1179,7 +1351,8 @@ function createRunner(options) {
             question_index_in_brand: task.question_index_in_brand,
             global_question_index: task.global_question_index,
           } : {}
-          const artifacts = taskArtifactDirectories(batchArtifacts, entryIndex + 1, entry.label, entryCount, task, grouped)
+          const originalArtifacts = taskArtifactDirectories(batchArtifacts, entryIndex + 1, entry.label, entryCount, task, grouped)
+          const artifacts = await createQuestionAttempt(originalArtifacts)
           const failurePath = path.join(artifacts.diagnosticDirectory, '失败.json')
           await startQuestionLogging(artifacts, {
             batch_id: path.basename(batchDirectory),
@@ -1191,13 +1364,14 @@ function createRunner(options) {
             ...taskContext,
             retry_attempt: retryAttempt,
           })
+          results[item.resultIndex] = { ...item, status: 'running', submission_started: false, diagnostic_directory: artifacts.diagnosticDirectory, attempt_id: artifacts.attempt_id }
+          await checkpoint()
           try {
-            // A failed attempt may have produced partial delivery PNGs. They must
-            // never be mistaken for the replacement result of this retry.
-            await fs.rm(artifacts.deliveryDirectory, { recursive: true, force: true })
             await prepareEntry(entry)
             log(`retry: [${item.question_index}] ${entry.label} / ${item.question}`)
-            const result = await askOnce({ ...payload, taskContext }, artifacts, item.question, item.question_index)
+            const captured = await askOnce({ ...payload, taskContext }, artifacts, item.question, item.question_index)
+            checkCancelled()
+            const result = await publishQuestion(artifacts, captured)
             const replacement = {
               status: 'completed',
               entry_id: entry.id,
@@ -1205,7 +1379,7 @@ function createRunner(options) {
               question: item.question,
               question_index: item.question_index,
               ...taskContext,
-              delivery_directory: artifacts.deliveryDirectory,
+              delivery_directory: artifacts.finalDeliveryDirectory,
               diagnostic_directory: artifacts.diagnosticDirectory,
               event_log: path.join(artifacts.diagnosticDirectory, '执行日志.jsonl'),
               performance_report: performanceReportPath(artifacts),
@@ -1215,14 +1389,14 @@ function createRunner(options) {
             }
             results[item.resultIndex] = replacement
             completed += 1
-            await fs.rename(failurePath, path.join(artifacts.diagnosticDirectory, `失败_重试前_${retryAttempt}.json`)).catch(error => {
-              if (error.code !== 'ENOENT') throw error
-            })
-            await finishQuestionLogging('question_completed', { retry_attempt: retryAttempt, screenshot: result.screenshot, metadata: result.metadata })
+            log(JSON.stringify(result))
+            await checkpoint()
+            await finishQuestionLogging('question_completed', { retry_attempt: retryAttempt, ...result })
           } catch (error) {
             if (fatalBatchError(error)) throw error
             failed += 1
             const diagnostics = await saveFailureDiagnostics(artifacts, error, { stem: `失败现场_重试_${retryAttempt}` })
+            const errorInfo = automationErrorInfo(error)
             const failure = {
               created_at: new Date().toISOString(),
               status: 'failed',
@@ -1244,6 +1418,9 @@ function createRunner(options) {
               retry_attempt: retryAttempt,
               error_name: error?.name || 'Error',
               error_message: error?.message || String(error),
+              error_code: errorInfo.code,
+              user_message: errorInfo.message,
+              recommended_action: errorInfo.action,
               stack: error?.stack || null,
               ...seamDiagnosticsForError(error),
               failure_diagnostics: diagnostics,
@@ -1260,7 +1437,9 @@ function createRunner(options) {
               performance_report: performanceReportPath(artifacts),
               retry_attempt: retryAttempt,
               failure_diagnostics: diagnostics.manifest,
+              error_code: errorInfo.code, result_label: errorInfo.title, recommended_action: errorInfo.action,
             }
+            await checkpoint()
             retryFailures.push({ entry_id: entry.id, entry_label: entry.label, question: item.question, question_index: item.question_index, ...taskContext, failure: failurePath, failure_diagnostics: diagnostics.manifest, error_name: failure.error_name, error_message: failure.error_message })
             log(`retry failed: [${item.question_index}] ${entry.label} / ${item.question}: ${failure.error_message}`)
             await finishQuestionLogging('question_failed', { retry_attempt: retryAttempt, failure: failurePath, failure_diagnostics: diagnostics.manifest, error_name: failure.error_name, error_message: failure.error_message })
@@ -1269,6 +1448,7 @@ function createRunner(options) {
         const remainingFailures = results.filter(result => result.status === 'failed')
         const summary = {
           ...previousSummary,
+          environment_reports: batchState.environment_reports,
           updated_at: new Date().toISOString(),
           serial: payload.serial,
           completed: results.filter(result => result.status === 'completed').length,
@@ -1290,17 +1470,29 @@ function createRunner(options) {
           }],
           summary: summaryPath,
         }
-        await fs.writeFile(summaryPath, JSON.stringify(summary, null, 2), 'utf8')
+        batchState = { ...batchState, ...summary }
+        const unfinished = results.some(item => ['pending', 'running', 'needs_confirmation'].includes(item.status))
+        await checkpoint(unfinished ? 'awaiting_confirmation' : summary.status)
         log(`重试完成：本次成功=${retryItems.length - failed}，仍失败=${failed}，原批次汇总=${summaryPath}`)
         await batchEventLog.record('batch_result_saved', { category: 'lifecycle', details: { retry_attempt: retryAttempt, total: summary.total, completed: summary.completed, failed: summary.failed, summary: summaryPath } })
-        return summary
+        return batchState
       } catch (error) {
+        if (cancelled) error = new CancelledError()
+        interruptRunning(batchState)
+        await checkpoint(cancelled ? 'stopped' : 'interrupted').catch(saveError => {
+          error.checkpointError = diagnosticError(saveError)
+          log(`diagnostic: 中断进度保存失败：${saveError.message}`)
+        })
+        error.batchSummary = batchState
         await writePerformanceReport(activeQuestionArtifacts || batchArtifacts, 'failed').catch(() => {})
         const diagnostics = await saveFailureDiagnostics(activeQuestionArtifacts || batchArtifacts, error, {
           stem: activeQuestionArtifacts ? `失败现场_重试_${retryAttempt}_致命` : `自动化失败现场_重试_${retryAttempt}`,
         })
         await finishQuestionLogging('question_failed', { retry_attempt: retryAttempt, error_name: error?.name || 'Error', error_message: error?.message || String(error), fatal: true, failure_diagnostics: diagnostics.manifest }).catch(() => {})
         await batchEventLog.record('batch_retry_failed', { category: 'error', details: { retry_attempt: retryAttempt, error_name: error?.name || 'Error', error_message: error?.message || String(error), failure_diagnostics: diagnostics.manifest } }).catch(() => {})
+        error.diagnosticPath ||= diagnostics.manifest
+        error.batchDirectory ||= batchDirectory
+        const errorInfo = automationErrorInfo(error)
         await fs.writeFile(path.join(batchArtifacts.diagnosticDirectory, `retry-automation-failure-${retryAttempt}.json`), JSON.stringify({
           created_at: new Date().toISOString(),
           serial: payload.serial,
@@ -1312,6 +1504,9 @@ function createRunner(options) {
           event_log: batchEventLog.filePath,
           error_name: error?.name || 'Error',
           error_message: error?.message || String(error),
+          error_code: errorInfo.code,
+          user_message: errorInfo.message,
+          recommended_action: errorInfo.action,
           stack: error?.stack || null,
           ...seamDiagnosticsForError(error),
           failure_diagnostics: diagnostics,
@@ -1320,33 +1515,10 @@ function createRunner(options) {
         }, null, 2), 'utf8').catch(() => {})
         throw error
       } finally {
-        await observer.stop().catch(() => {})
-        await restoreConnectedDevice().catch(error => log(`device: 恢复屏幕常亮设置失败：${error.message}`))
-        await ui.stop().catch(() => {})
-        await flushArtifactLogs().catch(() => {})
+        await cleanup()
       }
-    },
-    async stop() {
-      cancelled = true
-      await observer.stop().catch(() => {})
-      await restoreConnectedDevice().catch(error => log(`device: 恢复屏幕常亮设置失败：${error.message}`))
-      await ui.stop().catch(() => {})
-    },
-    restoreDevicePowerOnProcessExit() {
-      const preparation = preparedDevicePower
-      preparedDevicePower = null
-      if (!preparation || !activeSerial) return false
-      const settingArgs = preparation.stay_awake_original === null
-        ? ['shell', 'settings', 'delete', 'global', 'stay_on_while_plugged_in']
-        : ['shell', 'settings', 'put', 'global', 'stay_on_while_plugged_in', String(preparation.stay_awake_original)]
-      execFileSync(options.adbPath, ['-s', activeSerial, ...settingArgs], {
-        encoding: 'utf8',
-        timeout: 5_000,
-        windowsHide: true,
-      })
-      return true
-    },
-  }
+    }
+  return runner
 }
 
 module.exports = {

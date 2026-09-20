@@ -340,6 +340,7 @@ function douyinMiniAppEntryBounds(xml, screenSize, { brandBounds = null } = {}) 
   if (!douyinSearchInput(xml) || screenSize.width >= screenSize.height) return null
   const width = screenSize.width
   const height = screenSize.height
+  const resultBottom = douyinSearchResultsBounds(xml, screenSize)?.[3] || height
   const candidates = []
   for (const node of treeNodes(parseNodeTree(xml))) {
     const attrs = node.attrs
@@ -352,8 +353,11 @@ function douyinMiniAppEntryBounds(xml, screenSize, { brandBounds = null } = {}) 
     const cardBounds = parseBounds(rawBounds)
     const cardWidth = cardBounds[2] - cardBounds[0]
     const cardHeight = cardBounds[3] - cardBounds[1]
+    // Bottom-clipped cards keep a full header but expose less of the body.
+    // Relax height ratios only when OCR has confirmed the brand in that header.
+    const clipped = brandBounds && cardBounds[3] >= resultBottom - height * 0.03
     if (cardWidth < width * 0.4 || cardWidth > width * 0.55
-      || cardHeight < height * 0.18 || cardHeight > height * (brandBounds ? 0.65 : 0.4)
+      || cardHeight < height * (clipped ? 0.1 : 0.18) || cardHeight > height * (brandBounds ? 0.65 : 0.4)
       || cardBounds[1] < height * (brandBounds ? 0.12 : 0.38) || cardBounds[3] > height
       || node.children.length < 3 || node.children.length > 6
       || node.children.some(child => nodeAttr(child.attrs, 'class') !== 'android.view.ViewGroup')) continue
@@ -365,8 +369,8 @@ function douyinMiniAppEntryBounds(xml, screenSize, { brandBounds = null } = {}) 
       if (!childRaw || !(child.children || []).length) return false
       const bounds = parseBounds(childRaw)
       return bounds[2] - bounds[0] >= cardWidth * 0.75
-        && bounds[3] - bounds[1] >= cardHeight * 0.12
-        && bounds[3] - bounds[1] <= cardHeight * 0.3
+        && bounds[3] - bounds[1] >= (clipped ? height * 0.035 : cardHeight * 0.12)
+        && bounds[3] - bounds[1] <= (clipped ? height * 0.1 : cardHeight * 0.3)
         && bounds[1] - cardBounds[1] <= cardHeight * 0.1
     })
     if (!header) continue

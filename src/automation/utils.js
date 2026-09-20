@@ -2,7 +2,7 @@ const fs = require('node:fs/promises')
 const path = require('node:path')
 const { safeDirectorySegment } = require('../question-plan')
 
-const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds))
+const { cancellableSleep: sleep } = require('./cancellation')
 
 const DELIVERY_DIRECTORY_NAME = '交付图片'
 const DIAGNOSTIC_DIRECTORY_NAME = '调试产物'

@@ -152,9 +152,9 @@ function createToutiaoSearchWorkflow({
     await tap((viewMore[0] + viewMore[2]) / 2, (viewMore[1] + viewMore[3]) / 2)
     const deadline = Date.now() + timeout
     const hardDeadline = Date.now() + Math.max(timeout, 30_000)
-    let miniAppHostSeen = false
+    let fullAnswerHostSeen = false
     let genericConsultationReads = 0
-    while (Date.now() < deadline || (miniAppHostSeen && Date.now() < hardDeadline)) {
+    while (Date.now() < deadline || (fullAnswerHostSeen && Date.now() < hardDeadline)) {
       await waitForVisualQuiet({ timeout: 1_000, fallbackMs: 400 })
       const xml = await source()
       const bounds = douyinMiniAppCaptureBounds(xml, size)
@@ -182,9 +182,9 @@ function createToutiaoSearchWorkflow({
       if (current?.package && current.package !== getActivePackageName()) {
         throw new Error(`头条全文入口点击后进入了错误应用：expected=${getActivePackageName()}, actual=${current.package}`)
       }
-      if (/MiniAppHostActivity/.test(current?.activity || '')) {
-        if (!miniAppHostSeen) log('waiting: 已确认进入头条小程序宿主，正在等待全文UI层级就绪')
-        miniAppHostSeen = true
+      if (/MiniAppHostActivity|BrowserActivity/.test(current?.activity || '')) {
+        if (!fullAnswerHostSeen) log('waiting: 已确认进入头条全文宿主，正在等待全文UI层级就绪')
+        fullAnswerHostSeen = true
       }
     }
     throw new ToutiaoFullAnswerNotOpenedError('已点击头条小荷AI医生全文入口，但未能确认本题全文页打开。')

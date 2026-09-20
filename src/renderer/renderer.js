@@ -5,6 +5,8 @@ const status = $('#status')
 const log = $('#log')
 const start = $('#start')
 const retryFailed = $('#retry-failed')
+const resumeBatch = $('#resume-batch')
+let stopping = false
 const stop = $('#stop')
 const entryList = $('#entry-list')
 const updateAction = $('#update-action')
@@ -316,6 +318,9 @@ function renderEntryProgress() {
     const stats = document.createElement('div')
     stats.className = 'entry-progress-stats'
     stats.innerHTML = `<span class="success">成功 ${entry.succeeded}</span><span class="failure">失败 ${entry.failed}</span>`
+    const quality = document.createElement('small')
+    quality.textContent = `仅搜索结果 ${entry.search_results_only || 0} · 应用提示 ${entry.app_limited || 0} · 建议核图 ${entry.needs_review || 0}`
+    stats.append(quality)
     row.append(label, stats)
     return row
   })
@@ -418,7 +423,7 @@ function updatePlan() {
 }
 
 function appendLog(text) {
-  log.textContent += text
+  log.append(document.createTextNode(text))
   log.scrollTop = log.scrollHeight
 }
 
@@ -737,7 +742,7 @@ start.addEventListener('click', async () => {
       maxLongImageHeight,
     })
     updateRetryFailedAvailability()
-    start.disabled = true; stop.disabled = false; status.textContent = '任务正在执行…'
+    start.disabled = true; resumeBatch.disabled = true; stop.disabled = false; stopping = false; stop.textContent = '停止'; status.textContent = '任务正在执行…'
   } catch (error) { status.textContent = error.message || '无法启动任务' }
 })
 retryFailed.addEventListener('click', async () => {
@@ -756,25 +761,50 @@ retryFailed.addEventListener('click', async () => {
       newSession: true,
       maxLongImageHeight,
     })
-    start.disabled = true; retryFailed.disabled = true; stop.disabled = false
+    start.disabled = true; resumeBatch.disabled = true; retryFailed.disabled = true; stop.disabled = false; stopping = false; stop.textContent = '停止'
     status.textContent = '正在重试失败项…'; appendLog(`\n$ 重试原批次失败项：${retryBatchDirectory}\n`)
   } catch (error) { status.textContent = error.message || '无法重试失败项' }
 })
-stop.addEventListener('click', () => window.automation.stop())
+resumeBatch.addEventListener('click', async () => {
+  if (!device.value) { status.textContent = '请先选择手机'; return }
+  try {
+    const directory = await window.automation.selectDirectory()
+    if (!directory) return
+    const accepted = await window.automation.retryFailed({ serial: device.value, batchDirectory: directory, resume: true,
+      timeout: Number($('#timeout').value), maxLongImageHeight: Number($('#max-long-image-height').value) })
+    if (accepted === false) return
+    start.disabled = true; resumeBatch.disabled = true; retryFailed.disabled = true; stop.disabled = false
+    stopping = false; stop.textContent = '停止'; status.textContent = '正在继续原批次…'
+  } catch (error) { status.textContent = error.message || '无法继续原批次' }
+})
+stop.addEventListener('click', async () => {
+  if (stopping) return
+  stopping = true; stop.disabled = true; stop.textContent = '正在停止…'
+  status.textContent = '正在停止手机操作，保存进度并恢复设备设置…'
+  try { await window.automation.stop() }
+  catch (error) { stopping = false; stop.disabled = false; stop.textContent = '停止'; status.textContent = `停止请求失败：${error.message}` }
+})
 window.automation.onLog(appendLog)
 window.automation.onProgress(value => {
+  if (value.type === 'stopping') { status.textContent = '正在停止手机操作，保存进度并恢复设备设置…'; return }
   entryProgressState = applyEntryProgress(entryProgressState, value)
   renderEntryProgress()
 })
-window.automation.onFinished(({ code, summary, retried }) => {
+window.automation.onFinished(({ code, summary, error, retried }) => {
   start.disabled = false
+  resumeBatch.disabled = false
+  stopping = false
+  stop.textContent = '停止'
   stop.disabled = true
   updateRetryFailedAvailability({ code, summary })
   if (summary?.entries && summary?.results) {
     entryProgressState = initializeEntryProgress({ entries: summary.entries, question_count: summary.question_count, results: summary.results })
     renderEntryProgress()
   }
-  if (code !== 0) status.textContent = `${retried ? '重试' : '任务'}结束，退出码 ${code}`
+  if (code === 130) status.textContent = `任务已停止，已完成 ${summary?.completed || 0} 题；可用“继续原批次”恢复。`
+  else if (summary?.needs_confirmation) status.textContent = `本轮结束，${summary.needs_confirmation} 题操作状态待确认；可用“继续原批次”处理。`
+  else if (code !== 0 && error) status.textContent = `${error.title}：${error.message} ${error.action}`
+  else if (code !== 0) status.textContent = `${retried ? '重试' : '任务'}结束，退出码 ${code}`
   else if (summary?.failed) status.textContent = `${retried ? '重试完成' : '执行完成'}：成功 ${summary.completed}，失败 ${summary.failed}；可点击“重试失败项”`
   else status.textContent = `${retried ? '失败项已全部重试成功' : '执行完成'}：成功 ${summary?.completed ?? 0}`
 })

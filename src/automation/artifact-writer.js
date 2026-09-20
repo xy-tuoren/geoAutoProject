@@ -3,8 +3,9 @@ const path = require('node:path')
 const { buildReplyImages } = require('./capture-primitives')
 const { referenceProductsCaptureComplete } = require('./reference-products')
 const { writeReplySeamDiagnostics } = require('./seam-diagnostics')
+const { hasAppLimitedNotice, resultQuality } = require('./result-quality')
 
-const ARTIFACT_LAYOUT_VERSION = 8
+const ARTIFACT_LAYOUT_VERSION = 9
 
 function createArtifactWriter({
   defaultCaptureMethod,
@@ -14,6 +15,8 @@ function createArtifactWriter({
   observerMetadata,
   getBatchEventLog,
   log,
+  getObservedLimitation = () => false,
+  checkCancelled = () => {},
 }) {
   async function saveArtifacts({ artifacts, stem, question, status, xml, meta, stitch = true, frame = null, captureMethod = defaultCaptureMethod, observerBaseline, recoveryBaseline }) {
     const deliveryDirectory = artifacts.deliveryDirectory
@@ -106,13 +109,18 @@ function createArtifactWriter({
         })
       }
     } else await fs.writeFile(screenshotPath, frame || await screenshot())
+    checkCancelled()
     await fs.writeFile(xmlPath, xml || await normalizedHierarchy(), 'utf8')
     resultMeta = { ...resultMeta, ...observerMetadata(observerBaseline, recoveryBaseline) }
+    resultMeta.app_limited_notice = hasAppLimitedNotice(xml) || getObservedLimitation()
+    Object.assign(resultMeta, resultQuality(resultMeta))
     await fs.writeFile(metadataPath, JSON.stringify({
       question,
       status,
       created_at: new Date().toISOString().replace(/\.\d{3}Z$/, ''),
       artifact_layout_version: ARTIFACT_LAYOUT_VERSION,
+      attempt_id: artifacts.attempt_id || null,
+      attempt_number: artifacts.attempt_number || 1,
       delivery_directory: deliveryDirectory,
       diagnostic_directory: diagnosticDirectory,
       event_log: path.join(diagnosticDirectory, '执行日志.jsonl'),
@@ -127,6 +135,7 @@ function createArtifactWriter({
       hierarchy: xmlPath,
       metadata: metadataPath,
       performance: performancePath,
+      ...resultQuality(resultMeta),
       ...(resultMeta.reply_seam_summary ? { seam_summary: resultMeta.reply_seam_summary } : {}),
     }
   }

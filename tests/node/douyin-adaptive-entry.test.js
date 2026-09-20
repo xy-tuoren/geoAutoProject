@@ -35,6 +35,25 @@ test('Canvas全部药品必须与参考药品同一标题行，映射到逻辑�
   assert.equal(miniAppReferenceProductsOcrTrigger({ ...recognition, results: [recognition.results[1]] }, { width: 1080, height: 2400 }), null)
 })
 
+test('首屏底部被裁短的小荷卡片仍按完整品牌标题点击，兼容物理逻辑缩放', () => {
+  for (const scale of [1, 2 / 3]) {
+    const b = values => `[${values.slice(0, 2).map(v => Math.round(v * scale))}][${values.slice(2).map(v => Math.round(v * scale))}]`
+    const xml = `<hierarchy><node class="android.widget.EditText" resource-id="com.ss.android.ugc.aweme:id/et_search_kw" package="com.ss.android.ugc.aweme" bounds="${b([121,105,782,215])}"/>
+      <node class="android.widget.FrameLayout" bounds="${b([11,1963,535,2356])}">
+        <node class="android.view.ViewGroup" bounds="${b([11,1963,535,2356])}"/>
+        <node class="android.view.ViewGroup" bounds="${b([11,1963,535,2117])}"><node class="android.view.ViewGroup" bounds="${b([33,1985,143,2095])}"/></node>
+        <node class="android.view.ViewGroup" bounds="${b([11,2139,535,2249])}"/>
+        <node class="android.view.ViewGroup" bounds="${b([11,2249,535,2356])}"/>
+      </node></hierarchy>`
+    const recognition = { image: { width: 1080, height: 2400 }, results: [{ normalizedText: '小荷AI医生', confidence: 0.99, bounds: [165, 2000, 400, 2048] }] }
+    const size = { width: 1080 * scale, height: 2400 * scale }
+    const target = douyinOcrBrandEntryTarget(recognition, xml, size)
+    assert.deepEqual(target?.tapBounds, [11,1963,535,2117].map(v => Math.round(v * scale)))
+    assert.equal(douyinOcrBrandEntryTarget({ ...recognition, results: [] }, xml, size), null)
+    assert.equal(douyinOcrBrandEntryTarget({ ...recognition, results: [{ ...recognition.results[0], bounds: [700,2000,950,2048] }] }, xml, size), null)
+  }
+})
+
 test('正文没有药名时不反复回查，进入完成确认但不跳过完整原题验证', async () => {
   let clock = 0, swipes = 0
   const raw = Buffer.alloc(360 * 800 * 3)

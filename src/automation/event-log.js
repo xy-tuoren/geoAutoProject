@@ -1,5 +1,6 @@
 const fs = require('node:fs/promises')
 const path = require('node:path')
+const { randomUUID } = require('node:crypto')
 
 function classifyAutomationLog(message) {
   const text = String(message).trim()
@@ -86,6 +87,7 @@ class EventLog {
     this.now = now
     this.startedAt = Date.now()
     this.sequence = 0
+    this.streamId = randomUUID()
     this.pending = Promise.resolve()
   }
 
@@ -93,6 +95,8 @@ class EventLog {
     const createdAt = this.now()
     const item = {
       sequence: ++this.sequence,
+      event_id: `${this.streamId}:${this.sequence}`,
+      stream_id: this.streamId,
       created_at: createdAt.toISOString(),
       elapsed_ms: Math.max(0, Date.now() - this.startedAt),
       scope: this.scope,

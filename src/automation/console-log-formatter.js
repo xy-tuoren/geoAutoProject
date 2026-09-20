@@ -10,8 +10,19 @@ function shortFile(file) {
 }
 
 class ConsoleLogFormatter {
-  constructor() {
+  constructor({ now = Date.now } = {}) {
     this.generatingShown = false
+    this.now = now
+    this.repeated = new Map()
+  }
+
+  compact(key, text) {
+    const now = this.now()
+    const previous = this.repeated.get(key)
+    if (!previous) { this.repeated.set(key, { started: now, shown: now }); return text }
+    if (now - previous.shown < 5_000) return null
+    previous.shown = now
+    return `${text}｜已等待 ${Math.round((now - previous.started) / 1_000)} 秒`
   }
 
   format(message) {
@@ -22,6 +33,7 @@ class ConsoleLogFormatter {
     const asking = text.match(/^\[\d+\/\d+ (\d+)\/(\d+)\] asking via (.+?): (.+)$/)
     if (asking) {
       this.generatingShown = false
+      this.repeated.clear()
       return `\n[${asking[1]}/${asking[2]}] ${asking[3]}｜${asking[4]}`
     }
 
@@ -43,7 +55,7 @@ class ConsoleLogFormatter {
     const stable = text.match(/^waiting: .*连续(\d+)秒无变化，回答稳定$/)
     if (stable) return `  等待  回答稳定｜连续${stable[1]}秒无变化`
     if (/^waiting: 仅检测聊天内容区域 /.test(text)) return `  区域  ${text.slice('waiting: '.length)}`
-    if (text.startsWith('waiting:')) return `  等待  ${text.slice('waiting:'.length).trim()}`
+    if (text.startsWith('waiting:')) return this.compact(text, `  等待  ${text.slice('waiting:'.length).trim()}`)
 
     if (/^capture: (?:推荐药品|(?:抖音|头条)?小荷AI全文)?\s*page \d+$/.test(text)) return null
 
@@ -55,7 +67,8 @@ class ConsoleLogFormatter {
     const ocr = text.match(/^ocr: purpose=([^ ]+) outcome=([^ ]+) engine=([^ ]+) elapsed=(\d+)ms(.*)$/)
     if (ocr) {
       const outcome = ocr[2] === 'matched' ? '发现目标' : ocr[2] === 'not_found' ? '未发现目标' : ocr[2]
-      return `  OCR   ${ocr[1]}｜${outcome}｜${seconds(ocr[4])}`
+      const line = `  OCR   ${ocr[1]}｜${outcome}｜${seconds(ocr[4])}`
+      return ocr[2] === 'not_found' ? this.compact(`ocr:${ocr[1]}`, line) : line
     }
 
     const bounds = text.match(/^capture: chat bounds=([^（]+)(.*)$/)
@@ -78,7 +91,7 @@ class ConsoleLogFormatter {
         const result = JSON.parse(text)
         if (result.screenshot) {
           const performance = shortFile(result.performance)
-          return `  完成  ${shortFile(result.screenshot)}${performance ? `｜性能 ${performance}` : ''}`
+          return `  完成  ${result.result_label ? `${result.result_label}｜` : ''}${shortFile(result.screenshot)}${performance ? `｜性能 ${performance}` : ''}`
         }
       } catch {}
     }

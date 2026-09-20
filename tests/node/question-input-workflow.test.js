@@ -323,6 +323,30 @@ test('抖音题间关闭按钮按竖屏比例定位且不把正文close当作外
   await assert.rejects(() => noTapWorkflow.waitForDouyinSearchInput(30), /未能在抖音打开搜索输入框/)
 })
 
+test('抖音搜索点击跨过等待期限后只读确认输入框，不重复点击', async t => {
+  let now = 0
+  t.mock.method(Date, 'now', () => now)
+  for (const scale of [1, 2 / 3]) {
+    for (const opened of [true, false]) {
+      now = 0
+      let reads = 0
+      const taps = []
+      const home = '<hierarchy><node package="com.ss.android.ugc.aweme" content-desc="搜索" bounds="[900,100][1000,200]" /></hierarchy>'
+      const bounds = [132, 90, 754, 210].map(value => Math.round(value * scale))
+      const edit = DOUYIN_SEARCH_INPUT.replace('[132,90][754,210]', `[${bounds.slice(0, 2)}][${bounds.slice(2)}]`)
+      const workflow = workflowWithSource(async () => {
+        reads++
+        now = 23_000 // The read recovered after the 15-second workflow deadline.
+        return reads > 1 && opened ? edit : home
+      }, { tap: async (...point) => { now += 7_000; taps.push(point) } })
+      if (opened) assert.deepEqual((await workflow.waitForDouyinSearchInput(15_000)).bounds, bounds)
+      else await assert.rejects(workflow.waitForDouyinSearchInput(15_000), /未能在抖音打开搜索输入框/)
+      assert.equal(reads, 2)
+      assert.deepEqual(taps, [[950, 150]])
+    }
+  }
+})
+
 test('头条搜索入口在等待截止点刚出现时执行最终探测', async () => {
   const blank = '<hierarchy><node package="com.ss.android.article.news" bounds="[0,0][1080,2400]" visible-to-user="true" /></hierarchy>'
   const home = `<hierarchy><node package="com.ss.android.article.news" resource-id="com.ss.android.article.news:id/kic" content-desc="搜索框，推荐内容" bounds="[261,96][922,216]" visible-to-user="true" /></hierarchy>`

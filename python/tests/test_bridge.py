@@ -241,8 +241,15 @@ def test_app_start_rejects_silent_launch_failure():
     bridge = U2Bridge(lambda serial: device)
     bridge.dispatch("connect", {"serial": "SERIAL"})
 
-    with pytest.raises(BridgeError, match="前台应用"):
+    with pytest.raises(BridgeError, match="前台应用") as raised:
         bridge.dispatch("app_start", {"package": "example.app"})
+    assert raised.value.code == "APP_FOREGROUND_MISMATCH"
+    assert raised.value.details == {
+        "expected_package": "example.app",
+        "actual_package": "com.huawei.android.launcher",
+        "actual_activity": ".MainActivity",
+        "launch_activity": ".MainActivity",
+    }
 
 
 def test_foreground_window_falls_back_to_huawei_z_ordered_window_list():
@@ -293,6 +300,8 @@ def test_protocol_returns_structured_errors_instead_of_hanging():
     assert response["id"] == 1
     assert response["ok"] is False
     assert response["error"]["type"] == "BridgeError"
+    assert response["error"]["code"] == "BRIDGE_ERROR"
+    assert response["error"]["details"] == {}
 
 
 def test_protocol_forces_utf8_when_windows_pipe_defaults_to_cp936():

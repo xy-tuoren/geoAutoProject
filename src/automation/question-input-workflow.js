@@ -353,6 +353,13 @@ function createQuestionInputWorkflow({
       }
       await sleep(400)
     }
+    // A recovered hierarchy read or a slow click can consume the deadline even
+    // though navigation succeeded. Inspect once more without replaying actions.
+    const finalInput = douyinSearchInput(await source())
+    if (finalInput) {
+      log('stage: 抖音搜索等待截止后只读复核已确认输入框，继续本题')
+      return finalInput
+    }
     throw new Error('未能在抖音打开搜索输入框。请确认抖音首页可正常使用且没有登录、青少年模式或升级提示遮挡。')
   }
   

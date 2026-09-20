@@ -163,6 +163,56 @@ test('只读层级连续遇到瞬时服务断开时有限重启并恢复', async
   }
 })
 
+test('只读业务错误不会重启sidecar', async () => {
+  const previous = process.env.U2_FIXTURE_FAIL_METHOD
+  process.env.U2_FIXTURE_FAIL_METHOD = 'current_app'
+  const client = fixtureClient()
+  try {
+    await client.start('SERIAL')
+    let starts = 0
+    const originalStart = client.start.bind(client)
+    client.start = async (...args) => { starts += 1; return originalStart(...args) }
+    await assert.rejects(() => client.currentApp(), /forced failure/)
+    assert.equal(starts, 0)
+  } finally {
+    await client.stop()
+    if (previous === undefined) delete process.env.U2_FIXTURE_FAIL_METHOD
+    else process.env.U2_FIXTURE_FAIL_METHOD = previous
+  }
+})
+
+test('应用未进入前台时只读复核后仅重新拉起一次', async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'u2-app-start-recovery-'))
+  const stateFile = path.join(directory, 'attempts.txt')
+  const names = [
+    'U2_FIXTURE_COUNTED_FAIL_METHOD',
+    'U2_FIXTURE_COUNTED_FAIL_STATE_FILE',
+    'U2_FIXTURE_COUNTED_FAIL_LIMIT',
+    'U2_FIXTURE_COUNTED_FAIL_MESSAGE',
+    'U2_FIXTURE_COUNTED_FAIL_CODE',
+  ]
+  const previous = Object.fromEntries(names.map(name => [name, process.env[name]]))
+  process.env.U2_FIXTURE_COUNTED_FAIL_METHOD = 'app_start'
+  process.env.U2_FIXTURE_COUNTED_FAIL_STATE_FILE = stateFile
+  process.env.U2_FIXTURE_COUNTED_FAIL_LIMIT = '1'
+  process.env.U2_FIXTURE_COUNTED_FAIL_MESSAGE = 'foreground mismatch'
+  process.env.U2_FIXTURE_COUNTED_FAIL_CODE = 'APP_FOREGROUND_MISMATCH'
+  const client = fixtureClient()
+  try {
+    await client.start('SERIAL')
+    const result = await client.appStart('example.app')
+    assert.equal(await fs.readFile(stateFile, 'utf8'), '1')
+    assert.equal(result.method, 'app_start')
+  } finally {
+    await client.stop()
+    await fs.rm(directory, { recursive: true, force: true })
+    for (const name of names) {
+      if (previous[name] === undefined) delete process.env[name]
+      else process.env[name] = previous[name]
+    }
+  }
+})
+
 test('应用启动给足解析Activity、冷启动和前台校验的时间', async () => {
   const client = new U2Client({ root, adbPath: '/bundled/adb', log: () => {} })
   const calls = []
@@ -193,6 +243,84 @@ test('并发重启sidecar只会真正拉起一次进程', async () => {
     }
     await Promise.all([client.restart(), client.restart(), client.restart()])
     assert.equal(starts, 1)
+  } finally {
+    await client.stop()
+  }
+})
+
+test('显式停止后读取和重启不能重新拉起进程，明确start后才恢复', async () => {
+  const client = fixtureClient()
+  try {
+    await client.start('SERIAL')
+    await client.stop()
+    await assert.rejects(client.currentApp(), { code: 'U2_STOPPED' })
+    await assert.rejects(client.restart(), { code: 'U2_STOPPED' })
+    assert.equal(client.process, null)
+    await client.start('SERIAL')
+    assert.equal((await client.currentApp()).package, 'fixture.package')
+  } finally {
+    await client.stop()
+  }
+})
+
+test('停止正在等待的读写请求均返回停止状态且不自动恢复', async () => {
+  for (const method of ['currentApp', 'click']) {
+    const client = fixtureClient()
+    client.options.command.args = ['-e', `
+      require('node:readline').createInterface({ input: process.stdin }).on('line', line => {
+        const request = JSON.parse(line)
+        if (request.method === 'connect') process.stdout.write(JSON.stringify({ id: request.id, ok: true, result: {} }) + '\\n')
+      })
+    `]
+    client.options.requestTimeout = 100
+    try {
+      await client.start('SERIAL')
+      const request = client[method](10, 20)
+      const rejected = assert.rejects(request, { code: 'U2_STOPPED' })
+      await client.stop()
+      await rejected
+      assert.equal(client.process, null)
+    } finally {
+      await client.stop()
+    }
+  }
+})
+
+test('停止可以取消正在执行的sidecar重启', async () => {
+  const client = fixtureClient()
+  try {
+    await client.start('SERIAL')
+    const restarting = client.restart()
+    const rejected = assert.rejects(restarting, { code: 'U2_STOPPED' })
+    await client.stop()
+    await rejected
+    assert.equal(client.process, null)
+  } finally {
+    await client.stop()
+  }
+})
+
+test('停止后明确启动也不会复活旧请求的只读重试', async () => {
+  const client = fixtureClient()
+  client.options.readRetryDelay = 100
+  const realRestart = client.restart.bind(client)
+  let announceRestart
+  const restarted = new Promise(resolve => { announceRestart = resolve })
+  client.restart = async () => {
+    await realRestart()
+    announceRestart()
+  }
+  try {
+    await client.start('SERIAL')
+    client.process.kill('SIGKILL')
+    await new Promise(resolve => client.process.once('exit', resolve))
+    const request = client.currentApp()
+    const rejected = assert.rejects(request, { code: 'U2_STOPPED' })
+    await restarted
+    await client.stop()
+    await client.start('SERIAL')
+    await rejected
+    assert.equal((await client.currentApp()).package, 'fixture.package')
   } finally {
     await client.stop()
   }

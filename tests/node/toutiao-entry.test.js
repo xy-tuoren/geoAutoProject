@@ -1,6 +1,7 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
 const { toutiaoHomeSearchBounds, toutiaoSearchInput, toutiaoOcrMiniAppEntryTarget, toutiaoLegacyFullAnswerPage, douyinMiniAppCaptureBounds, toutiaoGenericConsultationPage } = require('../../src/automation/miniapp-locators')
+const { createToutiaoSearchWorkflow } = require('../../src/automation/toutiao-search-workflow')
 const { createQuestionWorkflows } = require('../../src/automation/question-workflows')
 const { ToutiaoAnswerCardNotFoundError } = require('../../src/automation/search-recovery')
 const fs = require('node:fs/promises')
@@ -112,6 +113,35 @@ test('头条独立入口只采集本题，原题验证失败不能交付入口�
       assert.deepEqual([inputs, opens], [1, 1])
     }
   } finally { await fs.rm(directory, { recursive: true, force: true }) }
+})
+
+test('头条全文宿主读取超过短确认窗口后继续等层级且不重复点击', async () => {
+  const size = { width: 1080, height: 2400 }
+  const fullPage = `<hierarchy><node bounds="[0,0][1080,2400]"/>
+    <node package="com.ss.android.article.news" content-desc="关闭" bounds="[930,40][1050,140]"/>
+    <node package="com.ss.android.article.news" class="android.view.ViewGroup" bounds="[0,250][1080,1776]"/>
+  </hierarchy>`
+  let reads = 0
+  let taps = 0
+  const workflow = createToutiaoSearchWorkflow({
+    source: async () => (++reads === 1 ? '<hierarchy/>' : fullPage),
+    windowSize: async () => size,
+    log: () => {},
+    screenshot: async () => Buffer.alloc(0),
+    ocr: {},
+    setLastOcrDiagnostic: () => {},
+    waitForVisualQuiet: async () => {},
+    tap: async () => { taps++ },
+    ui: { currentApp: async () => {
+      await new Promise(resolve => setTimeout(resolve, 5))
+      return { package: 'com.ss.android.article.news', activity: 'com.ss.android.newmedia.activity.browser.BrowserActivity' }
+    } },
+    getActivePackageName: () => 'com.ss.android.article.news',
+  })
+  const result = await workflow.openToutiaoFullAnswer([100, 300, 300, 350], size, 1)
+  assert.equal(result.pageKind, 'miniapp')
+  assert.equal(taps, 1)
+  assert.equal(reads, 2)
 })
 
 test('新版头条搜索框按顶部语义定位，不依赖混淆后的资源编号', () => {
