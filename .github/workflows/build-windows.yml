@@ -172,13 +172,25 @@ jobs:
 
           from qcloud_cos import CosConfig, CosS3Client
 
+          class ReleaseCosClient(CosS3Client):
+              def upload_part(self, *args, **kwargs):
+                  try:
+                      return super().upload_part(*args, **kwargs)
+                  except Exception as error:
+                      # The SDK thread pool hides the original exception. Log only safe diagnostics.
+                      status = getattr(error, "get_status_code", lambda: "unknown")()
+                      code = getattr(error, "get_error_code", lambda: type(error).__name__)()
+                      print(f"COS part upload failed: status={status}, code={code}", flush=True)
+                      raise
+
           bucket = os.environ["TENCENT_COS_BUCKET"]
           region = os.environ["TENCENT_COS_REGION"]
-          client = CosS3Client(CosConfig(
+          client = ReleaseCosClient(CosConfig(
               Region=region,
               SecretId=os.environ["TENCENT_COS_SECRET_ID"],
               SecretKey=os.environ["TENCENT_COS_SECRET_KEY"],
               Scheme="https",
+              Timeout=120,
           ))
           installer = Path(glob.glob("release-assets/*.exe")[0])
           blockmap = Path(f"{installer}.blockmap")
@@ -193,8 +205,8 @@ jobs:
                   Bucket=bucket,
                   Key=f"{prefix}{asset.name}",
                   LocalFilePath=str(asset),
-                  PartSize=10,
-                  MAXThread=5,
+                  PartSize=5,
+                  MAXThread=3,
                   EnableMD5=True,
                   ACL="public-read",
                   ContentType=content_type,
@@ -205,8 +217,8 @@ jobs:
               Bucket=bucket,
               Key=f"{prefix}question-automation-electron-setup.exe",
               LocalFilePath=str(installer),
-              PartSize=10,
-              MAXThread=5,
+              PartSize=5,
+              MAXThread=3,
               EnableMD5=True,
               ACL="public-read",
               ContentType="application/vnd.microsoft.portable-executable",

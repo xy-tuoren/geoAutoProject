@@ -385,6 +385,7 @@ function renderDeviceControls() {
 
 function showWorkspace(view) {
   activeView = view
+  $('#preview-control').hidden = view !== 'screens'
   for (const name of ['screens', 'tasks']) {
     $(`#view-${name}`).hidden = name !== view
     $(`#tab-${name}`).setAttribute('aria-selected', String(name === view))

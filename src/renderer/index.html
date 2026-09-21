@@ -11,7 +11,6 @@
     <main class="shell">
       <header class="topbar">
         <div class="brand">
-          <p class="eyebrow">OPERATIONS CONSOLE</p>
           <h1>莲藕医生AI监测系统（数据采集）</h1>
         </div>
         <div class="topbar-actions">
@@ -25,7 +24,7 @@
           <button id="tab-screens" role="tab" aria-selected="true" aria-controls="view-screens" type="button">屏幕总览 <span id="screen-count">0</span></button>
           <button id="tab-tasks" role="tab" aria-selected="false" aria-controls="view-tasks" tabindex="-1" type="button">任务与日志</button>
         </div>
-        <label class="option"><input id="preview-enabled" type="checkbox" checked />实时画面</label>
+        <label id="preview-control" class="option"><input id="preview-enabled" type="checkbox" checked />实时画面</label>
       </nav>
 
       <section id="view-screens" class="device-monitor panel" role="tabpanel" aria-labelledby="tab-screens">
@@ -37,8 +36,8 @@
       </section>
 
       <div id="view-tasks" class="task-view" role="tabpanel" aria-labelledby="tab-tasks" hidden>
-      <section class="workspace">
         <aside class="settings panel">
+          <div class="task-settings-scroll">
           <div class="section-heading">
             <h2>任务配置</h2>
             <p>Android 设备</p>
@@ -62,10 +61,37 @@
               <legend>入口</legend>
               <div id="entry-list" class="entry-list" aria-label="任务入口"></div>
             </fieldset>
-            <p class="support-note">切换手机分别设置题目和入口；已启动的手机会继续执行。结果按手机分目录保存。</p>
+            <p class="support-note">各手机独立配置，切换不影响正在运行的任务。</p>
+          </div>
+
+          <section class="execution" aria-labelledby="execution-title">
+            <div class="section-heading">
+              <h2 id="execution-title">执行计划</h2>
+              <p id="plan">0 台设备 × 0 条问题 = 0 次计划</p>
+            </div>
+            <div class="execution-fields">
+              <label class="field compact">
+                <span>单题超时</span>
+                <span class="input-with-unit"><input id="timeout" value="90" inputmode="decimal" /><em>秒</em></span>
+              </label>
+              <label class="field compact">
+                <span>长图上限</span>
+                <span class="input-with-unit"><input id="max-long-image-height" value="15000" inputmode="numeric" /><em>px</em></span>
+              </label>
+            </div>
+          </section>
+          </div>
+          <div class="action-buttons" aria-label="采集任务操作">
+            <button id="start" class="primary" type="button">启动此手机</button>
+            <button id="stop" class="danger" type="button" disabled>停止此手机</button>
+            <button id="retry-failed" class="secondary" type="button" disabled>重试失败项</button>
+            <button id="resume-batch" class="secondary" type="button">继续原批次</button>
+            <button id="start-all" class="secondary" type="button">启动全部已配置手机</button>
+            <button id="stop-all" class="danger" type="button" disabled>停止全部手机</button>
           </div>
         </aside>
 
+        <div class="task-content">
         <section class="questions panel" id="questions-panel">
           <div class="questions-head">
             <div class="section-heading">
@@ -86,36 +112,6 @@
           <div class="drop-hint" aria-hidden="true">松开以导入问题文件</div>
           <p class="capture-note">自动截图：回答 · 推荐药品 · 引用资料</p>
         </section>
-      </section>
-
-      <section class="bottom-grid">
-        <section class="execution panel">
-          <div class="section-heading">
-            <h2>执行计划</h2>
-            <p id="plan">0 台设备 × 0 条问题 = 0 次计划</p>
-          </div>
-          <div class="execution-body">
-            <div class="execution-fields">
-              <label class="field compact">
-                <span>单题超时</span>
-                <span class="input-with-unit"><input id="timeout" value="90" inputmode="decimal" /><em>秒</em></span>
-              </label>
-              <label class="field compact">
-                <span>长图上限</span>
-                <span class="input-with-unit"><input id="max-long-image-height" value="15000" inputmode="numeric" /><em>px</em></span>
-              </label>
-            </div>
-            <div class="action-buttons">
-              <button id="start" class="primary" type="button">启动此手机</button>
-              <button id="start-all" class="secondary" type="button">启动所有已配置手机</button>
-              <button id="retry-failed" class="secondary" type="button" disabled>重试失败项</button>
-              <button id="resume-batch" class="secondary" type="button">继续原批次</button>
-              <button id="stop" class="danger" type="button" disabled>停止此手机</button>
-              <button id="stop-all" class="danger" type="button" disabled>停止全部手机</button>
-            </div>
-          </div>
-        </section>
-
         <section class="logs panel">
           <div class="log-head">
             <div class="section-heading">
@@ -129,18 +125,18 @@
               <button id="clear-log" class="text-button" type="button">清空</button>
             </div>
           </div>
-          <section class="entry-progress-section" aria-labelledby="entry-progress-title">
-            <div class="entry-progress-heading">
+          <details class="entry-progress-section">
+            <summary class="entry-progress-heading">
               <h3 id="entry-progress-title">入口执行情况</h3>
               <span id="entry-progress-total">尚未开始</span>
-            </div>
+            </summary>
             <div id="entry-progress" class="entry-progress-list">
               <p class="entry-progress-empty">开始任务后显示各入口成功与失败数量</p>
             </div>
-          </section>
-          <pre id="log" aria-live="polite"></pre>
+          </details>
+          <pre id="log" aria-live="polite" tabindex="0" aria-label="当前手机执行日志"></pre>
         </section>
-      </section>
+        </div>
       </div>
     </main>
 
