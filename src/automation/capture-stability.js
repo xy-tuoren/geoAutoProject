@@ -11,6 +11,17 @@ const {
 
 const REPLY_STABLE_QUIET_MS = 3_000
 
+function logicalBoundsToPhysical(bounds, logicalSize, physicalSize) {
+  const scaleX = physicalSize.width / logicalSize.width
+  const scaleY = physicalSize.height / logicalSize.height
+  return [
+    Math.max(0, Math.round(bounds[0] * scaleX)),
+    Math.max(0, Math.round(bounds[1] * scaleY)),
+    Math.min(physicalSize.width, Math.round(bounds[2] * scaleX)),
+    Math.min(physicalSize.height, Math.round(bounds[3] * scaleY)),
+  ]
+}
+
 function createCaptureStability({
   source,
   screenshot,
@@ -27,17 +38,6 @@ function createCaptureStability({
     return (await source()).replace(/focused="(?:true|false)"/g, 'focused=""').replace(/selected="(?:true|false)"/g, 'selected=""')
   }
   
-  function logicalBoundsToPhysical(bounds, logicalSize, physicalSize) {
-    const scaleX = physicalSize.width / logicalSize.width
-    const scaleY = physicalSize.height / logicalSize.height
-    return [
-      Math.max(0, Math.round(bounds[0] * scaleX)),
-      Math.max(0, Math.round(bounds[1] * scaleY)),
-      Math.min(physicalSize.width, Math.round(bounds[2] * scaleX)),
-      Math.min(physicalSize.height, Math.round(bounds[3] * scaleY)),
-    ]
-  }
-
   async function waitForReplyPoll(milliseconds) {
     if (!observer.active) {
       await sleep(milliseconds)
@@ -262,4 +262,4 @@ function createCaptureStability({
   }
 }
 
-module.exports = { createCaptureStability, REPLY_STABLE_QUIET_MS }
+module.exports = { createCaptureStability, REPLY_STABLE_QUIET_MS, logicalBoundsToPhysical }

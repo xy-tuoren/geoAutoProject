@@ -44,7 +44,7 @@ test('帧与接缝数量不一致时先写接缝汇总再抛出拼图错误', as
         throw error
       }
     }, /每对相邻截图都必须提供接缝状态/)
-    assert.equal(ARTIFACT_LAYOUT_VERSION, 9)
+    assert.equal(ARTIFACT_LAYOUT_VERSION, 10)
     assert.ok(thrown.replySeamDiagnostics)
     const summary = JSON.parse(await fs.readFile(path.join(artifacts.diagnosticDirectory, '接缝汇总.json'), 'utf8'))
     assert.equal(summary.frame_count, 2)

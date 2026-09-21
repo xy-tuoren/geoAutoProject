@@ -1,6 +1,7 @@
 const locators = require('./miniapp-locators')
 const { evidenceSummaryOcrTarget, evidenceSummaryExpandedByOcr, suspiciousEvidenceSummaryOcrTarget } = require('./capture-primitives')
 const { miniAppQuestionOcrTarget } = require('./reply-capture')
+const { douyinMiniAppNetworkRetryTarget } = require('./douyin-search-workflow')
 
 function replayRecognition(evidence) {
   const { purpose, recognition, logical_size: size, hierarchy: xml = '', chat_bounds: bounds } = evidence
@@ -8,6 +9,8 @@ function replayRecognition(evidence) {
   let target
   if (/^douyin_(answer_card|summary_recapture)$/.test(purpose)) {
     target = locators.douyinOcrConsultEntryTarget(recognition, size) || locators.douyinOcrViewFullTarget(recognition, size) || locators.douyinOcrBrandEntryTarget(recognition, xml, size)
+  } else if (purpose === 'douyin_miniapp_network_error') {
+    target = douyinMiniAppNetworkRetryTarget(recognition, size)
   } else if (/^toutiao_(answer_card|summary_recapture)$/.test(purpose)) {
     target = locators.toutiaoOcrViewMoreTarget(recognition, size) || locators.toutiaoOcrMiniAppEntryTarget(recognition, size)
   } else if (/^xiaohe_embedded_evidence/.test(purpose)) {

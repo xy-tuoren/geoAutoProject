@@ -5,7 +5,7 @@ const { referenceProductsCaptureComplete } = require('./reference-products')
 const { writeReplySeamDiagnostics } = require('./seam-diagnostics')
 const { hasAppLimitedNotice, resultQuality } = require('./result-quality')
 
-const ARTIFACT_LAYOUT_VERSION = 9
+const ARTIFACT_LAYOUT_VERSION = 10
 
 function createArtifactWriter({
   defaultCaptureMethod,

@@ -23,6 +23,7 @@ class DouyinMiniAppNetworkError extends Error {
   constructor() {
     super('抖音小程序显示“网络不稳定，请重试”，需要退出并重新打开抖音后重试当前题。')
     this.name = 'DouyinMiniAppNetworkError'
+    this.code = 'DOUYIN_MINIAPP_NETWORK_ERROR'
   }
 }
 
@@ -422,8 +423,9 @@ function createDouyinSearchWorkflow({
     throw new Error('小程序入口卡片已点击，但未能确认抖音小程序宿主页打开。')
   }
   
-  async function waitForDouyinMiniAppAnswer(full, timeout, { question = '' } = {}) {
+  async function waitForDouyinMiniAppAnswer(full, timeout, { question = '', networkRestartAttempts = 0 } = {}) {
     const deadline = full.startedAt + timeout
+    const logicalSize = hierarchyLogicalSize(full.xml || '', await windowSize())
     const contentHeight = full.bounds[3] - full.bounds[1]
     const readinessBounds = [
       full.bounds[0],
@@ -432,8 +434,20 @@ function createDouyinSearchWorkflow({
       full.bounds[3] - Math.max(12, Math.floor(contentHeight * 0.03)),
     ]
     let lastProgress = 0
+    let nextBlankOcrAt = 0
     const recognizeQuestionContext = async (screen, phase) => {
       const recognition = await ocr.recognize(screen, { minConfidence: 0.5 })
+      const retryTarget = douyinMiniAppNetworkRetryTarget(recognition, logicalSize)
+      if (retryTarget) {
+        setLastOcrDiagnostic({
+          created_at: new Date().toISOString(), purpose: 'douyin_miniapp_network_error',
+          phase: `restart_${networkRestartAttempts}_${phase}`, recognition,
+          logical_size: logicalSize, target: retryTarget,
+          network_restart_attempts: networkRestartAttempts,
+        })
+        log(`ocr: purpose=douyin_miniapp_network_error outcome=matched engine=${recognition.engine} elapsed=${Math.round(recognition.elapsedMs || 0)}ms lines=${recognition.results.length} restart_attempts=${networkRestartAttempts}`)
+        throw new DouyinMiniAppNetworkError()
+      }
       const context = douyinMiniAppAnswerContextEvidence(recognition, question)
       setLastOcrDiagnostic({
         created_at: new Date().toISOString(),
@@ -453,11 +467,22 @@ function createDouyinSearchWorkflow({
     while (now() < deadline) {
       checkCancelled()
       const screen = await screenshot()
-      const frame = await cropImage(screen, readinessBounds)
-      if (await imageLooksLoaded(frame)) {
-        const { recognition } = await recognizeQuestionContext(screen, 'initial_loaded_frame')
-        const retryTarget = douyinMiniAppNetworkRetryTarget(recognition, await windowSize())
-        if (retryTarget) throw new DouyinMiniAppNetworkError()
+      const physicalSize = await imageInfo(screen)
+      if (physicalSize.width >= physicalSize.height || logicalSize.width >= logicalSize.height) {
+        throw new Error('抖音小程序回答检查仅支持正常竖屏，已停止UI操作。')
+      }
+      const physicalBounds = readinessBounds.map((value, index) => Math.round(value * (index % 2
+        ? physicalSize.height / logicalSize.height : physicalSize.width / logicalSize.width)))
+      const frame = await cropImage(screen, physicalBounds)
+      const loaded = await imageLooksLoaded(frame)
+      let recognition
+      // Error pages can be mostly blank. Probe independently, without OCR on every blank frame.
+      if (loaded || now() >= nextBlankOcrAt) {
+        const checked = await recognizeQuestionContext(screen, loaded ? 'initial_loaded_frame' : 'blank_frame')
+        recognition = checked.recognition
+        nextBlankOcrAt = now() + 3_000
+      }
+      if (loaded) {
         const brand = findOcrText(recognition, /^[<‹〈く]?小荷AI医生$/, { minConfidence: 0.85 })
           .find(item => item.bounds[1] < recognition.image.height * 0.12)
         if (!brand) {
@@ -467,12 +492,11 @@ function createDouyinSearchWorkflow({
         log('waiting: 小荷页面内容已出现，先等待完成；完整原题将在正式首帧严格校验')
         const remaining = Math.max(1_000, deadline - now())
         const stable = await waitForStableReply(remaining, { startedAt: full.startedAt })
+        // A network page can replace the answer while waiting for stability.
+        await recognizeQuestionContext(await screenshot(), 'stable_frame_recheck')
         if (stable.status !== 'stable') throw new Error(`抖音小程序回答已出现，但等待稳定超时（${stable.status}）。`)
         const bounds = douyinMiniAppCaptureBounds(stable.xml, await windowSize())
         if (!bounds) throw new Error('抖音小程序回答稳定后未能重新确认正文截图区域。')
-        const confirmedScreen = await screenshot()
-        const { recognition: confirmed } = await recognizeQuestionContext(confirmedScreen, 'stable_frame_recheck')
-        if (douyinMiniAppNetworkRetryTarget(confirmed, await windowSize())) throw new DouyinMiniAppNetworkError()
         return { ...full, xml: stable.xml, bounds, exactQuestionValidationRequired: true }
       }
       if (now() - lastProgress >= 5_000) {
@@ -481,6 +505,8 @@ function createDouyinSearchWorkflow({
       }
       await delay(1_000)
     }
+    checkCancelled()
+    await recognizeQuestionContext(await screenshot(), 'deadline_recheck')
     throw new Error('已进入抖音小荷AI医生小程序，但等待时间内未出现可截图的回答正文。')
   }
   

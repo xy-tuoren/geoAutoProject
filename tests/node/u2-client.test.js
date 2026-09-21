@@ -14,7 +14,8 @@ function fixtureClient(environment = {}) {
     adbPath: '/bundled/adb',
     command: { command: process.execPath, args: [fixture], cwd: root },
     requestTimeout: 1_000,
-    startTimeout: 1_000,
+    // These tests exercise request/restart semantics, not OS process startup speed.
+    startTimeout: 5_000,
     readRetryDelay: 0,
     log: () => {},
     environment,

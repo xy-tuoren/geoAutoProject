@@ -15,7 +15,7 @@ const {
 const { imageInfo, cropImage, imageLooksLoaded } = require('./images')
 const { findOcrText, mapPhysicalBoundsToLogical } = require('./ocr')
 
-function miniAppReferenceProductsOcrTrigger(recognition, logicalSize) {
+function miniAppReferenceProductsOcrTrigger(recognition, logicalSize, { cropped = false } = {}) {
   const headings = findOcrText(recognition, /^(?:参考|推荐)药品$/, { minConfidence: 0.85 })
   const buttons = findOcrText(recognition, /^(?:查看)?全部药品[>›]?$/, { minConfidence: 0.85 })
   for (const heading of headings) for (const button of buttons) {
@@ -23,7 +23,7 @@ function miniAppReferenceProductsOcrTrigger(recognition, logicalSize) {
     if (button.bounds[0] <= heading.bounds[2]
       || Math.abs(boundsCenterY(button.bounds) - boundsCenterY(heading.bounds)) > height * 0.8
       || button.bounds[0] < recognition.image.width * 0.65) continue
-    const bounds = mapPhysicalBoundsToLogical(button.bounds, recognition.image, logicalSize)
+    const bounds = mapPhysicalBoundsToLogical(button.bounds, recognition.image, logicalSize, { cropped })
     return [Math.round((bounds[0] + bounds[2]) / 2), Math.round(boundsCenterY(bounds))]
   }
   return null

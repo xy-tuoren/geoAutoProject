@@ -3,13 +3,14 @@ const assert = require('node:assert/strict')
 const { toutiaoHomeSearchBounds, toutiaoSearchInput, toutiaoOcrMiniAppEntryTarget, toutiaoLegacyFullAnswerPage, douyinMiniAppCaptureBounds, toutiaoGenericConsultationPage } = require('../../src/automation/miniapp-locators')
 const { createToutiaoSearchWorkflow } = require('../../src/automation/toutiao-search-workflow')
 const { createQuestionWorkflows } = require('../../src/automation/question-workflows')
+const { createQuestionInputWorkflow } = require('../../src/automation/question-input-workflow')
 const { ToutiaoAnswerCardNotFoundError } = require('../../src/automation/search-recovery')
 const fs = require('node:fs/promises')
 const os = require('node:os')
 const path = require('node:path')
 
-test('头条旧版小荷WebView按标题、返回、正文容器和固定输入栏共同识别，适配两种尺寸', () => {
-  for (const scale of [1, 2 / 3]) {
+test('头条短回答与长回答均能识别正文并返回搜索框，适配两种尺寸', async () => {
+  for (const scale of [1, 2 / 3]) for (const scrollable of [true, false]) {
     const b = values => `[${values.slice(0, 2).map(v => Math.round(v * scale))}][${values.slice(2).map(v => Math.round(v * scale))}]`
     const node = (attrs, bounds) => `<node package="com.ss.android.article.news" ${attrs} bounds="${b(bounds)}"/>`
     const xml = `<hierarchy>${node('', [0, 0, 1080, 2400])}
@@ -17,7 +18,7 @@ test('头条旧版小荷WebView按标题、返回、正文容器和固定输入�
       ${node('content-desc="返回，按钮" clickable="true"', [0, 94, 129, 215])}
       ${node('class="android.webkit.WebView" text="小荷AI医生"', [0, 216, 1080, 2356])}
       ${node('text="AI生成非医疗诊断，仅供参考，不适就医"', [0, 216, 1080, 315])}
-      ${node('scrollable="true"', [0, 216, 1080, 2356])}
+      ${node(`scrollable="${scrollable}"`, [0, 216, 1080, 2356])}
       ${node('class="android.widget.EditText" hint="输入问题AI免费专业解答"', [44, 2165, 1036, 2328])}</hierarchy>`
     const size = { width: 1080 * scale, height: 2400 * scale }
     const page = toutiaoLegacyFullAnswerPage(xml, size)
@@ -29,6 +30,17 @@ test('头条旧版小荷WebView按标题、返回、正文容器和固定输入�
     assert.equal(toutiaoLegacyFullAnswerPage(xml.replaceAll('小荷AI医生', '普通网页'), size), null)
     assert.equal(toutiaoLegacyFullAnswerPage(xml.replaceAll('com.ss.android.article.news', 'other.app'), size), null)
     assert.equal(toutiaoLegacyFullAnswerPage(xml.replace('返回，按钮', '更多'), size), null)
+    let returned = false
+    const taps = []
+    const searchXml = `<hierarchy>${node('', [0, 0, 1080, 2400])}${node('resource-id="com.ss.android.article.news:id/d0" text="搜索框，示例问题" clickable="true"', [180, 120, 900, 210])}</hierarchy>`
+    const workflow = createQuestionInputWorkflow({
+      source: async () => returned ? searchXml : xml, windowSize: async () => size,
+      log: () => {}, ui: {}, waitForVisualQuiet: async () => {},
+      tap: async (x, y) => { taps.push([x, y]); returned = true },
+    })
+    assert.equal((await workflow.waitForToutiaoSearchInput()).text, '示例问题')
+    assert.deepEqual(taps[0], [(page.back[0] + page.back[2]) / 2, (page.back[1] + page.back[3]) / 2])
+    assert.equal(taps.length, 2) // One back click, then the actual host search field.
   }
 })
 

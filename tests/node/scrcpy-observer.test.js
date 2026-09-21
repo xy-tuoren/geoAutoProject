@@ -1,6 +1,12 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
-const { ActivityBurstDetector, ScrcpyObserver, ScrcpyPacketParser, frameCarriesActivity } = require('../../src/automation/scrcpy-observer')
+const { ActivityBurstDetector, ScrcpyObserver, ScrcpyPacketParser, frameCarriesActivity, parseDisplaySize } = require('../../src/automation/scrcpy-observer')
+
+test('预览显示比例使用系统实际分辨率，优先使用覆盖尺寸', () => {
+  assert.deepEqual(parseDisplaySize('Physical size: 1080x2400\n'), { width: 1080, height: 2400 })
+  assert.deepEqual(parseDisplaySize('Physical size: 1440x2560\r\nOverride size: 720x1280\r\n'), { width: 720, height: 1280 })
+  assert.equal(parseDisplaySize('error: offline'), null)
+})
 
 function sessionPacket(width, height) {
   const packet = Buffer.alloc(12)
@@ -55,6 +61,18 @@ test('scrcpy包解析器拒绝异常大包', () => {
   const header = Buffer.alloc(12)
   header.writeUInt32BE(40 * 1024 * 1024, 8)
   assert.throws(() => parser.push(Buffer.concat([streamPacket(), sessionPacket(360, 800), header])), /视频包异常/)
+})
+
+test('scrcpy预览保留配置和视频内容，跨包分片及尺寸变化仍按顺序交付', () => {
+  const packets = [], sessions = []
+  const parser = new ScrcpyPacketParser({ onPacket: packet => packets.push(packet), onSession: session => sessions.push(session) })
+  const payloads = [Buffer.from([0, 0, 0, 1, 103, 66, 0, 31]), Buffer.from('key'), Buffer.from('delta')]
+  const stream = Buffer.concat([streamPacket(), sessionPacket(540, 1200), mediaPacket(payloads[0], { config: true }), mediaPacket(payloads[1], { keyFrame: true }), sessionPacket(720, 960), mediaPacket(payloads[2])])
+  for (let i = 0; i < stream.length; i += 5) parser.push(stream.subarray(i, i + 5))
+  assert.deepEqual(packets.map(packet => packet.data), payloads)
+  assert.equal(packets[0].config, true)
+  assert.equal(packets[1].keyFrame, true)
+  assert.deepEqual(sessions.map(({ width, height }) => [width, height]), [[540, 1200], [720, 960]])
 })
 
 test('scrcpy包解析器拒绝缺失的会话信息', () => {

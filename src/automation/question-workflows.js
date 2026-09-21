@@ -106,7 +106,7 @@ function createQuestionWorkflows({
     return { search_result_only: true, search_result_screenshot: screenshotPath, ...result }
   }
 
-  async function askOnceDouyinAttempt(payload, artifacts, question, index) {
+  async function askOnceDouyinAttempt(payload, artifacts, question, index, networkRestartAttempts) {
     const observerBaseline = typeof observer.snapshot === 'function' ? observer.snapshot() : {}
     const recoveryBaseline = recoverySnapshot()
     log('stage: 正在打开抖音搜索框并输入问题')
@@ -122,6 +122,7 @@ function createQuestionWorkflows({
       new_session_requested: Boolean(payload.newSession),
       new_session_performed: false,
       douyin_search_performed: true,
+      douyin_network_restart_attempts: networkRestartAttempts,
       ui_backend: 'python_uiautomator2_strict',
       ui_fallback_enabled: false,
     }
@@ -201,11 +202,11 @@ function createQuestionWorkflows({
         new_session_performed: Boolean(full.newSessionPerformed),
         douyin_question_logical_image_count: 2,
       })
-      full = await waitForDouyinMiniAppAnswer(full, payload.timeout * 1_000, { question })
       meta.douyin_miniapp_question_validation_method = 'exact_green_bubble_before_first_frame'
-      log('stage: 小荷页面身份已确认，搜索入口图等待完整原题与回答采集校验后再交付')
       captureMethod = () => captureDouyinMiniAppEntryAnswerFrames(full.xml, full.bounds, question)
     }
+    full = await waitForDouyinMiniAppAnswer(full, payload.timeout * 1_000, { question, networkRestartAttempts })
+    log('stage: 小荷页面身份已确认，搜索入口图等待完整原题与回答采集校验后再交付')
     log('stage: 小荷AI医生全文页已打开且回答可截图，开始从上到下完整截图')
     const result = await saveArtifacts({
       artifacts,
@@ -228,9 +229,13 @@ function createQuestionWorkflows({
   async function askOnceDouyin(payload, artifacts, question, index) {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
-        return await askOnceDouyinAttempt(payload, artifacts, question, index)
+        return await askOnceDouyinAttempt(payload, artifacts, question, index, attempt)
       } catch (error) {
-        if (!(error instanceof DouyinMiniAppNetworkError) || attempt > 0) throw error
+        if (!(error instanceof DouyinMiniAppNetworkError)) throw error
+        if (attempt > 0) {
+          error.message = '重启抖音并重试当前题一次后，小程序仍显示“网络不稳定，请重试”。本题采集失败，不再自动重试，请检查手机网络或稍后重试失败项。'
+          throw error
+        }
         log('recovery: 抖音小程序出现网络不稳定，正在退出并重新打开抖音，然后重试当前题（1/1）')
         await restartDouyinEntry()
         log(`recovery: 抖音已重新打开，正在从当前题重新执行：${question}`)

@@ -6,7 +6,6 @@ const log = $('#log')
 const start = $('#start')
 const retryFailed = $('#retry-failed')
 const resumeBatch = $('#resume-batch')
-let stopping = false
 const stop = $('#stop')
 const entryList = $('#entry-list')
 const updateAction = $('#update-action')
@@ -25,6 +24,14 @@ const {
 let updateState = null
 let retryBatchDirectory = null
 let entryProgressState = initializeEntryProgress()
+const { createSession, retainLog, acceptEvent, screenLayout } = window.deviceState
+const sessions = new Map()
+const deviceCards = new Map()
+let selectedSerial = ''
+let defaultOutputDir = ''
+let defaultEntries = []
+let previewEpoch = 0
+let activeView = 'screens'
 const generatorDialog = $('#question-generator-dialog')
 const GENERATOR_STORAGE_KEY = 'question-generator-config-v1'
 let generatorConfig = loadGeneratorConfig()
@@ -327,9 +334,192 @@ function renderEntryProgress() {
   container.replaceChildren(...rows)
 }
 
-function updateRetryFailedAvailability(result = {}) {
-  retryBatchDirectory = retryableBatchDirectory(result)
-  retryFailed.disabled = !retryBatchDirectory
+function sessionFor(serial) {
+  if (!sessions.has(serial)) sessions.set(serial, createSession({ text: '', entries: defaultEntries, outputDir: defaultOutputDir, timeout: '90', maxLongImageHeight: '15000', column: '问题' }))
+  return sessions.get(serial)
+}
+
+function saveDraft() {
+  if (!selectedSerial) return
+  sessionFor(selectedSerial).draft = { text: questions.value, entries: selectedEntries(), outputDir: $('#output-dir').value,
+    timeout: $('#timeout').value, maxLongImageHeight: $('#max-long-image-height').value, column: $('#column-name').value }
+}
+
+function selectDevice(serial) {
+  saveDraft()
+  selectedSerial = serial
+  device.value = serial
+  const session = serial ? sessionFor(serial) : null
+  const draft = session?.draft || { text: '', entries: [], outputDir: defaultOutputDir, timeout: '90', maxLongImageHeight: '15000', column: '问题' }
+  questions.value = draft.text
+  $('#output-dir').value = draft.outputDir
+  $('#timeout').value = draft.timeout
+  $('#max-long-image-height').value = draft.maxLongImageHeight
+  $('#column-name').value = draft.column
+  entryList.querySelectorAll('input').forEach(input => { input.checked = draft.entries.includes(input.value) })
+  clearLog()
+  for (const item of session?.logs || []) appendLog(item.text)
+  entryProgressState = session?.progress || initializeEntryProgress()
+  renderEntryProgress()
+  status.textContent = session?.message || '请连接并选择手机'
+  updatePlan()
+}
+
+function renderDeviceControls() {
+  const session = sessions.get(selectedSerial)
+  const busy = Boolean(session?.running || session?.importing)
+  start.disabled = !session?.connected || busy
+  resumeBatch.disabled = !session?.connected || busy
+  retryBatchDirectory = retryableBatchDirectory(session?.result || {})
+  retryFailed.disabled = !session?.connected || busy || !retryBatchDirectory
+  stop.disabled = !session?.running || session.stopping
+  stop.textContent = session?.stopping ? '正在停止…' : '停止此手机'
+  for (const selector of ['#questions', '#output-dir', '#timeout', '#max-long-image-height', '#column-name', '#import-questions', '#select-directory', '#open-question-generator']) $(selector).disabled = !session || busy
+  entryList.querySelectorAll('input').forEach(input => { input.disabled = !session || busy })
+  $('#start-all').disabled = ![...sessions.values()].some(item => item.connected && !item.running && !item.importing && item.draft.text.trim())
+  $('#stop-all').disabled = ![...sessions.values()].some(item => item.running && !item.stopping)
+  $('#screens-stop-all').disabled = $('#stop-all').disabled
+  $('#queue-device').textContent = selectedSerial ? `${selectedSerial} 的独立题目队列` : '先选择手机 · 可分别导入不同题目'
+  $('#log-device').textContent = selectedSerial ? `${selectedSerial} · 保留全部失败及最近 100 条过程日志` : '请选择手机查看日志'
+}
+
+function showWorkspace(view) {
+  activeView = view
+  for (const name of ['screens', 'tasks']) {
+    $(`#view-${name}`).hidden = name !== view
+    $(`#tab-${name}`).setAttribute('aria-selected', String(name === view))
+    $(`#tab-${name}`).tabIndex = name === view ? 0 : -1
+  }
+  renderDeviceControls()
+  refreshPreviewState()
+  layoutDeviceCards()
+}
+
+function layoutDeviceCards() {
+  if (activeView !== 'screens') return
+  const container = $('#device-cards')
+  const { width, height } = container.getBoundingClientRect()
+  const layout = screenLayout(width, height, [...deviceCards.values()].map(card => card.aspect || 9 / 20))
+  container.style.setProperty('--device-columns', layout.widths.map(value => `${value}px`).join(' ') || '1fr')
+  container.style.setProperty('--device-screen-height', `${layout.screenHeight}px`)
+}
+
+function addDeviceLog(serial, text) {
+  const session = sessionFor(serial)
+  retainLog(session, text, logEntryKind(text))
+  if (selectedSerial === serial) appendLog(text)
+}
+
+function canPreview(card) {
+  return $('#preview-enabled').checked && !document.hidden && sessions.get(card.serial)?.connected
+    && activeView === 'screens'
+}
+
+function stopCardPreview(card) {
+  const streamId = card.streamId
+  card.streamId = null
+  clearTimeout(card.timer)
+  card.player?.close()
+  card.player = null
+  if (streamId) void window.automation.stopPreview(card.serial, streamId).catch(() => {})
+  card.screen.classList.add('is-stale')
+}
+
+function previewFailed(card, message) {
+  stopCardPreview(card)
+  card.freshness.textContent = message
+  card.freshness.title = message
+  if (card.canvas.hidden) card.placeholder.textContent = '预览不可用，请刷新设备重试'
+}
+
+function startCardPreview(card) {
+  if (!canPreview(card) || card.streamId) return
+  const streamId = `${++previewEpoch}:${card.serial}`
+  card.streamId = streamId
+  card.freshness.textContent = '正在连接实时画面…'
+  card.placeholder.textContent = '正在连接实时画面…'
+  try {
+    card.player = window.previewPlayer.createPreviewPlayer({ canvas: card.canvas,
+      onFrame: frame => {
+        if (card.streamId !== streamId || !canPreview(card)) return
+        clearTimeout(card.timer)
+        card.canvas.hidden = false
+        card.placeholder.hidden = true
+        card.screen.classList.remove('is-stale')
+        card.freshness.textContent = `实时 · ${new Date().toLocaleTimeString()}`
+        card.freshness.title = `${frame.width} × ${frame.height} · scrcpy 视频流 · 最高 15 帧/秒`
+        if (card.aspect !== frame.width / frame.height) { card.aspect = frame.width / frame.height; layoutDeviceCards() }
+      },
+      onError: error => { if (card.streamId === streamId) previewFailed(card, `视频无法显示：${error.message}。请刷新设备重试。`) },
+    })
+    card.timer = setTimeout(() => { if (card.streamId === streamId) previewFailed(card, '未收到可显示的画面，请检查手机连接后刷新设备。') }, 15_000)
+    void window.automation.startPreview(card.serial, streamId).catch(error => {
+      if (card.streamId === streamId) previewFailed(card, error.message)
+    })
+  } catch (error) { previewFailed(card, error.message) }
+}
+
+function refreshPreviewState() {
+  for (const card of deviceCards.values()) {
+    stopCardPreview(card)
+    if (canPreview(card)) startCardPreview(card)
+    else card.freshness.textContent = sessions.get(card.serial)?.connected ? '画面同步已暂停' : '设备已断开，画面不再更新'
+  }
+}
+
+window.automation.onPreview(event => {
+  const card = deviceCards.get(event.serial)
+  try {
+    if (!card || card.streamId !== event.streamId || !canPreview(card)) return
+    if (event.type === 'error') previewFailed(card, event.message)
+    else card.player?.push(event)
+  } finally {
+    if (event.type === 'packet') window.automation.acknowledgePreview(event.serial, event.streamId, event.sequence)
+  }
+})
+
+function renderDeviceCards() {
+  const container = $('#device-cards')
+  if (sessions.size && !deviceCards.size) container.replaceChildren()
+  for (const [serial, session] of sessions) {
+    let card = deviceCards.get(serial)
+    if (!card) {
+      const element = document.createElement('article')
+      element.className = 'device-card'
+      element.innerHTML = '<header class="device-card-header"><strong></strong><span class="device-task-status"></span></header><div class="device-screen"><span>等待画面</span><canvas hidden role="img"></canvas></div><p class="device-freshness">等待更新…</p><p class="device-task-detail"></p><div class="device-card-actions"><button class="secondary" type="button">配置 / 日志</button><button class="danger" type="button">停止</button></div>'
+      element.querySelector('strong').textContent = serial
+      element.querySelector('strong').title = serial
+      const screen = element.querySelector('.device-screen')
+      const canvas = screen.querySelector('canvas')
+      canvas.setAttribute('aria-label', `${serial} 当前屏幕，只读实时画面`)
+      card = { serial, element, screen, canvas, placeholder: screen.querySelector('span'), freshness: element.querySelector('.device-freshness'), streamId: null, player: null, timer: null }
+      const buttons = element.querySelectorAll('.device-card-actions button')
+      buttons[0].setAttribute('aria-label', `配置 ${serial} 并查看日志`)
+      buttons[0].addEventListener('click', () => { selectDevice(serial); showWorkspace('tasks') })
+      buttons[1].setAttribute('aria-label', `停止 ${serial} 的任务`)
+      buttons[1].addEventListener('click', () => stopDevice(serial))
+      container.append(element)
+      deviceCards.set(serial, card)
+      startCardPreview(card)
+    }
+    card.element.classList.toggle('is-selected', serial === selectedSerial)
+    card.element.querySelector('.device-card-actions .secondary').setAttribute('aria-pressed', String(serial === selectedSerial))
+    const label = card.element.querySelector('.device-task-status')
+    label.textContent = session.stopping ? '正在停止' : session.running ? '执行中' : !session.connected ? '已断开' : session.result ? (session.result.code === 130 ? '已停止' : session.result.code || session.result.summary?.failed ? '有失败' : '已完成') : '待执行'
+    label.dataset.state = session.running ? 'running' : session.result?.code || session.result?.summary?.failed ? 'failure' : 'idle'
+    const entries = session.progress?.entries || []
+    const done = entries.reduce((sum, entry) => sum + entry.succeeded + entry.failed, 0)
+    const total = entries.reduce((sum, entry) => sum + entry.total, 0)
+    const active = entries.find(entry => entry.active_question)?.active_question
+    const detail = card.element.querySelector('.device-task-detail')
+    detail.textContent = total ? `${done}/${total} 已处理${active ? ` · ${active}` : ''}` : `${parseQuestionInput(session.draft.text).questions.length} 题 · ${session.draft.entries.length} 个入口`
+    detail.title = detail.textContent
+    card.element.querySelector('.device-card-actions .danger').disabled = !session.running || session.stopping
+  }
+  const list = [...sessions.values()]
+  $('#device-overview').textContent = `${list.filter(item => item.connected).length} 台已连接 · ${list.filter(item => item.running).length} 台执行中 · 从左到右 · 画面适应窗口`
+  $('#screen-count').textContent = list.filter(item => item.connected).length
+  layoutDeviceCards()
 }
 
 function renderUpdateState(next) {
@@ -408,6 +598,7 @@ function selectedEntries() {
 }
 
 function updatePlan() {
+  saveDraft()
   const plan = currentQuestionPlan()
   const deviceCount = device.value ? 1 : 0
   const entryCount = selectedEntries().length
@@ -420,27 +611,52 @@ function updatePlan() {
     : `${grouping}${deviceCount} 台设备 × ${entryCount} 个入口 × ${questionCount} 条问题 = ${deviceCount * entryCount * questionCount} 次计划`
   $('#question-count').textContent = `${questionCount} 条问题`
   renderQuestionPlan(plan)
+  renderDeviceControls()
+  renderDeviceCards()
+}
+
+const MAX_ROUTINE_LOG_ENTRIES = 100
+const routineLogEntries = []
+
+function logEntryKind(text) {
+  const value = String(text)
+  if (/(?:^|\n)\s*(?:错误|失败)(?:\s{2,}|[:：])|Traceback|(?:Error|Exception):|任务失败|重试失败/i.test(value)) return 'failure'
+  if (/(?:^|\n)\s*(?:完成\s{2,}|执行完成|重试完成|失败项已全部重试成功)|成功[:：]/.test(value)) return 'success'
+  return 'routine'
 }
 
 function appendLog(text) {
-  log.append(document.createTextNode(text))
+  const kind = logEntryKind(text)
+  const entry = document.createElement('span')
+  entry.className = `log-entry log-entry-${kind}`
+  entry.textContent = String(text)
+  log.append(entry)
+  if (kind !== 'failure') {
+    routineLogEntries.push(entry)
+    while (routineLogEntries.length > MAX_ROUTINE_LOG_ENTRIES) routineLogEntries.shift().remove()
+  }
   log.scrollTop = log.scrollHeight
 }
 
 function clearLog() {
-  log.textContent = ''
+  log.replaceChildren()
+  routineLogEntries.length = 0
 }
 
 async function refreshDevices() {
   status.textContent = '正在读取 ADB 设备…'
   try {
     const devices = await window.automation.listDevices()
+    saveDraft()
+    for (const session of sessions.values()) session.connected = false
+    devices.forEach(serial => { sessionFor(serial).connected = true })
     device.replaceChildren()
-    if (!devices.length) device.add(new Option('未发现已授权设备', ''))
-    devices.forEach(serial => device.add(new Option(serial, serial)))
+    if (!sessions.size) device.add(new Option('未发现已授权设备', ''))
+    for (const [serial, session] of sessions) device.add(new Option(`${serial}${session.connected ? '' : '（已断开）'}`, serial))
+    selectDevice(sessions.has(selectedSerial) ? selectedSerial : devices[0] || '')
+    refreshPreviewState()
     status.textContent = devices.length ? `已发现 ${devices.length} 台已授权设备` : '未发现已授权设备'
   } catch (error) {
-    device.replaceChildren(new Option('读取设备失败', ''))
     status.textContent = error.message || '读取 ADB 设备失败'
   }
   updatePlan()
@@ -449,6 +665,7 @@ async function refreshDevices() {
 async function refreshEntries() {
   try {
     const entries = await window.automation.listEntries()
+    defaultEntries = entries.filter(entry => entry.defaultSelected).map(entry => entry.id)
     entryList.replaceChildren()
     entries.forEach(entry => {
       const label = document.createElement('label')
@@ -482,22 +699,28 @@ function extensionOf(filePath) {
   return match ? match[0].toLowerCase() : ''
 }
 
-async function importQuestionFile(filePath) {
+async function importQuestionFile(filePath, serial = selectedSerial) {
   if (!filePath) return
+  const session = sessions.get(serial)
+  if (!session || session.running || session.importing) return
+  saveDraft()
   if (!QUESTION_EXTENSIONS.has(extensionOf(filePath))) {
     status.textContent = '仅支持 TXT、CSV、JSON、XLSX、XLSM 问题文件'
     return
   }
   try {
-    if (currentQuestionPlan().mode === 'grouped') {
+    if (parseQuestionInput(session.draft.text).mode === 'grouped') {
       status.textContent = '当前为品牌分组模式，请把导入的问题放到对应“#品牌名”标题下'
       return
     }
-    const imported = await window.automation.importQuestions({ file: filePath, column: $('#column-name').value })
-    questions.value = [...uniqueQuestions(), ...imported].filter((item, index, list) => list.indexOf(item) === index).join('\n')
-    updatePlan()
+    session.importing = true
+    renderDeviceControls()
+    const imported = await window.automation.importQuestions({ file: filePath, column: session.draft.column })
+    session.draft.text = [...parseQuestionInput(session.draft.text).questions, ...imported].filter((item, index, list) => list.indexOf(item) === index).join('\n')
+    if (selectedSerial === serial) questions.value = session.draft.text
     status.textContent = `已导入 ${imported.length} 条问题`
   } catch (error) { status.textContent = error.message || '导入失败' }
+  finally { session.importing = false; updatePlan() }
 }
 
 async function importGeneratorProductFile(filePath) {
@@ -529,13 +752,32 @@ function setDropActive(active) {
 }
 
 $('#refresh-devices').addEventListener('click', refreshDevices)
+$('#refresh-screens').addEventListener('click', refreshDevices)
+for (const [index, view] of ['screens', 'tasks'].entries()) {
+  $(`#tab-${view}`).addEventListener('click', () => showWorkspace(view))
+  $(`#tab-${view}`).addEventListener('keydown', event => {
+    const views = ['screens', 'tasks']
+    const target = event.key === 'ArrowRight' ? (index + 1) % views.length : event.key === 'ArrowLeft' ? (index + views.length - 1) % views.length : event.key === 'Home' ? 0 : event.key === 'End' ? views.length - 1 : -1
+    if (target < 0) return
+    event.preventDefault()
+    showWorkspace(views[target]); $(`#tab-${views[target]}`).focus()
+  })
+}
+$('#screens-stop-all').addEventListener('click', () => Promise.allSettled([...sessions.keys()].map(stopDevice)))
+new ResizeObserver(layoutDeviceCards).observe($('#device-cards'))
 $('#select-directory').addEventListener('click', async () => {
+  const serial = selectedSerial
   const directory = await window.automation.selectDirectory()
-  if (directory) $('#output-dir').value = directory
+  if (directory && sessions.has(serial)) {
+    sessionFor(serial).draft.outputDir = directory
+    if (selectedSerial === serial) $('#output-dir').value = directory
+  }
+  updatePlan()
 })
 $('#import-questions').addEventListener('click', async () => {
+  const serial = selectedSerial
   const file = await window.automation.selectQuestions()
-  await importQuestionFile(file)
+  await importQuestionFile(file, serial)
 })
 
 $('#open-question-generator').addEventListener('click', () => {
@@ -689,8 +931,13 @@ generatorProductDropzone.addEventListener('drop', async event => {
   await importGeneratorProductFile(window.automation.getPathForFile(file))
 }, true)
 questions.addEventListener('input', updatePlan)
-device.addEventListener('change', updatePlan)
-$('#clear-log').addEventListener('click', clearLog)
+device.addEventListener('change', () => selectDevice(device.value))
+$('#clear-log').addEventListener('click', () => {
+  if (selectedSerial) { sessionFor(selectedSerial).logs = []; sessionFor(selectedSerial).routineCount = 0 }
+  clearLog()
+})
+$('#preview-enabled').addEventListener('change', refreshPreviewState)
+document.addEventListener('visibilitychange', refreshPreviewState)
 $('#copy-log').addEventListener('click', async () => {
   const text = log.textContent
   if (!text) { status.textContent = '日志为空，无内容可复制'; return }
@@ -719,99 +966,129 @@ updateAction.addEventListener('click', async () => {
   }
 })
 
-start.addEventListener('click', async () => {
-  clearLog()
-  const questionPlan = currentQuestionPlan()
-  if (questionPlan.errors.length) { status.textContent = `请先修正分组输入：${questionPlan.errors[0]}`; return }
-  const timeout = Number($('#timeout').value)
-  if (!Number.isFinite(timeout) || timeout <= 0) { status.textContent = '请输入大于 0 的超时时间'; return }
-  const maxLongImageHeight = Number($('#max-long-image-height').value)
-  if (!Number.isInteger(maxLongImageHeight) || maxLongImageHeight < 3000 || maxLongImageHeight > 30000) { status.textContent = '长图上限请输入 3000–30000 之间的整数'; return }
-  const entries = selectedEntries()
-  if (!entries.length) { status.textContent = '请至少选择一个入口'; return }
+function devicePayload(serial) {
+  const session = sessionFor(serial)
+  if (!session.connected) throw new Error(`手机 ${serial} 未连接`)
+  const { draft } = session
+  const questionPlan = parseQuestionInput(draft.text)
+  if (questionPlan.errors.length) throw new Error(`请修正 ${serial} 的题目：${questionPlan.errors[0]}`)
+  const timeout = Number(draft.timeout), maxLongImageHeight = Number(draft.maxLongImageHeight)
+  if (!Number.isFinite(timeout) || timeout <= 0) throw new Error('单题超时需大于 0')
+  if (!Number.isInteger(maxLongImageHeight) || maxLongImageHeight < 3000 || maxLongImageHeight > 30000) throw new Error('长图上限需为 3000–30000 之间的整数')
+  return { serial, questions: questionPlan.questions, brandGroups: questionPlan.brandGroups, entries: draft.entries, outputDir: draft.outputDir.trim(), timeout, maxLongImageHeight, newSession: true }
+}
+
+async function launchDevice(serial, retry = null) {
+  const session = sessionFor(serial)
+  if (session.running || session.importing) return
+  let payload
   try {
-    appendLog('$ 启动自动化任务\n')
-    await window.automation.start({
-      questions: questionPlan.questions,
-      brandGroups: questionPlan.brandGroups,
-      entries,
-      serial: device.value,
-      outputDir: $('#output-dir').value.trim(),
-      timeout,
-      newSession: true,
-      maxLongImageHeight,
-    })
-    updateRetryFailedAvailability()
-    start.disabled = true; resumeBatch.disabled = true; stop.disabled = false; stopping = false; stop.textContent = '停止'; status.textContent = '任务正在执行…'
-  } catch (error) { status.textContent = error.message || '无法启动任务' }
-})
-retryFailed.addEventListener('click', async () => {
-  if (!retryBatchDirectory) { status.textContent = '当前没有可重试的失败批次'; return }
-  const timeout = Number($('#timeout').value)
-  const maxLongImageHeight = Number($('#max-long-image-height').value)
-  if (!Number.isFinite(timeout) || timeout <= 0 || !Number.isInteger(maxLongImageHeight) || maxLongImageHeight < 3000 || maxLongImageHeight > 30000) {
-    status.textContent = '请先检查单题超时和长图上限设置'
-    return
+    payload = devicePayload(serial)
+    if (!retry && (!payload.questions.length || !payload.entries.length || !payload.outputDir)) throw new Error('请填写题目、选择入口并设置截图目录')
+  } catch (error) { status.textContent = `${serial}：${error.message}`; throw error }
+  const previousTaskId = session.taskId
+  session.taskId = null
+  session.running = true; session.stopping = false; session.message = '正在启动…'
+  if (!retry) {
+    session.logs = []; session.routineCount = 0; session.progress = initializeEntryProgress(); session.result = null
+    if (serial === selectedSerial) { clearLog(); entryProgressState = session.progress; renderEntryProgress() }
   }
+  renderDeviceControls(); renderDeviceCards()
   try {
-    await window.automation.retryFailed({
-      serial: device.value,
-      batchDirectory: retryBatchDirectory,
-      timeout,
-      newSession: true,
-      maxLongImageHeight,
-    })
-    start.disabled = true; resumeBatch.disabled = true; retryFailed.disabled = true; stop.disabled = false; stopping = false; stop.textContent = '停止'
-    status.textContent = '正在重试失败项…'; appendLog(`\n$ 重试原批次失败项：${retryBatchDirectory}\n`)
-  } catch (error) { status.textContent = error.message || '无法重试失败项' }
+    addDeviceLog(serial, retry ? '\n$ 继续或重试原批次\n' : '$ 启动自动化任务\n')
+    const accepted = retry ? await window.automation.retryFailed({ ...payload, ...retry }) : await window.automation.start(payload)
+    if (accepted === false) { session.running = false; session.stopping = false; session.taskId = previousTaskId; session.message = '已取消继续批次'; return }
+    session.taskId ||= accepted.taskId
+    if (session.stopping && session.running) { session.stopping = false; await stopDevice(serial) }
+    else if (session.running) session.message = '任务正在执行…'
+  } catch (error) {
+    session.running = false; session.stopping = false; session.taskId = previousTaskId; session.message = error.message || '无法启动任务'
+    addDeviceLog(serial, `错误：${session.message}\n`)
+  } finally {
+    if (selectedSerial === serial) status.textContent = session.message
+    renderDeviceControls(); renderDeviceCards()
+  }
+}
+
+start.addEventListener('click', () => { saveDraft(); void launchDevice(selectedSerial).catch(() => {}) })
+$('#start-all').addEventListener('click', async () => {
+  saveDraft()
+  const serials = [...sessions].filter(([, session]) => session.connected && !session.running && !session.importing && session.draft.text.trim()).map(([serial]) => serial)
+  await Promise.allSettled(serials.map(serial => launchDevice(serial)))
+})
+retryFailed.addEventListener('click', () => {
+  saveDraft()
+  if (retryBatchDirectory) void launchDevice(selectedSerial, { batchDirectory: retryBatchDirectory }).catch(() => {})
 })
 resumeBatch.addEventListener('click', async () => {
-  if (!device.value) { status.textContent = '请先选择手机'; return }
+  const serial = selectedSerial
+  if (!serial) { status.textContent = '请先选择手机'; return }
+  saveDraft()
   try {
     const directory = await window.automation.selectDirectory()
     if (!directory) return
-    const accepted = await window.automation.retryFailed({ serial: device.value, batchDirectory: directory, resume: true,
-      timeout: Number($('#timeout').value), maxLongImageHeight: Number($('#max-long-image-height').value) })
-    if (accepted === false) return
-    start.disabled = true; resumeBatch.disabled = true; retryFailed.disabled = true; stop.disabled = false
-    stopping = false; stop.textContent = '停止'; status.textContent = '正在继续原批次…'
+    await launchDevice(serial, { batchDirectory: directory, resume: true })
   } catch (error) { status.textContent = error.message || '无法继续原批次' }
 })
-stop.addEventListener('click', async () => {
-  if (stopping) return
-  stopping = true; stop.disabled = true; stop.textContent = '正在停止…'
-  status.textContent = '正在停止手机操作，保存进度并恢复设备设置…'
-  try { await window.automation.stop() }
-  catch (error) { stopping = false; stop.disabled = false; stop.textContent = '停止'; status.textContent = `停止请求失败：${error.message}` }
-})
-window.automation.onLog(appendLog)
-window.automation.onProgress(value => {
-  if (value.type === 'stopping') { status.textContent = '正在停止手机操作，保存进度并恢复设备设置…'; return }
-  entryProgressState = applyEntryProgress(entryProgressState, value)
-  renderEntryProgress()
-})
-window.automation.onFinished(({ code, summary, error, retried }) => {
-  start.disabled = false
-  resumeBatch.disabled = false
-  stopping = false
-  stop.textContent = '停止'
-  stop.disabled = true
-  updateRetryFailedAvailability({ code, summary })
-  if (summary?.entries && summary?.results) {
-    entryProgressState = initializeEntryProgress({ entries: summary.entries, question_count: summary.question_count, results: summary.results })
-    renderEntryProgress()
+
+async function stopDevice(serial) {
+  const session = sessions.get(serial)
+  if (!session?.running || session.stopping) return
+  session.stopping = true
+  session.message = '正在停止手机操作，保存进度并恢复设备设置…'
+  if (selectedSerial === serial) status.textContent = session.message
+  renderDeviceControls(); renderDeviceCards()
+  if (!session.taskId) return // The start IPC will forward this stop as soon as it receives its task id.
+  try { await window.automation.stop(serial) }
+  catch (error) {
+    session.stopping = false; session.message = `停止请求失败：${error.message}，请再次点击停止。`
+    addDeviceLog(serial, `错误：${session.message}\n`)
+    if (selectedSerial === serial) status.textContent = session.message
   }
-  if (code === 130) status.textContent = `任务已停止，已完成 ${summary?.completed || 0} 题；可用“继续原批次”恢复。`
-  else if (summary?.needs_confirmation) status.textContent = `本轮结束，${summary.needs_confirmation} 题操作状态待确认；可用“继续原批次”处理。`
-  else if (code !== 0 && error) status.textContent = `${error.title}：${error.message} ${error.action}`
-  else if (code !== 0) status.textContent = `${retried ? '重试' : '任务'}结束，退出码 ${code}`
-  else if (summary?.failed) status.textContent = `${retried ? '重试完成' : '执行完成'}：成功 ${summary.completed}，失败 ${summary.failed}；可点击“重试失败项”`
-  else status.textContent = `${retried ? '失败项已全部重试成功' : '执行完成'}：成功 ${summary?.completed ?? 0}`
+  renderDeviceControls(); renderDeviceCards()
+}
+stop.addEventListener('click', () => stopDevice(selectedSerial))
+$('#stop-all').addEventListener('click', () => Promise.allSettled([...sessions.keys()].map(stopDevice)))
+window.automation.onLog(value => {
+  if (acceptEvent(sessionFor(value.serial), value)) addDeviceLog(value.serial, value.text)
+})
+window.automation.onProgress(value => {
+  const session = sessionFor(value.serial)
+  if (!acceptEvent(session, value)) return
+  if (value.type === 'stopping') { session.stopping = true; session.message = '正在停止手机操作，保存进度并恢复设备设置…' }
+  session.progress = applyEntryProgress(session.progress || initializeEntryProgress(), value)
+  if (selectedSerial === value.serial) { entryProgressState = session.progress; renderEntryProgress(); status.textContent = session.message }
+  renderDeviceControls(); renderDeviceCards()
+})
+window.automation.onFinished(result => {
+  const { code, summary, error, retried, serial } = result
+  const session = sessionFor(serial)
+  if (!acceptEvent(session, result)) return
+  session.running = false; session.stopping = false; session.result = result
+  if (summary?.entries && summary?.results) {
+    session.progress = initializeEntryProgress({ entries: summary.entries, question_count: summary.question_count, results: summary.results })
+  }
+  if (code === 130) session.message = `任务已停止，已完成 ${summary?.completed || 0} 题；可用“继续原批次”恢复。`
+  else if (summary?.needs_confirmation) session.message = `本轮结束，${summary.needs_confirmation} 题操作状态待确认；可用“继续原批次”处理。`
+  else if (code !== 0 && error) session.message = `${error.title}：${error.message} ${error.action}`
+  else if (code !== 0) session.message = `${retried ? '重试' : '任务'}结束，退出码 ${code}`
+  else if (summary?.failed) session.message = `执行完成：成功 ${summary.completed}，失败 ${summary.failed}；可点击“重试失败项”`
+  else session.message = `执行完成：成功 ${summary?.completed ?? 0}`
+  if (selectedSerial === serial) { entryProgressState = session.progress || initializeEntryProgress(); renderEntryProgress(); status.textContent = session.message }
+  renderDeviceControls(); renderDeviceCards()
 })
 window.automation.onUpdateState(renderUpdateState)
 
-window.automation.defaultOutputDirectory().then(directory => { $('#output-dir').value = directory })
 window.automation.getUpdateState().then(renderUpdateState)
-refreshEntries()
-refreshDevices()
+async function initializeWorkspace() {
+  defaultOutputDir = await window.automation.defaultOutputDirectory()
+  await refreshEntries()
+  for (const task of await window.automation.listTasks()) {
+    const session = sessionFor(task.serial)
+    session.taskId = task.taskId; session.running = true; session.stopping = task.status === 'stopping'; session.message = '任务正在执行…'
+    if (task.progress) session.progress = task.progress
+  }
+  await refreshDevices()
+}
+void initializeWorkspace().catch(error => { status.textContent = error.message })
 renderEntryProgress()

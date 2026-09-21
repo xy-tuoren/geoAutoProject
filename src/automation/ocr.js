@@ -89,11 +89,12 @@ function findOcrText(recognition, matcher, { minConfidence = 0 } = {}) {
     .sort((first, second) => second.confidence - first.confidence || first.bounds[1] - second.bounds[1])
 }
 
-function mapPhysicalBoundsToLogical(bounds, physicalSize, logicalSize) {
+function mapPhysicalBoundsToLogical(bounds, physicalSize, logicalSize, { cropped = false } = {}) {
   const source = validSize(physicalSize, '图片物理')
   const target = validSize(logicalSize, 'UI逻辑')
   const input = validBounds(bounds)
-  if (source.height <= source.width || target.height <= target.width) throw new Error('OCR坐标映射仅支持正常竖屏。')
+  // Crops use local coordinates; their aspect ratio says nothing about device rotation.
+  if (!cropped && (source.height <= source.width || target.height <= target.width)) throw new Error('OCR坐标映射仅支持正常竖屏。')
   const scaleX = target.width / source.width
   const scaleY = target.height / source.height
   return [

@@ -129,9 +129,10 @@ jobs:
     permissions:
       contents: read
     env:
-      UPDATE_SERVER_HOST: ${{ secrets.UPDATE_SERVER_HOST }}
-      UPDATE_SERVER_USER: ${{ secrets.UPDATE_SERVER_USER }}
-      UPDATE_SERVER_SSH_PASSWORD: ${{ secrets.UPDATE_SERVER_SSH_PASSWORD }}
+      TENCENT_COS_SECRET_ID: ${{ secrets.TENCENT_COS_SECRET_ID }}
+      TENCENT_COS_SECRET_KEY: ${{ secrets.TENCENT_COS_SECRET_KEY }}
+      TENCENT_COS_BUCKET: ${{ secrets.TENCENT_COS_BUCKET }}
+      TENCENT_COS_REGION: ${{ secrets.TENCENT_COS_REGION }}
 
     steps:
       - name: Download Windows installer
@@ -140,43 +141,166 @@ jobs:
           name: question-automation-windows-x64
           path: release-assets
 
-      - name: Validate update deployment configuration
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Validate COS deployment configuration
         shell: bash
         run: |
-          test -n "$UPDATE_SERVER_HOST"
-          test -n "$UPDATE_SERVER_USER"
-          test -n "$UPDATE_SERVER_SSH_PASSWORD"
+          test -n "$TENCENT_COS_SECRET_ID"
+          test -n "$TENCENT_COS_SECRET_KEY"
+          test -n "$TENCENT_COS_BUCKET"
+          test -n "$TENCENT_COS_REGION"
           test -f release-assets/latest.yml
           compgen -G 'release-assets/*.exe' > /dev/null
           compgen -G 'release-assets/*.blockmap' > /dev/null
 
-      - name: Publish Windows auto-update files to server
+      - name: Install Tencent COS SDK
+        run: python -m pip install cos-python-sdk-v5==1.9.44
+
+      - name: Publish Windows auto-update files to COS
         shell: bash
         run: |
           set -euo pipefail
+          python - <<'PY'
+          import glob
+          import os
+          import re
+          from pathlib import Path
+
+          from qcloud_cos import CosConfig, CosS3Client
+
+          bucket = os.environ["TENCENT_COS_BUCKET"]
+          region = os.environ["TENCENT_COS_REGION"]
+          client = CosS3Client(CosConfig(
+              Region=region,
+              SecretId=os.environ["TENCENT_COS_SECRET_ID"],
+              SecretKey=os.environ["TENCENT_COS_SECRET_KEY"],
+              Scheme="https",
+          ))
+          installer = Path(glob.glob("release-assets/*.exe")[0])
+          blockmap = Path(f"{installer}.blockmap")
+          metadata = Path("release-assets/latest.yml")
+          prefix = "geo-updates/win/"
+
+          for asset, content_type in (
+              (installer, "application/vnd.microsoft.portable-executable"),
+              (blockmap, "application/octet-stream"),
+          ):
+              client.upload_file(
+                  Bucket=bucket,
+                  Key=f"{prefix}{asset.name}",
+                  LocalFilePath=str(asset),
+                  PartSize=10,
+                  MAXThread=5,
+                  EnableMD5=True,
+                  ACL="public-read",
+                  ContentType=content_type,
+                  CacheControl="public, max-age=31536000, immutable",
+              )
+
+          client.upload_file(
+              Bucket=bucket,
+              Key=f"{prefix}question-automation-electron-setup.exe",
+              LocalFilePath=str(installer),
+              PartSize=10,
+              MAXThread=5,
+              EnableMD5=True,
+              ACL="public-read",
+              ContentType="application/vnd.microsoft.portable-executable",
+              CacheControl="no-cache",
+          )
+
+          with metadata.open("rb") as body:
+              client.put_object(
+                  Bucket=bucket,
+                  Key=f"{prefix}latest.yml",
+                  Body=body,
+                  EnableMD5=True,
+                  ACL="public-read",
+                  ContentType="application/yaml",
+                  CacheControl="no-cache, no-store, must-revalidate",
+              )
+
+          versioned_installers = []
+          marker = ""
+          while True:
+              response = client.list_objects(
+                  Bucket=bucket,
+                  Prefix=f"{prefix}question-automation-electron-setup-",
+                  Marker=marker,
+                  MaxKeys=1000,
+              )
+              for item in response.get("Contents", []):
+                  filename = item["Key"].removeprefix(prefix)
+                  if re.fullmatch(r"question-automation-electron-setup-.+\.exe", filename):
+                      versioned_installers.append((item["LastModified"], item["Key"]))
+              if str(response.get("IsTruncated", "false")).lower() != "true":
+                  break
+              marker = response["NextMarker"]
+
+          stale_installers = sorted(versioned_installers, reverse=True)[5:]
+          for _, installer_key in stale_installers:
+              assert installer_key.startswith(f"{prefix}question-automation-electron-setup-")
+              assert installer_key.endswith(".exe")
+              client.delete_object(Bucket=bucket, Key=f"{installer_key}.blockmap")
+              client.delete_object(Bucket=bucket, Key=installer_key)
+              print(f"deleted stale COS release {Path(installer_key).name}")
+          PY
+
+      - name: Verify public COS update files
+        shell: bash
+        run: |
+          set -euo pipefail
+          installer=$(find release-assets -maxdepth 1 -type f -name '*.exe' -printf '%f\n' -quit)
+          base_url="https://${TENCENT_COS_BUCKET}.cos.${TENCENT_COS_REGION}.myqcloud.com/geo-updates/win"
+          curl --fail --silent --show-error --retry 3 --range 0-0 "$base_url/$installer" >/dev/null
+          curl --fail --silent --show-error --retry 3 --range 0-0 "$base_url/${installer}.blockmap" >/dev/null
+          curl --fail --silent --show-error --retry 3 --range 0-0 "$base_url/question-automation-electron-setup.exe" >/dev/null
+          curl --fail --silent --show-error --retry 3 "$base_url/latest.yml" --output deployed-latest.yml
+          cmp release-assets/latest.yml deployed-latest.yml
+
+  bridge-legacy-windows-update:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: deploy-windows-update
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      UPDATE_SERVER_HOST: ${{ secrets.UPDATE_SERVER_HOST }}
+      UPDATE_SERVER_USER: ${{ secrets.UPDATE_SERVER_USER }}
+      UPDATE_SERVER_SSH_PASSWORD: ${{ secrets.UPDATE_SERVER_SSH_PASSWORD }}
+      TENCENT_COS_BUCKET: ${{ secrets.TENCENT_COS_BUCKET }}
+      TENCENT_COS_REGION: ${{ secrets.TENCENT_COS_REGION }}
+
+    steps:
+      - name: Download Windows update metadata
+        uses: actions/download-artifact@v4
+        with:
+          name: question-automation-windows-x64
+          path: release-assets
+
+      - name: Point legacy clients to COS
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$UPDATE_SERVER_HOST"
+          test -n "$UPDATE_SERVER_USER"
+          test -n "$UPDATE_SERVER_SSH_PASSWORD"
+          installer=$(find release-assets -maxdepth 1 -type f -name '*.exe' -printf '%f\n' -quit)
+          cos_url="https://${TENCENT_COS_BUCKET}.cos.${TENCENT_COS_REGION}.myqcloud.com/geo-updates/win/$installer"
+          sed -E \
+            -e "s|^([[:space:]]*-[[:space:]]*)url: .*\\.exe$|\\1url: $cos_url|" \
+            -e "s|^path: .*\\.exe$|path: $cos_url|" \
+            release-assets/latest.yml > legacy-latest.yml
+          grep -F "url: $cos_url" legacy-latest.yml
+          grep -F "path: $cos_url" legacy-latest.yml
           sudo apt-get update -qq
           sudo apt-get install -y -qq sshpass
           export SSHPASS="$UPDATE_SERVER_SSH_PASSWORD"
           remote="$UPDATE_SERVER_USER@$UPDATE_SERVER_HOST"
-          release_dir='/var/www/geo-updates/win'
-          staging_dir="$release_dir/.incoming-${GITHUB_RUN_ID}"
-          server_assets_dir='server-update-assets'
-          server_installer='question-automation-electron-setup.exe'
-          installer_source=$(find release-assets -maxdepth 1 -type f -name '*.exe' -print -quit)
-          blockmap_source="${installer_source}.blockmap"
-          test -n "$installer_source"
-          test -f "$blockmap_source"
-          rm -rf "$server_assets_dir"
-          mkdir -p "$server_assets_dir"
-          cp "$installer_source" "$server_assets_dir/$server_installer"
-          cp "$blockmap_source" "$server_assets_dir/${server_installer}.blockmap"
-          sed -E \
-            -e "s|^([[:space:]]*-[[:space:]]*)url: .*\\.exe$|\\1url: $server_installer|" \
-            -e "s|^path: .*\\.exe$|path: $server_installer|" \
-            release-assets/latest.yml > "$server_assets_dir/latest.yml"
-          grep -F "url: $server_installer" "$server_assets_dir/latest.yml"
-          grep -F "path: $server_installer" "$server_assets_dir/latest.yml"
-          ssh_options=(-o StrictHostKeyChecking=accept-new -o PreferredAuthentications=password -o PubkeyAuthentication=no -o NumberOfPasswordPrompts=1 -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=2)
-          timeout 30s sshpass -e ssh "${ssh_options[@]}" "$remote" "mkdir -p '$staging_dir'"
-          timeout 15m sshpass -e scp "${ssh_options[@]}" "$server_assets_dir/$server_installer" "$server_assets_dir/${server_installer}.blockmap" "$server_assets_dir/latest.yml" "$remote:$staging_dir/"
-          timeout 30s sshpass -e ssh "${ssh_options[@]}" "$remote" "set -eu; test -f '$staging_dir/latest.yml'; test -f '$staging_dir/$server_installer'; test -f '$staging_dir/${server_installer}.blockmap'; cp '$staging_dir/$server_installer' '$release_dir/$server_installer.next'; cp '$staging_dir/${server_installer}.blockmap' '$release_dir/${server_installer}.blockmap.next'; mv '$release_dir/$server_installer.next' '$release_dir/$server_installer'; mv '$release_dir/${server_installer}.blockmap.next' '$release_dir/${server_installer}.blockmap'; cp '$staging_dir/latest.yml' '$release_dir/latest.yml.next'; mv '$release_dir/latest.yml.next' '$release_dir/latest.yml'; find '$release_dir' -maxdepth 1 -type f \( -name '*.exe' -o -name '*.blockmap' \) ! -name '$server_installer' ! -name '${server_installer}.blockmap' -delete; rm -rf '$staging_dir'"
+          ssh_options=(-o StrictHostKeyChecking=accept-new -o PreferredAuthentications=password -o PubkeyAuthentication=no -o NumberOfPasswordPrompts=1 -o ConnectTimeout=20)
+          timeout 30s sshpass -e scp "${ssh_options[@]}" legacy-latest.yml "$remote:/var/www/geo-updates/win/latest.yml.next"
+          timeout 30s sshpass -e ssh "${ssh_options[@]}" "$remote" "mv '/var/www/geo-updates/win/latest.yml.next' '/var/www/geo-updates/win/latest.yml'"

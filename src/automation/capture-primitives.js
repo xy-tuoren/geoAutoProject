@@ -3,7 +3,7 @@ const { evidencePanelBoundsForTitle, evidenceMinimumHeight, questionVisibleExact
 const { imageRegionsStable, composeLongImages } = require('./images')
 const { findOcrText, mapPhysicalBoundsToLogical } = require('./ocr')
 
-const DEFAULT_MAX_LONG_IMAGE_HEIGHT = 12_000
+const DEFAULT_MAX_LONG_IMAGE_HEIGHT = 15_000
 
 function maxLongImageHeight(value) {
   const parsed = Number(value ?? DEFAULT_MAX_LONG_IMAGE_HEIGHT)
@@ -387,10 +387,8 @@ function evidenceSummaryExpandedByOcr(recognition, target) {
 
 // Keyword-based single-frame signals cannot enumerate every bibliography
 // style ("个人防疫手册（第三版）" matched no genre word). This differential
-// signal instead proves expansion structurally: before the click the strip
-// immediately below the title was empty, after the click a numbered row
-// appears there, and text anchors above the title confirm neither frame
-// scrolled. It is independent of the citation's wording.
+// signal proves a numbered row was inserted below a stationary title. An
+// occupied strip is also valid when its original body moves down together.
 function differentialCitationExpansion(baseline, baselineTarget, confirmation) {
   const detail = {
     confirmed: false,
@@ -398,6 +396,7 @@ function differentialCitationExpansion(baseline, baselineTarget, confirmation) {
     anchors: null,
     baseline_strip_rows: [],
     new_citation_row: null,
+    displaced_body_rows: [],
   }
   if (!baselineTarget || !baseline?.image || !confirmation?.image) {
     detail.reason = 'missing_input'
@@ -417,9 +416,7 @@ function differentialCitationExpansion(baseline, baselineTarget, confirmation) {
   const height = baseline.image.height
   const titleTop = baselineTarget.physicalBounds[1]
   const titleBottom = baselineTarget.physicalBounds[3]
-  // Same narrow strip the single-frame rules use: card-internal spacing puts
-  // an expanded citation row well inside it, while the answer body below the
-  // collapsed card starts beyond it on every observed density.
+  // The answer can start in this strip when the reference card is collapsed.
   const stripBottom = titleBottom + height * 0.025
   const inStrip = item => item.confidence >= 0.8
     && item.bounds[1] > titleBottom
@@ -443,12 +440,32 @@ function differentialCitationExpansion(baseline, baselineTarget, confirmation) {
   }
   const baselineStrip = baseline.results.filter(inStrip)
   detail.baseline_strip_rows = baselineStrip.map(item => item.normalizedText)
-  if (baselineStrip.length) {
-    detail.reason = 'baseline_strip_not_empty'
-    return detail
-  }
   const newRow = confirmation.results.find(item => inStrip(item)
     && /^[0-9]{1,2}[.、．]/.test(item.normalizedText))
+  if (baselineStrip.length) {
+    const titleStable = confirmation.results.some(item => item.confidence >= 0.8
+      && item.normalizedText === baselineTarget.normalizedText
+      && Math.abs(item.bounds[1] - titleTop) <= anchorTolerance)
+    const rowIsNew = newRow && !baseline.results.some(item => item.normalizedText === newRow.normalizedText)
+    const displaced = baseline.results.filter(item => item.confidence >= 0.8
+      && item.bounds[1] > titleBottom && item.bounds[1] < titleBottom + height * 0.15)
+      .flatMap(item => {
+        const other = confirmation.results.find(row => row.confidence >= 0.8
+          && row.normalizedText === item.normalizedText
+          && Math.abs(row.bounds[0] - item.bounds[0]) <= baseline.image.width * 0.02)
+        const shift = other && other.bounds[1] - item.bounds[1]
+        return shift > (newRow?.bounds[3] - newRow?.bounds[1]) && shift < height * 0.15
+          ? [{ text: item.normalizedText, shift, top: other.bounds[1] }] : []
+      })
+    const firstBody = displaced.find(item => item.text === baselineStrip[0].normalizedText)
+    const movedTogether = firstBody && displaced.filter(item => Math.abs(item.shift - firstBody.shift) <= height * 0.006)
+    if (!titleStable || !rowIsNew || baselineStrip.some(item => /^[0-9]{1,2}[.、．]/.test(item.normalizedText))
+      || !firstBody || firstBody.top < newRow.bounds[3] || movedTogether.length < 2) {
+      detail.reason = 'baseline_strip_not_empty'
+      return detail
+    }
+    detail.displaced_body_rows = movedTogether
+  }
   if (!newRow) {
     detail.reason = 'no_new_citation_row'
     return detail

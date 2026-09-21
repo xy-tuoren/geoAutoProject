@@ -39,6 +39,7 @@ const { createDouyinSearchWorkflow } = require('./douyin-search-workflow')
 const { createToutiaoSearchWorkflow } = require('./toutiao-search-workflow')
 const { createArtifactWriter, ARTIFACT_LAYOUT_VERSION } = require('./artifact-writer')
 const { OperationTelemetry } = require('./operation-telemetry')
+const { compactRecognitionFrames } = require('./diagnostic-storage')
 const { ConsoleLogFormatter } = require('./console-log-formatter')
 const { createQuestionWorkflows } = require('./question-workflows')
 
@@ -406,6 +407,13 @@ function createRunner(options) {
     if (!activeQuestionEventLog) return
     await evidencePending
     if (evidenceError) throw evidenceError
+    if (!cancelled) try {
+      const storage = await compactRecognitionFrames(path.join(activeQuestionArtifacts.diagnosticDirectory, '关键识别'))
+      await activeQuestionEventLog.record('diagnostic_storage_compacted', { category: 'diagnostic', details: storage })
+    } catch (error) {
+      // Compaction must never hide the question's original error or prevent evidence delivery.
+      await activeQuestionEventLog.record('diagnostic_storage_compaction_failed', { category: 'error', details: diagnosticError(error) })
+    }
     let performanceResult = null
     let performanceError = null
     try {
@@ -996,6 +1004,7 @@ function createRunner(options) {
       const executionUnits = brandExecutionUnits(questionPlan)
       const outputRoot = path.resolve(payload.outputDir)
       const batchDirectory = await createBatchDirectory(outputRoot)
+      emitProgress({ type: 'batch_created', batch_directory: await fs.realpath(batchDirectory) })
       const batchArtifacts = batchArtifactDirectories(batchDirectory)
       await initializeArtifactLogging(batchArtifacts, payload, 'batch_questions')
       const brandManifestPath = grouped ? path.join(batchArtifacts.diagnosticDirectory, '品牌执行清单.json') : null

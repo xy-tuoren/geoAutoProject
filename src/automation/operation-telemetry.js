@@ -190,11 +190,14 @@ class OperationTelemetry {
   }
 
   report({ status = 'unknown' } = {}) {
-    const snapshot = this.snapshot({ recentLimit: this.maxOperations })
+    const snapshot = this.snapshot()
+    delete snapshot.recent_operations
     return {
       created_at: this.timestamp(),
       status,
       ...snapshot,
+      operation_telemetry_version: 2,
+      recent_operations_ref: '#/operations',
       operations: [...this.operations],
     }
   }

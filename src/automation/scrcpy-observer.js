@@ -9,6 +9,11 @@ const MAX_PACKET_SIZE = 32 * 1024 * 1024
 const MIN_ACTIVITY_PACKET_SIZE = 1024
 const ACTIVITY_BURST_WINDOW_MS = 220
 
+function parseDisplaySize(text) {
+  const match = [...text.matchAll(/(?:Physical|Override) size:\s*(\d+)x(\d+)/g)].at(-1)
+  return match && Number(match[1]) > 0 && Number(match[2]) > 0 ? { width: Number(match[1]), height: Number(match[2]) } : null
+}
+
 function frameCarriesActivity(packet) {
   // At max_size=360, encoder heartbeat/repeat packets on a pixel-stable page
   // are typically only tens or hundreds of bytes. A real viewport change is
@@ -65,9 +70,9 @@ function quietWindowState(frames, { now, startedAt, windowMs, quietMs, maxFrames
   return { quiet: framesInWindow <= maxFrames && quietForMs >= quietMs, framesInWindow, quietForMs }
 }
 
-function execFileText(command, args) {
+function execFileText(command, args, signal) {
   return new Promise((resolve, reject) => {
-    execFile(command, args, { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 }, (error, stdout, stderr) => {
+    execFile(command, args, { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024, timeout: 8_000, windowsHide: true, signal }, (error, stdout, stderr) => {
       if (error) reject(new Error(`${error.message}: ${String(stderr || stdout).trim()}`))
       else resolve(String(stdout).trim())
     })
@@ -75,10 +80,11 @@ function execFileText(command, args) {
 }
 
 class ScrcpyPacketParser {
-  constructor({ onStream = () => {}, onSession = () => {}, onFrame = () => {} } = {}) {
+  constructor({ onStream = () => {}, onSession = () => {}, onFrame = () => {}, onPacket } = {}) {
     this.onStream = onStream
     this.onSession = onSession
     this.onFrame = onFrame
+    this.onPacket = onPacket
     this.buffer = Buffer.alloc(0)
     this.pending = null
     this.codec = null
@@ -111,9 +117,11 @@ class ScrcpyPacketParser {
       }
       if (this.pending) {
         if (this.buffer.length < this.pending.size) return
+        const data = this.onPacket ? Buffer.from(this.buffer.subarray(0, this.pending.size)) : null
         this.buffer = this.buffer.subarray(this.pending.size)
         const packet = this.pending
         this.pending = null
+        if (this.onPacket) this.onPacket({ ...packet, data })
         if (!packet.config) this.onFrame(packet)
         continue
       }
@@ -140,12 +148,17 @@ class ScrcpyPacketParser {
 }
 
 class ScrcpyObserver {
-  constructor({ adbPath, serverPath, log = () => {}, now = Date.now, delay = sleep } = {}) {
+  constructor({ adbPath, serverPath, log = () => {}, now = Date.now, delay = sleep, onVideoPacket, onVideoSession = () => {}, onFailure = () => {} } = {}) {
     this.adbPath = adbPath
     this.serverPath = serverPath
     this.log = log
     this.now = now
     this.delay = delay
+    this.onVideoPacket = onVideoPacket
+    this.onVideoSession = onVideoSession
+    this.onFailure = onFailure
+    this.startController = null
+    this.displaySize = null
     this.serial = null
     this.scid = null
     this.port = null
@@ -183,10 +196,14 @@ class ScrcpyObserver {
     return Boolean(this.socket && !this.socket.destroyed && this.session && !this.failure)
   }
 
-  async start(serial) {
+  async start(serial, { signal } = {}) {
     if (this.active && this.serial === serial) return this.snapshot()
     await this.stop()
+    signal?.throwIfAborted()
     this.stopping = false
+    const controller = new AbortController()
+    this.startController = controller
+    const startSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal
     if (!this.adbPath || !this.serverPath || !fs.existsSync(this.serverPath)) {
       throw new Error('缺少 scrcpy server 运行时，请先执行 npm run prepare:scrcpy。')
     }
@@ -197,31 +214,38 @@ class ScrcpyObserver {
     this.startedAt = null
     this.scid = (crypto.randomBytes(4).readUInt32BE(0) & 0x7fffffff).toString(16).padStart(8, '0')
     const remote = `/data/local/tmp/geoauto-scrcpy-server-v${SCRCPY_VERSION}.jar`
-    await execFileText(this.adbPath, ['-s', serial, 'push', this.serverPath, remote])
-    const localAbstract = `scrcpy_${this.scid}`
-    this.port = Number(await execFileText(this.adbPath, ['-s', serial, 'forward', 'tcp:0', `localabstract:${localAbstract}`]))
-    if (!Number.isInteger(this.port) || this.port <= 0) throw new Error('ADB未能为scrcpy观察器分配本地端口。')
-
-    const args = [
-      '-s', serial, 'shell', `CLASSPATH=${remote}`, 'app_process', '/',
-      'com.genymobile.scrcpy.Server', SCRCPY_VERSION,
-      `scid=${this.scid}`, 'log_level=warn', 'audio=false', 'control=false',
-      'cleanup=false', 'tunnel_forward=true', 'send_device_meta=false',
-      'send_dummy_byte=false', 'send_stream_meta=true', 'max_size=360',
-      'max_fps=15', 'video_bit_rate=500000',
-      'video_codec_options=repeat-previous-frame-after=0',
-    ]
-    this.serverProcess = spawn(this.adbPath, args, { stdio: ['ignore', 'pipe', 'pipe'] })
     const errors = []
-    this.serverProcess.stdout.on('data', chunk => errors.push(String(chunk)))
-    this.serverProcess.stderr.on('data', chunk => errors.push(String(chunk)))
-    this.serverProcess.once('exit', code => {
-      if (!this.stopping && this.socket && !this.socket.destroyed && code !== 0) this.#markFailed(new Error(`scrcpy server异常退出（${code}）：${errors.join('').trim()}`))
-    })
-
     try {
+      this.displaySize = this.onVideoPacket ? parseDisplaySize(await execFileText(this.adbPath, ['-s', serial, 'shell', 'wm', 'size'], startSignal).catch(() => '')) : null
+      startSignal.throwIfAborted()
+      await execFileText(this.adbPath, ['-s', serial, 'push', this.serverPath, remote], startSignal)
+      const localAbstract = `scrcpy_${this.scid}`
+      this.port = Number(await execFileText(this.adbPath, ['-s', serial, 'forward', 'tcp:0', `localabstract:${localAbstract}`], startSignal))
+      if (!Number.isInteger(this.port) || this.port <= 0) throw new Error('ADB未能为scrcpy观察器分配本地端口。')
+      startSignal.throwIfAborted()
+
+      const args = [
+        '-s', serial, 'shell', `CLASSPATH=${remote}`, 'app_process', '/',
+        'com.genymobile.scrcpy.Server', SCRCPY_VERSION,
+        `scid=${this.scid}`, 'log_level=warn', 'audio=false', 'control=false',
+        'cleanup=false', 'tunnel_forward=true', 'send_device_meta=false',
+        'send_dummy_byte=false', 'send_stream_meta=true', 'video_codec=h264',
+        `max_size=${this.onVideoPacket ? 1200 : 360}`, 'max_fps=15',
+        `video_bit_rate=${this.onVideoPacket ? 2000000 : 500000}`,
+        ...(this.onVideoPacket ? [] : ['video_codec_options=repeat-previous-frame-after=0']),
+      ]
+      this.serverProcess = spawn(this.adbPath, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
+      const rememberError = chunk => { errors.push(String(chunk)); if (errors.length > 20) errors.shift() }
+      this.serverProcess.stdout.on('data', rememberError)
+      this.serverProcess.stderr.on('data', rememberError)
+      this.serverProcess.once('error', error => { if (!this.stopping) this.#markFailed(error) })
+      this.serverProcess.once('exit', code => {
+        if (!this.stopping && this.socket && !this.socket.destroyed && code !== 0) this.#markFailed(new Error(`scrcpy server异常退出（${code}）：${errors.join('').trim()}`))
+      })
+
       await this.#connectAndReadSession(8_000)
-      this.log(`scrcpy观察器已连接：${this.session.width}x${this.session.height}，仅用于画面活动检测`)
+      startSignal.throwIfAborted()
+      this.log(`scrcpy${this.onVideoPacket ? '预览' : '观察器'}已连接：${this.session.width}x${this.session.height}，${this.onVideoPacket ? '只读视频流' : '仅用于画面活动检测'}`)
       return this.snapshot()
     } catch (error) {
       const serverLog = errors.join('').trim()
@@ -234,12 +258,16 @@ class ScrcpyObserver {
     const deadline = Date.now() + timeout
     let lastError
     while (Date.now() < deadline) {
+      this.startController?.signal.throwIfAborted()
       try {
         const socket = await new Promise((resolve, reject) => {
           const socket = net.createConnection({ host: '127.0.0.1', port: this.port })
           socket.once('connect', () => resolve(socket))
           socket.once('error', reject)
+          socket.setTimeout(2_000, () => socket.destroy(new Error('连接scrcpy视频通道超时。')))
         })
+        socket.setTimeout(0)
+        if (this.stopping) { socket.destroy(); throw new Error('scrcpy连接已取消。') }
         this.socket = socket
         await this.#readSession(Math.max(100, deadline - Date.now()))
         return
@@ -267,9 +295,16 @@ class ScrcpyObserver {
         onSession: session => {
           this.session = session
           this.startedAt ??= this.now()
+          const display = this.displaySize
+          const rotated = display && (display.width > display.height) !== (session.width > session.height)
+          this.onVideoSession({ ...session, ...(display ? {
+            displayWidth: rotated ? display.height : display.width,
+            displayHeight: rotated ? display.width : display.height,
+          } : {}) })
           finish(resolve, session)
         },
-        onFrame: packet => this.#recordFrame(packet),
+        onFrame: packet => { if (!this.onVideoPacket) this.#recordFrame(packet) },
+        onPacket: this.onVideoPacket,
       })
       timer = setTimeout(() => finish(reject, new Error('等待scrcpy视频会话超时。')), timeout)
       const onData = chunk => {
@@ -311,6 +346,7 @@ class ScrcpyObserver {
     if (!this.failure) {
       this.failure = error
       this.log(`scrcpy观察器不可用：${error.message}`)
+      this.onFailure(error)
     }
   }
 
@@ -486,6 +522,7 @@ class ScrcpyObserver {
 
   async stop() {
     this.stopping = true
+    this.startController?.abort()
     const socket = this.socket
     this.socket = null
     this.session = null
@@ -493,14 +530,13 @@ class ScrcpyObserver {
     const child = this.serverProcess
     this.serverProcess = null
     if (child && child.exitCode === null) child.kill('SIGTERM')
-    if (this.port && this.adbPath && this.serial) {
-      await execFileText(this.adbPath, ['-s', this.serial, 'forward', '--remove', `tcp:${this.port}`]).catch(() => {})
-    }
+    const port = this.port
     this.port = null
+    if (port && this.adbPath && this.serial) await execFileText(this.adbPath, ['-s', this.serial, 'forward', '--remove', `tcp:${port}`]).catch(() => {})
     this.frames = []
     this.activityBurstDetector.reset()
     this.startedAt = null
   }
 }
 
-module.exports = { ACTIVITY_BURST_WINDOW_MS, ActivityBurstDetector, SCRCPY_VERSION, ScrcpyPacketParser, ScrcpyObserver, frameCarriesActivity }
+module.exports = { ACTIVITY_BURST_WINDOW_MS, ActivityBurstDetector, SCRCPY_VERSION, ScrcpyPacketParser, ScrcpyObserver, frameCarriesActivity, parseDisplaySize }

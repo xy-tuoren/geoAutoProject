@@ -795,7 +795,7 @@ async function stitchFramesWithTransitions(frames, transitions, separatorHeight 
   return result
 }
 
-async function composeLongImages(frames, { overlaps = [], continuityVerified = false, transitions = null, maxHeight = 12_000, separatorHeight = 24 } = {}) {
+async function composeLongImages(frames, { overlaps = [], continuityVerified = false, transitions = null, maxHeight = 15_000, separatorHeight = 24 } = {}) {
   if (!frames.length) throw new Error('没有可拼接的截图。')
   if (!Number.isInteger(maxHeight) || maxHeight < 1_000) throw new Error('内部拼图高度必须是不小于 1000 的整数。')
   if (transitions && transitions.length !== Math.max(0, frames.length - 1)) throw new Error('每对相邻截图都必须提供接缝状态。')

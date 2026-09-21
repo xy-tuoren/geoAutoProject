@@ -457,14 +457,17 @@ function toutiaoLegacyFullAnswerPage(xml, screenSize) {
     && /输入问题AI免费专业解答/.test(nodeAttr(attrs, 'hint')) && box(attrs)[1] > size.height * 0.7)
   const scroll = nodes.find(attrs => nodeAttr(attrs, 'scrollable') === 'true'
     && box(attrs)[2] - box(attrs)[0] >= size.width * 0.9 && box(attrs)[3] - box(attrs)[1] >= size.height * 0.5)
-  if (!title || !web || !back || !notice || !input || !scroll) return null
-  const bounds = [box(scroll)[0], Math.max(box(web)[1], box(notice)[3]), box(scroll)[2],
-    Math.min(box(scroll)[3], box(input)[1] - Math.ceil(size.height * 0.018))]
+  if (!title || !web || !back || !notice || !input) return null
+  // A short answer fits in the WebView and exposes no scrollable node.
+  const content = box(scroll || web)
+  const bounds = [Math.max(content[0], box(web)[0]), Math.max(content[1], box(web)[1], box(notice)[3]), Math.min(content[2], box(web)[2]),
+    Math.min(content[3], box(web)[3], box(input)[1] - Math.ceil(size.height * 0.018))]
   if (bounds[3] - bounds[1] < size.height * 0.4) return null
   return { bounds, back: box(back) }
 }
 
 function douyinMiniAppCaptureBounds(xml, screenSize) {
+  screenSize = hierarchyLogicalSize(xml, screenSize)
   if (douyinSearchInput(xml)) return null
   const close = miniAppShellCloseBounds(xml, screenSize)
   if (!close) return toutiaoLegacyFullAnswerPage(xml, screenSize)?.bounds || null

@@ -175,7 +175,9 @@ function createToutiaoSearchWorkflow({
       if (hasMessageInput && !answerContentReady) {
         genericConsultationReads += 1
         if (genericConsultationReads >= 3) {
-          throw new ToutiaoFullAnswerNotOpenedError('头条全文入口已进入小程序，但连续三次未检测到回答正文像素。')
+          throw new ToutiaoFullAnswerNotOpenedError(bounds
+            ? '头条小荷页面已打开，但连续三次截图仍未确认回答正文；已停止本题，避免交付空白页。'
+            : '头条小荷页面已打开，但连续三次未识别到可靠的正文区域；尚未进行正文像素校验，已停止本题。')
         }
       } else genericConsultationReads = 0
       const current = await ui.currentApp()

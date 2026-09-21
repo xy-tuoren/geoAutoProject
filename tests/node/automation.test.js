@@ -434,7 +434,7 @@ test('所有小荷卡片入口打开后均不追加新会话或发送，覆盖�
     let taps = 0
     const b = values => `[${values.slice(0, 2).map(x => x * scale)}][${values.slice(2).map(x => x * scale)}]`
     const workflow = createDouyinSearchWorkflow({
-      source: async () => `<hierarchy><node package="com.ss.android.ugc.aweme" content-desc="关闭" bounds="${b([318, 40, 350, 70])}"/><node class="android.view.ViewGroup" bounds="${b([0, 84, 360, 592])}"/></hierarchy>`,
+      source: async () => `<hierarchy><node bounds="${b([0, 0, 360, 800])}"/><node package="com.ss.android.ugc.aweme" content-desc="关闭" bounds="${b([318, 40, 350, 70])}"/><node class="android.view.ViewGroup" bounds="${b([0, 84, 360, 592])}"/></hierarchy>`,
       ui: { foregroundWindow: async () => ({ package: 'com.ss.android.ugc.aweme', activity: 'MiniAppHostActivity0' }) },
       getActivePackageName: () => 'com.ss.android.ugc.aweme', log: () => {},
       waitForVisualQuiet: async () => {}, tap: async () => { taps += 1 },
@@ -1829,6 +1829,7 @@ test('小荷新会话复用到底确认帧并用事件驱动稳定截图回顶',
   let position = 'top'
   let observedStableCaptures = 0
   let strictStableCaptures = 0
+  let completionClock = 0
   const upwardOptions = []
   const upwardFractions = []
   const capture = createReplyCapture({
@@ -1879,6 +1880,8 @@ test('小荷新会话复用到底确认帧并用事件驱动稳定截图回顶',
       quietMs: 0,
       probeInterval: 0,
       timeout: 1_000,
+      // Verify the state transitions independently of image-processing CPU load.
+      now: () => ++completionClock,
       delay: async () => {},
     },
   })
@@ -3663,7 +3666,9 @@ test('长截图超过高度上限时只在视口边界拆分', async () => {
   const images = await composeLongImages([frame, frame, frame, frame], { maxHeight: 3000 })
   assert.equal(images.length, 2)
   for (const image of images) assert.ok((await imageInfo(image)).height <= 3000)
-  assert.equal(maxLongImageHeight(undefined), 12000)
+  assert.equal(maxLongImageHeight(undefined), 15000)
+  assert.equal(maxLongImageHeight(12000), 12000)
+  assert.equal((await composeLongImages(Array(14).fill(frame))).length, 1)
   assert.throws(() => maxLongImageHeight(2999), /3000/)
 })
 

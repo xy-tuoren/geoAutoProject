@@ -121,6 +121,7 @@ Windows 打包成功后，`dist/` 中应至少包含：
 
 - 手动运行 `workflow_dispatch`：构建 Windows 安装包并上传 Actions Artifact，不发布 Release。
 - 推送 `v*` 标签：先测试和打包，再创建或更新 GitHub Release，并上传 `.exe`、`.blockmap`、`latest.yml`。
+- 标签发布完成后，将 Windows 更新文件同步到腾讯云 COS，并最后上传 `latest.yml`。
 - 标签发布时会校验 `v<package.json version>` 是否完全匹配，不匹配会失败。
 
 `Build macOS package` 的行为：
@@ -174,6 +175,8 @@ git push origin v0.1.2
 7. 确认 `dist/latest.yml` 存在。
 8. 上传 Windows Artifact。
 9. 创建或更新 GitHub Release。
+10. 上传 Windows 更新文件到腾讯云 COS，并验证匿名下载和分段下载可用。
+11. 更新旧服务器的兼容清单，让旧版客户端从 COS 下载新版本。
 
 发布完成后检查 Release 页面是否包含：
 
@@ -183,7 +186,7 @@ git push origin v0.1.2
 
 ## 自动更新机制
 
-Windows 安装包使用 `electron-updater` 从 `http://104.168.30.172/geo-updates/win/` 检查更新；GitHub Releases 保留带版本号的安装包备份。标签构建会同步部署固定文件名的安装包、blockmap 和最后发布的 `latest.yml`。
+Windows 安装包使用 `electron-updater` 从 `https://yisheng-1252303079.cos.ap-guangzhou.myqcloud.com/geo-updates/win/` 检查更新；GitHub Releases 保留带版本号的安装包备份。标签构建会先上传带版本号的安装包和 blockmap，再更新固定下载文件，最后发布 `latest.yml`，随后只清理该目录中超过最近 5 个版本的安装包和对应 blockmap。COS 桶继续保持私有，仅更新对象设置为公有读。
 
 应用行为：
 

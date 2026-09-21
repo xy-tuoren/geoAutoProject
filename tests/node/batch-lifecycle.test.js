@@ -3,6 +3,7 @@ const assert = require('node:assert/strict')
 const fs = require('node:fs/promises')
 const os = require('node:os')
 const path = require('node:path')
+const { createHash } = require('node:crypto')
 const { sleep } = require('../../src/automation/utils')
 const { writeJsonAtomic, resumeItems, interruptRunning } = require('../../src/automation/batch-state')
 
@@ -24,6 +25,14 @@ test('停止立即取消等待；逐题进度可恢复且中断题不会默认�
       executed.push(question)
       await fs.mkdir(artifacts.deliveryDirectory, { recursive: true })
       await fs.writeFile(path.join(artifacts.diagnosticDirectory, '识别证据.txt'), `evidence:${question}`)
+      const recognitionDirectory = path.join(artifacts.diagnosticDirectory, '关键识别')
+      await fs.mkdir(recognitionDirectory)
+      for (const stem of ['before', 'confirm']) {
+        await fs.writeFile(path.join(recognitionDirectory, `${stem}.png`), 'synthetic-image')
+        await writeJsonAtomic(path.join(recognitionDirectory, `${stem}.json`), {
+          frame_file: `${stem}.png`, frame_sha256: question === 'third' ? 'damaged' : createHash('sha256').update('synthetic-image').digest('hex'),
+        })
+      }
       if (question === 'second' && hold) { entered(); await sleep(60_000) }
       const screenshot = path.join(artifacts.deliveryDirectory, '回答.png')
       const metadata = path.join(artifacts.diagnosticDirectory, '回答.json')
@@ -56,7 +65,10 @@ test('停止立即取消等待；逐题进度可恢复且中断题不会默认�
   const summary = failure.batchSummary
   assert.deepEqual(summary.results.map(item => item.status), ['completed', 'needs_confirmation', 'pending'])
   const firstMetadata = await fs.readFile(summary.results[0].metadata, 'utf8')
+  const firstEvidence = path.join(path.dirname(summary.results[0].metadata), '关键识别')
+  assert.equal((await fs.readdir(firstEvidence)).filter(name => name.endsWith('.png')).length, 1)
   const oldDiagnostic = summary.results[1].diagnostic_directory
+  assert.equal((await fs.readdir(path.join(oldDiagnostic, '关键识别'))).filter(name => name.endsWith('.png')).length, 2, '停止不执行额外去重')
   const saved = JSON.parse(await fs.readFile(summary.summary, 'utf8'))
   assert.equal(saved.completed, 1)
   assert.equal(saved.needs_confirmation, 1)
@@ -72,6 +84,9 @@ test('停止立即取消等待；逐题进度可恢复且中断题不会默认�
   assert.equal(await fs.readFile(path.join(oldDiagnostic, '识别证据.txt'), 'utf8'), 'evidence:second')
   assert.notEqual(oldDiagnostic, complete.results[1].diagnostic_directory)
   assert.equal((await fs.readdir(path.dirname(complete.results[1].screenshot))).length, 1)
+  const thirdDirectory = path.dirname(complete.results[2].metadata)
+  assert.equal((await fs.readdir(path.join(thirdDirectory, '关键识别'))).filter(name => name.endsWith('.png')).length, 2)
+  assert.match(await fs.readFile(path.join(thirdDirectory, '执行日志.jsonl'), 'utf8'), /diagnostic_storage_compaction_failed/)
 })
 
 test('异常退出留下running时恢复为待确认，只选择授权的恢复题', () => {

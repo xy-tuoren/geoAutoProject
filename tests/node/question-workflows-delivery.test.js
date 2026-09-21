@@ -41,6 +41,7 @@ for (const failureStage of ['open', 'capture', null]) {
         captureCalls += 1
         if (failureStage === 'capture') throw failure
       },
+      waitForDouyinMiniAppAnswer: async full => full,
       saveArtifacts: async ({ captureMethod }) => {
         await captureMethod()
         assert.deepEqual(await fs.readdir(artifacts.deliveryDirectory), [])

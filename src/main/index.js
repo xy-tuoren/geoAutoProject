@@ -3,19 +3,30 @@ const { autoUpdater } = require('electron-updater')
 const { execFile } = require('node:child_process')
 const fs = require('node:fs/promises')
 const path = require('node:path')
-const { createRunner } = require('../automation/runner')
-const { automationErrorInfo } = require('../automation/batch-recovery')
+const { createDeviceTasks } = require('./device-tasks')
+const { createDevicePreview } = require('./device-preview')
 const { interruptRunning } = require('../automation/batch-state')
 const { automationEntries, normalizeAutomationEntries } = require('../automation/entry-catalog')
 const { loadQuestionFile } = require('../questions')
 const { parseProductWorkbook } = require('../product-question-import')
 const { normalizeQuestionPlan } = require('../question-plan')
-const { projectRoot, resolveAdbPath } = require('../runtime-paths')
+const { projectRoot, resolveAdbPath, bundledScrcpyServer } = require('../runtime-paths')
 const { createUpdateManager } = require('./updater')
 
 const root = projectRoot()
-let activeTask = null
 let updateManager = null
+let connectedDevices = new Set()
+let quitting = false
+const previews = createDevicePreview({ adbPath: adbCommand, serverPath: () => bundledScrcpyServer({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath, root }), log })
+const tasks = createDeviceTasks({
+  runnerOptions: { root: appRoot(), isPackaged: app.isPackaged, resourcesPath: process.resourcesPath, adbPath: adbCommand() },
+  emit: (type, value) => {
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (!window.webContents.isDestroyed()) window.webContents.send(`automation:${type}`, value)
+    }
+  },
+  changed: () => updateManager?.notify(),
+})
 
 function stamp() {
   return new Date().toISOString().replace('T', ' ').replace('Z', '')
@@ -54,7 +65,7 @@ async function listDevices() {
   log('读取 ADB 设备:', adb)
   let output
   try {
-    output = await run(adb, ['devices', '-l'])
+    output = await run(adb, ['devices', '-l'], { timeout: 5_000, windowsHide: true })
   } catch (error) {
     logError('ADB 读取失败:', error.message)
     throw new Error(`无法读取 ADB 设备：${error.message.includes('ENOENT') ? '内置 ADB 不可用，请重新安装桌面应用。' : error.message}`)
@@ -64,6 +75,7 @@ async function listDevices() {
     .filter(parts => parts.length >= 2 && parts[1] === 'device')
     .map(parts => parts[0])
   log(devices.length ? `已发现设备: ${devices.join(', ')}` : '未发现已授权设备')
+  connectedDevices = new Set(devices)
   return devices
 }
 
@@ -99,7 +111,14 @@ function createWindow() {
   })
   window.webContents.on('render-process-gone', (_event, details) => {
     logError('渲染进程异常退出:', details.reason, details.exitCode)
+    void previews.stop(undefined, undefined, window.webContents.id)
   })
+  const owner = window.webContents.id
+  const stopPreviews = () => { void previews.stop(undefined, undefined, owner) }
+  window.on('hide', stopPreviews)
+  window.on('minimize', stopPreviews)
+  window.webContents.on('did-start-loading', stopPreviews)
+  window.webContents.on('destroyed', stopPreviews)
   window.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'))
   log('主窗口已创建')
 }
@@ -132,6 +151,17 @@ ipcMain.handle('dialog:select-product-workbook', async () => {
 
 ipcMain.handle('automation:devices', async () => listDevices())
 ipcMain.handle('automation:entries', () => automationEntries())
+ipcMain.handle('automation:tasks', () => tasks.snapshot())
+ipcMain.handle('automation:preview-start', async (event, serial, streamId) => {
+  if (!connectedDevices.has(serial)) throw new Error('手机未连接，请刷新设备列表。')
+  if (typeof streamId !== 'string' || !streamId || streamId.length > 256) throw new Error('预览会话标识无效。')
+  if (!BrowserWindow.fromWebContents(event.sender)?.isVisible()) throw new Error('窗口不可见，画面预览已暂停。')
+  await previews.start(serial, streamId, event.sender.id, message => {
+    if (!event.sender.isDestroyed()) event.sender.send('automation:preview-event', message)
+  })
+})
+ipcMain.handle('automation:preview-stop', (event, serial, streamId) => previews.stop(serial, streamId, event.sender.id))
+ipcMain.on('automation:preview-ack', (event, serial, streamId, sequence) => previews.acknowledge(serial, streamId, sequence, event.sender.id))
 
 ipcMain.handle('questions:import', async (_event, payload) => {
   log('导入问题文件:', payload.file, `列=${payload.column || '问题'}`)
@@ -157,8 +187,7 @@ ipcMain.handle('product-questions:import', async (_event, file) => {
   }
 })
 
-ipcMain.handle('automation:start', async (event, payload) => {
-  if (activeTask) throw new Error('已有任务正在执行。')
+ipcMain.handle('automation:start', async (_event, payload) => {
   const questionPlan = normalizeQuestionPlan(payload)
   payload.questions = questionPlan.questions
   payload.brandGroups = questionPlan.brandGroups
@@ -167,43 +196,15 @@ ipcMain.handle('automation:start', async (event, payload) => {
   const entries = normalizeAutomationEntries(payload.entries)
   payload.entries = entries.map(entry => entry.id)
   payload.newSession = true
+  if (!(await listDevices()).includes(payload.serial)) throw new Error('所选手机已断开，请刷新设备列表。')
   log('启动任务:', `serial=${payload.serial}`, `entries=${payload.entries.join(',')}`, `mode=${questionPlan.mode}`, `questions=${payload.questions.length}`, `output=${payload.outputDir}`)
-  const runner = createRunner({
-    root: appRoot(),
-    isPackaged: app.isPackaged,
-    resourcesPath: process.resourcesPath,
-    adbPath: adbCommand(),
-    log: text => {
-      process.stdout.write(text.endsWith('\n') ? text : `${text}\n`)
-      event.sender.send('automation:log', text)
-    },
-    progress: value => event.sender.send('automation:progress', value),
-  })
-  activeTask = runner
-  updateManager?.notify()
-  void runner.run(payload)
-    .then(summary => {
-      if (activeTask === runner) activeTask = null
-      log('执行完成')
-      event.sender.send('automation:finished', { code: 0, summary })
-    })
-    .catch(error => {
-      const info = automationErrorInfo(error)
-      if (info.code !== 'TASK_CANCELLED') logError('任务失败:', error.message)
-      event.sender.send('automation:log', `${info.code === 'TASK_CANCELLED' ? '停止' : '错误'}：${info.title}｜${info.message}\n处理：${info.action}${info.diagnostic_path ? `\n诊断：${info.diagnostic_path}` : ''}\n`)
-      if (activeTask === runner) activeTask = null
-      event.sender.send('automation:finished', { code: info.code === 'TASK_CANCELLED' ? 130 : 1, error: info, summary: error.batchSummary })
-    })
-    .finally(() => {
-      if (activeTask === runner) activeTask = null
-      updateManager?.notify()
-    })
-  return true
+  return tasks.start(payload)
 })
 
-ipcMain.handle('automation:retry-failed', async (event, payload) => {
-  if (activeTask) throw new Error('已有任务正在执行。')
+ipcMain.handle('automation:retry-failed', async (_event, payload) => {
   if (!payload?.serial || !payload?.batchDirectory) throw new Error('请选择 Android 设备并保留原批次后再重试。')
+  if (!(await listDevices()).includes(payload.serial)) throw new Error('所选手机已断开，请刷新设备列表。')
+  payload.batchDirectory = await fs.realpath(payload.batchDirectory)
   payload.newSession = true
   if (payload.resume) {
     const summary = interruptRunning(JSON.parse(await fs.readFile(path.join(payload.batchDirectory, '调试产物', 'batch-summary.json'), 'utf8')))
@@ -218,50 +219,11 @@ ipcMain.handle('automation:retry-failed', async (event, payload) => {
       payload.includeUncertain = choice.response === 1
     } else payload.includeUncertain = false
   }
-  if (activeTask) throw new Error('已有任务正在执行。')
   log('重试失败题:', `serial=${payload.serial}`, `batch=${payload.batchDirectory}`)
-  const runner = createRunner({
-    root: appRoot(),
-    isPackaged: app.isPackaged,
-    resourcesPath: process.resourcesPath,
-    adbPath: adbCommand(),
-    log: text => {
-      process.stdout.write(text.endsWith('\n') ? text : `${text}\n`)
-      event.sender.send('automation:log', text)
-    },
-    progress: value => event.sender.send('automation:progress', value),
-  })
-  activeTask = runner
-  updateManager?.notify()
-  void runner.retryFailedBatch(payload)
-    .then(summary => {
-      if (activeTask === runner) activeTask = null
-      log('失败题重试完成')
-      event.sender.send('automation:finished', { code: 0, summary, retried: true })
-    })
-    .catch(error => {
-      const info = automationErrorInfo(error)
-      if (info.code !== 'TASK_CANCELLED') logError('失败题重试失败:', error.message)
-      event.sender.send('automation:log', `${info.code === 'TASK_CANCELLED' ? '停止' : '错误'}：${info.title}｜${info.message}\n处理：${info.action}${info.diagnostic_path ? `\n诊断：${info.diagnostic_path}` : ''}\n`)
-      if (activeTask === runner) activeTask = null
-      event.sender.send('automation:finished', { code: info.code === 'TASK_CANCELLED' ? 130 : 1, error: info, summary: error.batchSummary, retried: true })
-    })
-    .finally(() => {
-      if (activeTask === runner) activeTask = null
-      updateManager?.notify()
-    })
-  return true
+  return tasks.start(payload, 'retryFailedBatch')
 })
 
-ipcMain.handle('automation:stop', async () => {
-  if (!activeTask) {
-    log('收到停止请求，但当前无运行中任务')
-    return
-  }
-  log('正在停止任务…')
-  void activeTask.stop().catch(error => logError('停止控制服务失败:', error.message))
-  return { stopping: true }
-})
+ipcMain.handle('automation:stop', async (_event, serial) => tasks.stop(serial))
 
 ipcMain.handle('clipboard:write', (_event, text) => {
   clipboard.writeText(String(text ?? ''))
@@ -289,7 +251,7 @@ ipcMain.handle('update:state', () => updateManager?.snapshot() || {
   status: 'unsupported',
   currentVersion: app.getVersion(),
   supported: false,
-  taskActive: Boolean(activeTask),
+  taskActive: tasks.size > 0,
   canInstall: false,
 })
 ipcMain.handle('update:check', () => updateManager.check())
@@ -310,7 +272,7 @@ app.whenReady().then(() => {
     app,
     autoUpdater,
     BrowserWindow,
-    isTaskActive: () => Boolean(activeTask),
+    isTaskActive: () => tasks.size > 0,
     log,
     logError,
   })
@@ -321,7 +283,18 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   log('所有窗口已关闭')
+  previews.stop()
+  tasks.stop()
   if (process.platform !== 'darwin') app.quit()
+})
+
+app.on('before-quit', event => {
+  if (!tasks.size && !previews.size) return
+  event.preventDefault()
+  if (quitting) return
+  quitting = true
+  tasks.stop()
+  void Promise.all([tasks.whenIdle(), previews.stop()]).then(() => app.quit())
 })
 
 app.on('will-quit', () => {

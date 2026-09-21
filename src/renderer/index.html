@@ -2,7 +2,7 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; script-src 'self'" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>莲藕医生AI监测系统（数据采集）</title>
     <link rel="stylesheet" href="./styles.css" />
@@ -20,6 +20,23 @@
         </div>
       </header>
 
+      <nav class="workspace-nav" aria-label="工作区">
+        <div class="workspace-tabs" role="tablist" aria-label="工作区页面">
+          <button id="tab-screens" role="tab" aria-selected="true" aria-controls="view-screens" type="button">屏幕总览 <span id="screen-count">0</span></button>
+          <button id="tab-tasks" role="tab" aria-selected="false" aria-controls="view-tasks" tabindex="-1" type="button">任务与日志</button>
+        </div>
+        <label class="option"><input id="preview-enabled" type="checkbox" checked />实时画面</label>
+      </nav>
+
+      <section id="view-screens" class="device-monitor panel" role="tabpanel" aria-labelledby="tab-screens">
+        <div class="section-heading">
+          <div><h2>全部手机</h2><p id="device-overview">正在读取设备…</p></div>
+          <div class="monitor-actions"><button id="refresh-screens" class="secondary" type="button">刷新设备</button><button id="screens-stop-all" class="danger" type="button" disabled>停止全部</button></div>
+        </div>
+        <div id="device-cards" class="device-cards"><p class="device-empty">连接并授权手机后，这里会显示各台手机的当前画面。</p></div>
+      </section>
+
+      <div id="view-tasks" class="task-view" role="tabpanel" aria-labelledby="tab-tasks" hidden>
       <section class="workspace">
         <aside class="settings panel">
           <div class="section-heading">
@@ -28,7 +45,7 @@
           </div>
           <div class="settings-body">
             <label class="field tight">
-              <span>设备</span>
+              <span>当前配置与日志所属手机</span>
               <div class="inline-control">
                 <select id="device" aria-label="ADB 设备"><option value="">正在读取设备…</option></select>
                 <button id="refresh-devices" class="secondary" type="button">刷新</button>
@@ -45,7 +62,7 @@
               <legend>入口</legend>
               <div id="entry-list" class="entry-list" aria-label="任务入口"></div>
             </fieldset>
-            <p class="support-note">iOS 自动化驱动待接入</p>
+            <p class="support-note">切换手机分别设置题目和入口；已启动的手机会继续执行。结果按手机分目录保存。</p>
           </div>
         </aside>
 
@@ -53,7 +70,7 @@
           <div class="questions-head">
             <div class="section-heading">
               <h2>问题队列</h2>
-              <p>普通列表或品牌分组 · 可拖入文件</p>
+              <p id="queue-device">先选择手机 · 可分别导入不同题目</p>
             </div>
             <div class="queue-tools">
               <span id="question-count" class="count-pill">0 条问题</span>
@@ -85,14 +102,16 @@
               </label>
               <label class="field compact">
                 <span>长图上限</span>
-                <span class="input-with-unit"><input id="max-long-image-height" value="12000" inputmode="numeric" /><em>px</em></span>
+                <span class="input-with-unit"><input id="max-long-image-height" value="15000" inputmode="numeric" /><em>px</em></span>
               </label>
             </div>
             <div class="action-buttons">
-              <button id="start" class="primary" type="button">开始批量执行</button>
+              <button id="start" class="primary" type="button">启动此手机</button>
+              <button id="start-all" class="secondary" type="button">启动所有已配置手机</button>
               <button id="retry-failed" class="secondary" type="button" disabled>重试失败项</button>
               <button id="resume-batch" class="secondary" type="button">继续原批次</button>
-              <button id="stop" class="danger" type="button" disabled>停止</button>
+              <button id="stop" class="danger" type="button" disabled>停止此手机</button>
+              <button id="stop-all" class="danger" type="button" disabled>停止全部手机</button>
             </div>
           </div>
         </section>
@@ -101,9 +120,10 @@
           <div class="log-head">
             <div class="section-heading">
               <h2>执行日志</h2>
-              <p>实时命令与任务进度</p>
+              <p id="log-device">仅显示当前手机 · 切换设备查看其他日志</p>
             </div>
             <div class="log-tools">
+              <span class="log-legend" aria-label="日志类型"><i class="success">成功</i><i class="failure">失败</i><i>过程</i></span>
               <button id="export-log" class="text-button" type="button">导出</button>
               <button id="copy-log" class="text-button" type="button">复制</button>
               <button id="clear-log" class="text-button" type="button">清空</button>
@@ -121,6 +141,7 @@
           <pre id="log" aria-live="polite"></pre>
         </section>
       </section>
+      </div>
     </main>
 
     <dialog id="question-generator-dialog" class="generator-dialog" aria-labelledby="generator-title">
@@ -217,6 +238,8 @@
     <script src="../question-plan.js"></script>
     <script src="./retry-state.js"></script>
     <script src="./entry-progress.js"></script>
+    <script src="./device-state.js"></script>
+    <script src="./preview-player.js"></script>
     <script src="./question-generator.js"></script>
     <script src="./renderer.js"></script>
   </body>
