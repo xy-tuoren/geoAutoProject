@@ -186,6 +186,8 @@ git push origin v0.1.2
 
 ## 自动更新机制
 
+若安装包已补传到 COS，而旧服务器清单同步被中断，可手动运行 `Repair legacy update feed`，指定已有正式版本标签。该任务先验证 GitHub Release 与 COS 的 `latest.yml` 完全一致、安装包可下载，再使用已有服务器 Secrets 更新兼容清单，不重新构建或上传安装包。
+
 Windows 安装包使用 `electron-updater` 从 `https://yisheng-1252303079.cos.ap-guangzhou.myqcloud.com/geo-updates/win/` 检查更新；GitHub Releases 保留带版本号的安装包备份。标签构建会先上传带版本号的安装包和 blockmap，再更新固定下载文件，最后发布 `latest.yml`，随后只清理该目录中超过最近 5 个版本的安装包和对应 blockmap。COS 桶继续保持私有，仅更新对象设置为公有读。
 
 应用行为：

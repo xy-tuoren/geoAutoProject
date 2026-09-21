@@ -1,0 +1,58 @@
+name: Repair legacy update feed
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing stable release already deployed to COS (e.g. v0.1.24)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
+      UPDATE_SERVER_HOST: ${{ secrets.UPDATE_SERVER_HOST }}
+      UPDATE_SERVER_USER: ${{ secrets.UPDATE_SERVER_USER }}
+      UPDATE_SERVER_SSH_PASSWORD: ${{ secrets.UPDATE_SERVER_SSH_PASSWORD }}
+      TENCENT_COS_BUCKET: ${{ secrets.TENCENT_COS_BUCKET }}
+      TENCENT_COS_REGION: ${{ secrets.TENCENT_COS_REGION }}
+    steps:
+      - name: Verify existing release and COS metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern latest.yml
+          grep -Fx "version: ${RELEASE_TAG#v}" latest.yml
+          base_url="https://${TENCENT_COS_BUCKET}.cos.${TENCENT_COS_REGION}.myqcloud.com/geo-updates/win"
+          curl --fail --silent --show-error --retry 3 "$base_url/latest.yml" --output deployed-latest.yml
+          cmp latest.yml deployed-latest.yml
+          installer="question-automation-electron-setup-${RELEASE_TAG#v}.exe"
+          curl --fail --silent --show-error --retry 3 --range 0-1 "$base_url/$installer" >/dev/null
+          sed -E \
+            -e "s|^([[:space:]]*-[[:space:]]*)url: .*\.exe$|\1url: $base_url/$installer|" \
+            -e "s|^path: .*\.exe$|path: $base_url/$installer|" \
+            latest.yml > legacy-latest.yml
+          grep -F "url: $base_url/$installer" legacy-latest.yml
+          grep -F "path: $base_url/$installer" legacy-latest.yml
+      - name: Publish compatibility metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$UPDATE_SERVER_HOST"
+          test -n "$UPDATE_SERVER_USER"
+          test -n "$UPDATE_SERVER_SSH_PASSWORD"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq sshpass
+          export SSHPASS="$UPDATE_SERVER_SSH_PASSWORD"
+          remote="$UPDATE_SERVER_USER@$UPDATE_SERVER_HOST"
+          ssh_options=(-o StrictHostKeyChecking=accept-new -o PreferredAuthentications=password -o PubkeyAuthentication=no -o NumberOfPasswordPrompts=1 -o ConnectTimeout=20)
+          timeout 30s sshpass -e scp "${ssh_options[@]}" legacy-latest.yml "$remote:/var/www/geo-updates/win/latest.yml.next"
+          timeout 30s sshpass -e ssh "${ssh_options[@]}" "$remote" "mv '/var/www/geo-updates/win/latest.yml.next' '/var/www/geo-updates/win/latest.yml'"

@@ -21,13 +21,13 @@
 
       <nav class="workspace-nav" aria-label="工作区">
         <div class="workspace-tabs" role="tablist" aria-label="工作区页面">
-          <button id="tab-screens" role="tab" aria-selected="true" aria-controls="view-screens" type="button">屏幕总览 <span id="screen-count">0</span></button>
-          <button id="tab-tasks" role="tab" aria-selected="false" aria-controls="view-tasks" tabindex="-1" type="button">任务与日志</button>
+          <button id="tab-tasks" role="tab" aria-selected="true" aria-controls="view-tasks" type="button">任务与日志</button>
+          <button id="tab-screens" role="tab" aria-selected="false" aria-controls="view-screens" tabindex="-1" type="button">屏幕总览 <span id="screen-count">0</span></button>
         </div>
-        <label id="preview-control" class="option"><input id="preview-enabled" type="checkbox" checked />实时画面</label>
+        <label id="preview-control" class="option" hidden><input id="preview-enabled" type="checkbox" checked />实时画面</label>
       </nav>
 
-      <section id="view-screens" class="device-monitor panel" role="tabpanel" aria-labelledby="tab-screens">
+      <section id="view-screens" class="device-monitor panel" role="tabpanel" aria-labelledby="tab-screens" hidden>
         <div class="section-heading">
           <div><h2>全部手机</h2><p id="device-overview">正在读取设备…</p></div>
           <div class="monitor-actions"><button id="refresh-screens" class="secondary" type="button">刷新设备</button><button id="screens-stop-all" class="danger" type="button" disabled>停止全部</button></div>
@@ -35,7 +35,7 @@
         <div id="device-cards" class="device-cards"><p class="device-empty">连接并授权手机后，这里会显示各台手机的当前画面。</p></div>
       </section>
 
-      <div id="view-tasks" class="task-view" role="tabpanel" aria-labelledby="tab-tasks" hidden>
+      <div id="view-tasks" class="task-view" role="tabpanel" aria-labelledby="tab-tasks">
         <aside class="settings panel">
           <div class="task-settings-scroll">
           <div class="section-heading">

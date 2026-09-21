@@ -31,7 +31,7 @@ let selectedSerial = ''
 let defaultOutputDir = ''
 let defaultEntries = []
 let previewEpoch = 0
-let activeView = 'screens'
+let activeView = 'tasks'
 const generatorDialog = $('#question-generator-dialog')
 const GENERATOR_STORAGE_KEY = 'question-generator-config-v1'
 let generatorConfig = loadGeneratorConfig()
@@ -754,10 +754,10 @@ function setDropActive(active) {
 
 $('#refresh-devices').addEventListener('click', refreshDevices)
 $('#refresh-screens').addEventListener('click', refreshDevices)
-for (const [index, view] of ['screens', 'tasks'].entries()) {
+for (const [index, view] of ['tasks', 'screens'].entries()) {
   $(`#tab-${view}`).addEventListener('click', () => showWorkspace(view))
   $(`#tab-${view}`).addEventListener('keydown', event => {
-    const views = ['screens', 'tasks']
+    const views = ['tasks', 'screens']
     const target = event.key === 'ArrowRight' ? (index + 1) % views.length : event.key === 'ArrowLeft' ? (index + views.length - 1) % views.length : event.key === 'Home' ? 0 : event.key === 'End' ? views.length - 1 : -1
     if (target < 0) return
     event.preventDefault()
