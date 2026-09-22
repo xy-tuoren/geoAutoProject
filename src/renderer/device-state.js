@@ -22,7 +22,7 @@
   function screenLayout(width, height, aspects) {
     if (!aspects.length) return { screenHeight: 0, widths: [] }
     // Reserve card padding, gaps and controls (including wrapped controls in narrow cards).
-    const screenHeight = Math.max(0, Math.min((width - 12 * (aspects.length - 1) - 22 * aspects.length) / aspects.reduce((sum, aspect) => sum + aspect, 0), height - 180))
+    const screenHeight = Math.max(0, Math.min((width - 12 * (aspects.length - 1) - 22 * aspects.length) / aspects.reduce((sum, aspect) => sum + aspect, 0), height - 212))
     return { screenHeight, widths: aspects.map(aspect => screenHeight * aspect + 22) }
   }
   return { createSession, retainLog, acceptEvent, screenLayout }

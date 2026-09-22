@@ -44,6 +44,9 @@ test('只复用完全相同图片和选项的OCR结果，图像变化必须重�
   const first = await recognizer.recognize(frame)
   const repeat = await recognizer.recognize(Buffer.from('first'))
   assert.equal(repeat.cacheHit, true)
+  assert.equal(repeat.engineElapsedMs, 0)
+  assert.equal(repeat.sourceElapsedMs, rawRecognition.elapsed_ms)
+  assert.ok(repeat.elapsedMs < rawRecognition.elapsed_ms)
   repeat.results[0].text = 'modified'
   assert.notEqual(first.results[0].text, 'modified')
   assert.equal(calls, 1)

@@ -10,6 +10,7 @@ const {
   runDouyinSearchResultAttempts,
 } = require('./search-recovery')
 const { DouyinMiniAppNetworkError } = require('./douyin-search-workflow')
+const { SEARCH_ENTRY_TIMEOUT_MS } = require('./search-first-screen')
 
 const SEARCH_SUMMARY_FILENAME = '回答_智能总结.png'
 const DOUYIN_SEARCH_SUMMARY_FILENAME = SEARCH_SUMMARY_FILENAME
@@ -18,6 +19,7 @@ const TOUTIAO_SEARCH_SUMMARY_FILENAME = SEARCH_SUMMARY_FILENAME
 const SEARCH_RESULTS_ONLY_STEM = '回答_搜索结果'
 
 function createQuestionWorkflows({
+  doubaoWorkflow,
   observer,
   recoverySnapshot,
   log,
@@ -34,6 +36,7 @@ function createQuestionWorkflows({
   captureDouyinMiniAppEntryAnswerFrames,
   saveArtifacts,
   inputToutiaoQuestion,
+  restoreSearchEntry = async () => {},
   waitForToutiaoAnswerCard,
   captureToutiaoSearchSummary,
   openToutiaoFullAnswer,
@@ -59,10 +62,20 @@ function createQuestionWorkflows({
       entry_package: getActivePackageName(),
       ...(entry.workflow ? { entry_workflow: entry.workflow } : {}),
       entry_hierarchy_startup_timeout_ms: entryHierarchyStartupTimeout(entry),
+      ...(['douyin-search', 'toutiao-search'].includes(entry.workflow) ? {
+        search_entry_timeout_ms: SEARCH_ENTRY_TIMEOUT_MS,
+        search_entry_scan_policy: 'stable_first_screen_one_ocr_recheck_only_on_change',
+        search_entry_max_ocr_attempts: 2,
+      } : {}),
     }
   }
 
   async function saveUnmatchedSearchResult({ platform, artifacts, question, meta, error, observerBaseline, recoveryBaseline }) {
+    Object.assign(meta, {
+      search_entry_ocr_attempts: error.inspection?.ocrAttempts ?? null,
+      search_entry_elapsed_ms: error.inspection?.elapsedMs ?? null,
+      search_entry_stable_absence: Boolean(error.inspection?.stableAbsence),
+    })
     const [xml, frame] = await Promise.all([source(), screenshot()])
     const screenshotPath = path.join(artifacts.deliveryDirectory, `${SEARCH_RESULTS_ONLY_STEM}.png`)
     const platformMeta = platform === 'douyin'
@@ -132,11 +145,13 @@ function createQuestionWorkflows({
     let card
     try {
       card = await runDouyinSearchResultAttempts({
-        waitForResult: () => waitForDouyinSearchResult(payload.timeout * 1_000),
+        waitForResult: () => waitForDouyinSearchResult(SEARCH_ENTRY_TIMEOUT_MS, question),
       })
       Object.assign(meta, {
         douyin_search_attempts: card.attempt,
         douyin_search_refreshed: card.refreshed,
+        search_entry_ocr_attempts: card.ocrAttempts ?? null,
+        search_entry_elapsed_ms: card.elapsedMs ?? null,
       })
     } catch (error) {
       if (error instanceof DouyinSearchResultNotFoundError) {
@@ -245,6 +260,7 @@ function createQuestionWorkflows({
   }
   
   async function askOnceToutiao(payload, artifacts, question, index) {
+    await restoreSearchEntry()
     const observerBaseline = typeof observer.snapshot === 'function' ? observer.snapshot() : {}
     const recoveryBaseline = recoverySnapshot()
     log('stage: 正在打开头条搜索框并输入问题')
@@ -268,7 +284,7 @@ function createQuestionWorkflows({
     await tap((search[0] + search[2]) / 2, (search[1] + search[3]) / 2)
     let card
     try {
-      card = { ...await waitForToutiaoAnswerCard(payload.timeout * 1_000, question), attempt: 1, repeated: false }
+      card = { ...await waitForToutiaoAnswerCard(SEARCH_ENTRY_TIMEOUT_MS, question), attempt: 1, repeated: false }
     } catch (error) {
       if (!(error instanceof ToutiaoAnswerCardNotFoundError)) throw error
       return saveUnmatchedSearchResult({
@@ -282,6 +298,8 @@ function createQuestionWorkflows({
     const full = await openToutiaoFullAnswer(summary.viewMore, card.size)
     Object.assign(meta, {
       toutiao_search_attempts: card.attempt,
+      search_entry_ocr_attempts: card.ocrAttempts ?? null,
+      search_entry_elapsed_ms: card.elapsedMs ?? null,
       toutiao_search_repeated_exact_question: Boolean(card.repeated),
       toutiao_full_answer_open_attempts: 1,
       toutiao_full_answer_route_repeated: false,
@@ -291,6 +309,8 @@ function createQuestionWorkflows({
       toutiao_miniapp_question_submitted: false,
       toutiao_search_refreshed: false,
       toutiao_search_scan_scrolls: 0,
+      toutiao_answer_package: full.answerPackage || getActivePackageName(),
+      toutiao_native_question_validation_required: full.pageKind === 'xiaohe_app',
     })
     await fs.mkdir(artifacts.deliveryDirectory, { recursive: true })
     const summaryPath = path.join(artifacts.deliveryDirectory, entryCard ? DOUYIN_MINIAPP_ENTRY_FILENAME : TOUTIAO_SEARCH_SUMMARY_FILENAME)
@@ -316,16 +336,36 @@ function createQuestionWorkflows({
       status: 'stable',
       xml: full.xml,
       meta,
-      captureMethod: () => captureToutiaoFullAnswerFrames(full.xml, full.bounds, entryCard ? question : null),
+      captureMethod: () => full.pageKind === 'xiaohe_app'
+        ? captureFullReplyFrames(question, 30, { singleQuestionSession: true })
+        : captureToutiaoFullAnswerFrames(full.xml, full.bounds, entryCard ? question : null),
       observerBaseline,
       recoveryBaseline,
     })
     await fs.writeFile(summaryPath, summary.frame)
     log(`capture: 头条首屏入口和回答已通过采集校验，搜索结果已保存 ${summaryPath}`)
+    await restoreSearchEntry()
     return { summaryScreenshot: summaryPath, ...result }
   }
   
   async function askOnce(payload, artifacts, question, index) {
+    if (getActiveEntry().workflow === 'doubao-chat') {
+      const observerBaseline = typeof observer.snapshot === 'function' ? observer.snapshot() : {}
+      const recoveryBaseline = recoverySnapshot()
+      const submission = await doubaoWorkflow.submitQuestion(question, beforeQuestionSubmission)
+      return saveArtifacts({ artifacts, stem: '回答', question, status: 'stable',
+        meta: { serial: payload.serial, batch_id: path.basename(artifacts.batchDirectory), question_index: index,
+          question_directory: artifacts.diagnosticDirectory, ...(payload.taskContext || {}), ...activeEntryMetadata(),
+          new_session_requested: true, ...submission, new_session_validation_method: 'doubao_welcome_without_messages_twice',
+          ui_backend: 'python_uiautomator2_strict', ui_fallback_enabled: false },
+        captureMethod: async () => {
+          try { return await doubaoWorkflow.captureAnswer(question, payload.timeout * 1_000) }
+          catch (error) {
+            if (error.writeDoubaoSeamDiagnostics) error.replySeamDiagnostics = await error.writeDoubaoSeamDiagnostics(artifacts.diagnosticDirectory)
+            throw error
+          }
+        }, observerBaseline, recoveryBaseline })
+    }
     if (getActiveEntry().workflow === 'douyin-search') return askOnceDouyin(payload, artifacts, question, index)
     if (getActiveEntry().workflow === 'toutiao-search') return askOnceToutiao(payload, artifacts, question, index)
     const observerBaseline = typeof observer.snapshot === 'function' ? observer.snapshot() : {}

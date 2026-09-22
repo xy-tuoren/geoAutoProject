@@ -1,12 +1,12 @@
 const { ScrcpyObserver } = require('../automation/scrcpy-observer')
 
-function createDevicePreview({ adbPath, serverPath, log = () => {}, createObserver = options => new ScrcpyObserver(options) }) {
+function createDevicePreview({ adbPath, serverPath, log = () => {}, onClose = () => {}, createObserver = options => new ScrcpyObserver(options) }) {
   const streams = new Map(), closing = new Set()
   function close(entry) {
     if (entry.closed) return entry.closed
     entry.controller.abort()
     clearTimeout(entry.watchdog)
-    entry.closed = Promise.allSettled([entry.ready, entry.observer.stop()]).then(() => entry.observer.stop())
+    entry.closed = Promise.allSettled([entry.ready, entry.observer.stop(), onClose(entry.serial, entry.streamId, entry.owner)]).then(() => entry.observer.stop())
     closing.add(entry.closed)
     entry.closed.finally(() => closing.delete(entry.closed)).catch(() => {})
     return entry.closed
@@ -58,7 +58,11 @@ function createDevicePreview({ adbPath, serverPath, log = () => {}, createObserv
     if (!entry || entry.streamId !== streamId || entry.owner !== owner || !entry.awaiting.delete(sequence)) return
     if (!entry.awaiting.size) { clearTimeout(entry.watchdog); entry.watchdog = null }
   }
-  return { start, stop, acknowledge, get size() { return streams.size + closing.size } }
+  function isActive(serial, streamId, owner) {
+    const entry = streams.get(serial)
+    return Boolean(entry && entry.streamId === streamId && entry.owner === owner && !entry.controller.signal.aborted && entry.sequence > 0)
+  }
+  return { start, stop, acknowledge, isActive, get size() { return streams.size + closing.size } }
 }
 
 module.exports = { createDevicePreview }

@@ -468,7 +468,7 @@ function referenceProductsSection(xml) {
 // the latter case infer only the artwork portion near the top of a fully sized
 // card; this lets capture readiness remain image-aware without waiting for
 // accessibility labels that will never appear.
-function referenceProductImageBounds(xml, listBounds) {
+function referenceProductImageBounds(xml, listBounds, { cardAspectRatios = [] } = {}) {
   const listWidth = listBounds[2] - listBounds[0]
   const listHeight = listBounds[3] - listBounds[1]
   const root = parseNodeTree(xml)
@@ -489,10 +489,14 @@ function referenceProductImageBounds(xml, listBounds) {
   }).filter(bounds => {
     const width = bounds[2] - bounds[0]
     const height = bounds[3] - bounds[1]
-    return boundsIntersect(bounds, listBounds) && width >= 60 && height >= 45
+    return boundsIntersect(bounds, listBounds) && width >= listWidth * 0.055 && height >= listWidth * 0.04
   })
   const inferred = []
   const seen = new Set()
+  const observedAspectRatios = []
+  let offscreenArtworkCards = 0
+  let offscreenArtworkTailBottom = 0
+  const seenCards = new Set()
   for (const node of scopedNodes) {
     const attrs = node.attrs
     if (nodeAttr(attrs, 'class') !== 'android.view.ViewGroup') continue
@@ -501,16 +505,27 @@ function referenceProductImageBounds(xml, listBounds) {
     const card = parseBounds(rawBounds)
     const width = card[2] - card[0]
     const height = card[3] - card[1]
-    if (width < listWidth * 0.28 || width > listWidth * 0.5 || height < listHeight * 0.32) continue
-    const marginX = Math.max(8, Math.round(width * 0.06))
+    if (width < listWidth * 0.28 || width > listWidth * 0.5 || height <= 0 || !boundsIntersect(card, listBounds)) continue
+    const cardKey = card.join(',')
+    if (seenCards.has(cardKey)) continue
+    seenCards.add(cardKey)
+    const template = cardAspectRatios.find(ratio => ratio > 0)
+    if (height < listHeight * 0.32 && !template) continue
+    const edge = listWidth * 0.005
+    const clippedTop = card[1] <= listBounds[1] + edge
+    const clippedBottom = card[3] >= listBounds[3] - edge
+    const fullHeight = template ? Math.max(height, Math.round(width * template)) : height
+    const cardTop = clippedTop && !clippedBottom && template ? card[3] - fullHeight : card[1]
+    if (!clippedTop && !clippedBottom && height >= listHeight * 0.32) observedAspectRatios.push(height / width)
+    const marginX = Math.round(width * 0.06)
     const artwork = [
       card[0] + marginX,
-      card[1] + Math.round(height * 0.03),
+      cardTop + Math.round(fullHeight * 0.03),
       card[2] - marginX,
       // Keep the inferred crop inside the artwork band.  Extending into the
       // title/price rows makes a blank image slot look non-empty because the
       // product text itself contributes edges and contrast.
-      card[1] + Math.round(height * 0.42),
+      cardTop + Math.round(fullHeight * 0.42),
     ]
     const visible = [
       Math.max(listBounds[0], artwork[0]),
@@ -518,7 +533,12 @@ function referenceProductImageBounds(xml, listBounds) {
       Math.min(listBounds[2], artwork[2]),
       Math.min(listBounds[3], artwork[3]),
     ]
-    if (visible[2] - visible[0] < 60 || visible[3] - visible[1] < 80) continue
+    if (template && artwork[3] <= listBounds[1]) {
+      offscreenArtworkCards++
+      offscreenArtworkTailBottom = Math.max(offscreenArtworkTailBottom, card[3] - listBounds[1])
+      continue
+    }
+    if (visible[2] - visible[0] < listWidth * 0.055 || visible[3] - visible[1] < listWidth * 0.04) continue
     const key = visible.join(',')
     if (!seen.has(key)) { seen.add(key); inferred.push(visible) }
   }
@@ -528,6 +548,9 @@ function referenceProductImageBounds(xml, listBounds) {
       bounds: explicit,
       expectedCards: explicit.length,
       explicitImages: explicit.length,
+      cardAspectRatios: observedAspectRatios,
+      offscreenArtworkCards,
+      offscreenArtworkTailBottom,
     }
   }
 
@@ -551,7 +574,7 @@ function referenceProductImageBounds(xml, listBounds) {
   const mode = matchedExplicit === bounds.length
     ? 'explicit_card_artwork'
     : (matchedExplicit ? 'mixed_card_artwork' : 'inferred_card_artwork')
-  return { mode, bounds, expectedCards: inferred.length, explicitImages: explicit.length }
+  return { mode, bounds, expectedCards: inferred.length, explicitImages: explicit.length, cardAspectRatios: observedAspectRatios, offscreenArtworkCards, offscreenArtworkTailBottom }
 }
 
 module.exports = { LOADING_TEXT_MARKERS, iterNodes, nodeAttr, nodeIsVisible, parseBounds, boundsIntersect, boundsCenterY, estimateVerticalScrollShift, sharedTextSeam, hierarchyIsLoading, visibleNodesWithLabel, replyTailOnScreen, questionVisible, questionVisibleExact, currentQuestionText, findChatScrollBounds, validateCaptureViewport, floatingScrollControlBounds, replyCaptureBounds, visibleLabelBounds, visibleLabelBoundsList, responseTimeoutRetryTarget, boundsForNodeAttribute, boundsListForNodeAttribute, evidencePanelBounds, evidencePanelBoundsList, evidencePanelBoundsForTitle, panelIsClipped, evidenceMinimumHeight, parseNodeTree, referenceProductsSection, referenceProductImageBounds }

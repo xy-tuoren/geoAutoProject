@@ -31,7 +31,16 @@ const ENTRY_DEFINITIONS = Object.freeze({
     packageName: 'com.ss.android.article.news',
     packageLabel: '头条小荷AI小程序',
     workflow: 'toutiao-search',
+    answerRoutePackages: Object.freeze([DEFAULT_PACKAGE]),
     supportsNewSession: false,
+  }),
+  'doubao-app': Object.freeze({
+    id: 'doubao-app',
+    label: '豆包APP',
+    packageName: 'com.larus.nova',
+    packageLabel: '豆包APP',
+    workflow: 'doubao-chat',
+    supportsNewSession: true,
   }),
 })
 

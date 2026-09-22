@@ -5,7 +5,7 @@ const { referenceProductsCaptureComplete } = require('./reference-products')
 const { writeReplySeamDiagnostics } = require('./seam-diagnostics')
 const { hasAppLimitedNotice, resultQuality } = require('./result-quality')
 
-const ARTIFACT_LAYOUT_VERSION = 10
+const ARTIFACT_LAYOUT_VERSION = 11
 
 function createArtifactWriter({
   defaultCaptureMethod,
@@ -33,6 +33,7 @@ function createArtifactWriter({
     if (stitch) {
       const replyCaptureStarted = Date.now()
       const capture = await captureMethod(question)
+      xml = capture.xml || xml
       const { frames, transitions, bounds, recaptureCount, fullRetryCount, fallbackReasons, topNavigationMs, questionLocated, questionFullyVisible, evidenceEmbedded, evidenceExpanded, productDetected, products, productCaptureAttempts, productCaptureMs, captureMetadata = {} } = capture
       const seamArtifacts = await writeReplySeamDiagnostics(diagnosticDirectory, capture)
       log(`capture: 接缝汇总已保存 ${seamArtifacts.summary}（帧=${seamArtifacts.details.frame_count}，接缝=${seamArtifacts.details.transition_count}/${seamArtifacts.details.expected_transition_count}，异常证据=${seamArtifacts.diagnostics.length}组）`)
@@ -106,6 +107,8 @@ function createArtifactWriter({
           reference_products_capture_complete: products.firstViewportIncluded && products.imagesReady && products.confirmedEnd && products.continuityVerified,
           reference_products_calibrated_seams: products.calibratedSeams,
           reference_products_trigger_refreshed: products.triggerRefreshed,
+          reference_products_coordinate_mapping: 'logical_list_to_physical_png',
+          reference_products_readiness_modes: products.readinessModes || [],
         })
       }
     } else await fs.writeFile(screenshotPath, frame || await screenshot())

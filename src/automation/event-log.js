@@ -4,6 +4,12 @@ const { randomUUID } = require('node:crypto')
 
 function classifyAutomationLog(message) {
   const text = String(message).trim()
+  const firstScreen = text.match(/^search: 首屏已加载且稳定，无小荷入口（ocr_attempts=(\d+)，elapsed=(\d+)ms，scrolls=0）$/)
+  if (firstScreen) return { event: 'search_first_screen_absent', category: 'diagnostic', details: { ocr_attempts: Number(firstScreen[1]), elapsed_ms: Number(firstScreen[2]), scan_scrolls: 0, loaded: true, stable: true } }
+  if (/^capture: 药品入口仅在底部露出/.test(text)) return { event: 'reference_products_trigger_reveal', category: 'capture', details: {} }
+  if (/^diagnostic: 药品失败当页已在关闭抽屉之前保存/.test(text)) return { event: 'reference_products_failure_before_cleanup', category: 'diagnostic', details: {} }
+  if (/^stage: 头条已通过已验证的小荷入口跳转/.test(text)) return { event: 'toutiao_native_answer_route', category: 'stage', details: { answer_package: 'com.aurora.xiaohe.aidoctor', exact_question_required: true } }
+  if (/^capture: 推荐药品 page \d+，逐卡图片/.test(text)) return { event: 'reference_products_page_captured', category: 'capture', details: { page: Number(text.match(/page (\d+)/)[1]), images_ready: true } }
   const page = text.match(/^capture: (推荐药品|(?:抖音|头条)?小荷AI全文)?\s*page (\d+)$/)
   if (page) {
     return {

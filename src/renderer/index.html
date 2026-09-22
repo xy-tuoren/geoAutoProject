@@ -58,8 +58,17 @@
               </div>
             </label>
             <fieldset class="entry-field">
-              <legend>入口</legend>
+              <legend>
+                <span>入口</span>
+                <span class="collection-order-control">
+                  <span id="collection-order-label">按平台采集</span>
+                  <button id="collection-order" class="icon-button small" type="button" value="platform_first" aria-label="切换为按问题采集" title="当前按平台采集，点击切换为按问题采集">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16m-4-4 4 4-4 4M20 17H4m4-4-4 4 4 4"/></svg>
+                  </button>
+                </span>
+              </legend>
               <div id="entry-list" class="entry-list" aria-label="任务入口"></div>
+              <p id="entry-order-preview" class="visually-hidden" aria-live="polite"></p>
             </fieldset>
             <p class="support-note">各手机独立配置，切换不影响正在运行的任务。</p>
           </div>
@@ -235,6 +244,7 @@
     <script src="./retry-state.js"></script>
     <script src="./entry-progress.js"></script>
     <script src="./device-state.js"></script>
+    <script src="./device-control.js"></script>
     <script src="./preview-player.js"></script>
     <script src="./question-generator.js"></script>
     <script src="./renderer.js"></script>

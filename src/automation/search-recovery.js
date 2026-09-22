@@ -1,15 +1,17 @@
 class DouyinSearchResultNotFoundError extends Error {
-  constructor(message, { cause, scanScrolls = 0 } = {}) {
+  constructor(message, { cause, scanScrolls = 0, inspection = null } = {}) {
     super(message, { cause })
     this.name = 'DouyinSearchResultNotFoundError'
     this.scanScrolls = scanScrolls
+    this.inspection = inspection
   }
 }
 
 class ToutiaoAnswerCardNotFoundError extends Error {
-  constructor(message, { cause } = {}) {
+  constructor(message, { cause, inspection = null } = {}) {
     super(message, { cause })
     this.name = 'ToutiaoAnswerCardNotFoundError'
+    this.inspection = inspection
   }
 }
 

@@ -24,6 +24,7 @@ function usage() {
   console.log('用法：npm run run:android -- --serial <设备序列号> --output-dir <目录> [--entry <入口ID>] [--questions-file <TXT/CSV/JSON/XLSX>] [--timeout <秒>] [--max-long-image-height <像素>] [问题...]')
   console.log('所有普通问答都会强制为每题新建会话；当前已有回答采集模式已移除。')
   console.log('继续原批次：--serial <设备> --resume-batch <批次目录>；仅在明确允许重新提问中断题时添加 --retry-uncertain。')
+  console.log('采集顺序：--collection-order platform_first（默认，按平台）或 question_first（按问题）；重复 --entry 的顺序即平台优先级。')
 }
 
 function parseArguments(argv) {
@@ -33,6 +34,11 @@ function parseArguments(argv) {
     if (value === '--serial') options.serial = argv[++index]
     else if (value === '--output-dir') options.outputDir = argv[++index]
     else if (value === '--entry') options.entries.push(argv[++index])
+    else if (value === '--collection-order') {
+      const order = argv[++index]
+      if (!order) throw new Error('--collection-order 缺少采集顺序。')
+      options.collectionOrder = require('./automation/collection-schedule').normalizeCollectionOrder(order)
+    }
     else if (value === '--questions-file') options.questionsFile = argv[++index]
     else if (value === '--resume-batch') { options.batchDirectory = argv[++index]; options.resume = true }
     else if (value === '--retry-uncertain') options.includeUncertain = true

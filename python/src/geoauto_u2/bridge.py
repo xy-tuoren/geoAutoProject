@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import sys
@@ -200,6 +201,54 @@ class U2Bridge:
             return {"serial": serial, "device_info": self._device.device_info}
 
         device = self._require_device()
+        if method == "manual_control":
+            # GUI points are normalized inside the displayed video, not desktop
+            # pixels. Resolve the current UI coordinate space immediately before
+            # performing the explicit user action (including during collection).
+            info = device.info
+            width = int(info.get("displayWidth", 0))
+            height = int(info.get("displayHeight", 0))
+            aspect = float(params.get("aspect", 0))
+            if (width <= 0 or height <= width or info.get("displayRotation") not in (0, 2)
+                    or not math.isfinite(aspect) or aspect <= 0
+                    or abs((width / height) / aspect - 1) > 0.03):
+                raise BridgeError("手机方向或显示比例已变化，请保持正常竖屏并刷新画面后操作")
+
+            def point(name: str) -> tuple[int, int]:
+                value = params.get(name)
+                if not isinstance(value, dict):
+                    raise BridgeError("手动操作缺少触点")
+                x, y = float(value.get("x", -1)), float(value.get("y", -1))
+                if not all(math.isfinite(v) and 0 <= v <= 1 for v in (x, y)):
+                    raise BridgeError("手动操作触点超出手机画面")
+                return min(width - 1, round(x * width)), min(height - 1, round(y * height))
+
+            kind = params.get("kind")
+            if kind == "tap":
+                device.click(*point("point"))
+            elif kind == "long_press":
+                device.long_click(*point("point"), duration=0.7)
+            elif kind == "swipe":
+                start, end = point("start"), point("end")
+                duration = float(params.get("duration", 350))
+                if not math.isfinite(duration) or not 100 <= duration <= 1500:
+                    raise BridgeError("滑动时长超出允许范围")
+                device.swipe(*start, *end, duration=duration / 1000)
+            elif kind == "key":
+                key = params.get("key")
+                if key not in ("back", "home", "recent", "enter", "delete"):
+                    raise BridgeError("不支持的手机按键")
+                device.press(key)
+            elif kind == "text":
+                text = params.get("text")
+                if not isinstance(text, str) or not 1 <= len(text) <= 10000:
+                    raise BridgeError("输入内容需为 1–10000 个字符")
+                if not device(focused=True).exists(timeout=0.2):
+                    raise BridgeError("请先点击手机中的输入框，再写入文字")
+                self.dispatch("send_keys", {"text": text, "clear": False})
+            else:
+                raise BridgeError("不支持的手动操作")
+            return {"action": kind, "logical_width": width, "logical_height": height}
         if method == "health":
             return {"serial": self._serial, "info": device.info}
         if method == "current_app":

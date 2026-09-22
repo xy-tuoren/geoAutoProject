@@ -1,6 +1,7 @@
 const { sleep } = require('./utils')
 const { cropImage, imageInfo, imageLooksLoaded, imageRegionsStable } = require('./images')
 const { captureStableSandwich } = require('./capture-primitives')
+const { inspectSearchFirstScreen } = require('./search-first-screen')
 const {
   toutiaoSearchInput,
   toutiaoViewMoreBounds,
@@ -48,28 +49,19 @@ function createToutiaoSearchWorkflow({
   tap,
   ui,
   getActivePackageName,
+  activateAnswerRoute,
+  now = Date.now,
+  delay = sleep,
 }) {
   async function waitForToutiaoAnswerCard(timeout, question) {
-    const deadline = Date.now() + timeout
     const size = await windowSize()
-    let lastProgress = 0
-    let nextOcrAt = 0
-    let lastStaleQuestion = null
-    while (Date.now() < deadline) {
-      const xml = await source()
-      const resultInput = toutiaoSearchInput(xml)
-      if (!resultInput || resultInput.text !== question) {
-        if (resultInput?.text && resultInput.text !== lastStaleQuestion) {
-          log(`waiting: 头条仍显示旧查询“${resultInput.text}”，已忽略其回答卡片并继续等待当前问题结果`)
-          lastStaleQuestion = resultInput.text
-        }
-        await sleep(500)
-        continue
-      }
-      const viewMore = toutiaoViewMoreBounds(xml)
-      if (viewMore) return { xml, viewMore, size, mode: 'smart_summary', detectionMethod: 'ui_hierarchy' }
-      if (Date.now() >= nextOcrAt) {
-        const frame = await screenshot()
+    const result = await inspectSearchFirstScreen({ source, screenshot, timeout, now, delay, log,
+      queryMatches: xml => toutiaoSearchInput(xml)?.text === question,
+      hierarchyTarget: xml => {
+        const viewMore = toutiaoViewMoreBounds(xml)
+        return viewMore ? { target: viewMore, viewMore, size, mode: 'smart_summary', detectionMethod: 'ui_hierarchy' } : null
+      },
+      recognize: async (frame, xml) => {
         const logicalSize = hierarchyLogicalSize(xml, size)
         const recognition = await ocr.recognize(frame, {
           minConfidence: 0.5,
@@ -90,18 +82,13 @@ function createToutiaoSearchWorkflow({
           target: ocrTarget,
         })
         log(ocrTarget
-          ? `ocr: purpose=toutiao_answer_card outcome=matched engine=${recognition.engine} elapsed=${Math.round(recognition.elapsedMs)}ms lines=${recognition.results.length} summary_confidence=${ocrTarget.summaryConfidence.toFixed(3)} view_more_confidence=${ocrTarget.viewMoreConfidence.toFixed(3)} physical_bounds=${ocrTarget.physicalBounds.join(',')} logical_bounds=${ocrTarget.bounds.join(',')}`
-          : `ocr: purpose=toutiao_answer_card outcome=not_found engine=${recognition.engine} elapsed=${Math.round(recognition.elapsedMs)}ms lines=${recognition.results.length}`)
-        if (ocrTarget) return { xml, viewMore: ocrTarget.bounds, size, mode: ocrTarget.mode || 'smart_summary', detectionMethod: 'rapidocr', ocrTarget, recognition }
-        nextOcrAt = Date.now() + 2_000
-      }
-      if (Date.now() - lastProgress >= 5_000) {
-        log('waiting: 正在等待头条小荷AI医生搜索结果（UI层级或OCR）…')
-        lastProgress = Date.now()
-      }
-      await sleep(500)
-    }
-    throw new ToutiaoAnswerCardNotFoundError('头条搜索结果中未出现小荷AI医生全文入口卡片。')
+          ? `ocr: purpose=toutiao_answer_card outcome=matched engine=${recognition.engine} elapsed=${Math.round(recognition.elapsedMs)}ms lines=${recognition.results.length} cache_hit=${Boolean(recognition.cacheHit)} engine_elapsed_ms=${Math.round(recognition.engineElapsedMs || 0)} summary_confidence=${ocrTarget.summaryConfidence.toFixed(3)} view_more_confidence=${ocrTarget.viewMoreConfidence.toFixed(3)} physical_bounds=${ocrTarget.physicalBounds.join(',')} logical_bounds=${ocrTarget.bounds.join(',')}`
+          : `ocr: purpose=toutiao_answer_card outcome=not_found engine=${recognition.engine} elapsed=${Math.round(recognition.elapsedMs)}ms lines=${recognition.results.length} cache_hit=${Boolean(recognition.cacheHit)} engine_elapsed_ms=${Math.round(recognition.engineElapsedMs || 0)}`)
+        return { target: ocrTarget, viewMore: ocrTarget?.bounds, size, mode: ocrTarget?.mode || 'smart_summary', detectionMethod: 'rapidocr', ocrTarget, recognition }
+      },
+    })
+    if (!result.absent) return result
+    throw new ToutiaoAnswerCardNotFoundError('头条搜索结果中未出现小荷AI医生全文入口卡片。', { inspection: { ocrAttempts: result.ocrAttempts, elapsedMs: result.elapsedMs, stableAbsence: true } })
   }
   
   async function captureToutiaoSearchSummary(size, expectedCard = null, question = null) {
@@ -142,8 +129,8 @@ function createToutiaoSearchWorkflow({
       target: ocrTarget,
     })
     log(ocrTarget
-      ? `ocr: purpose=toutiao_summary_recapture outcome=matched engine=${recognition.engine} elapsed=${Math.round(recognition.elapsedMs)}ms lines=${recognition.results.length} summary_confidence=${ocrTarget.summaryConfidence.toFixed(3)} view_more_confidence=${ocrTarget.viewMoreConfidence.toFixed(3)} physical_bounds=${ocrTarget.physicalBounds.join(',')} logical_bounds=${ocrTarget.bounds.join(',')}`
-      : `ocr: purpose=toutiao_summary_recapture outcome=not_found engine=${recognition.engine} elapsed=${Math.round(recognition.elapsedMs)}ms lines=${recognition.results.length}`)
+      ? `ocr: purpose=toutiao_summary_recapture outcome=matched engine=${recognition.engine} elapsed=${Math.round(recognition.elapsedMs)}ms lines=${recognition.results.length} cache_hit=${Boolean(recognition.cacheHit)} engine_elapsed_ms=${Math.round(recognition.engineElapsedMs || 0)} summary_confidence=${ocrTarget.summaryConfidence.toFixed(3)} view_more_confidence=${ocrTarget.viewMoreConfidence.toFixed(3)} physical_bounds=${ocrTarget.physicalBounds.join(',')} logical_bounds=${ocrTarget.bounds.join(',')}`
+      : `ocr: purpose=toutiao_summary_recapture outcome=not_found engine=${recognition.engine} elapsed=${Math.round(recognition.elapsedMs)}ms lines=${recognition.results.length} cache_hit=${Boolean(recognition.cacheHit)} engine_elapsed_ms=${Math.round(recognition.engineElapsedMs || 0)}`)
     if (!ocrTarget) throw new Error('截取头条智能总结后，UI层级和OCR均未能再次确认小荷AI医生全文入口，已停止点击。')
     return { ...capture, viewMore: ocrTarget.bounds, size, mode: ocrTarget.mode || 'smart_summary', detectionMethod: 'rapidocr', ocrTarget, recognition }
   }
@@ -156,6 +143,19 @@ function createToutiaoSearchWorkflow({
     let genericConsultationReads = 0
     while (Date.now() < deadline || (fullAnswerHostSeen && Date.now() < hardDeadline)) {
       await waitForVisualQuiet({ timeout: 1_000, fallbackMs: 400 })
+      const current = await ui.currentApp()
+      if (current?.package && current.package !== getActivePackageName()) {
+        if (current.package === 'com.aurora.xiaohe.aidoctor' && activateAnswerRoute) {
+          const routed = await activateAnswerRoute(current.package)
+          log('stage: 头条已通过已验证的小荷入口跳转到小荷APP，切换原生回答采集并严格核验原题')
+          return { ...routed, pageKind: 'xiaohe_app', answerPackage: current.package }
+        }
+        throw new Error(`头条全文入口点击后进入了错误应用：expected=${getActivePackageName()}, actual=${current.package}`)
+      }
+      if (/MiniAppHostActivity|BrowserActivity/.test(current?.activity || '')) {
+        if (!fullAnswerHostSeen) log('waiting: 已确认进入头条全文宿主，正在等待全文UI层级就绪')
+        fullAnswerHostSeen = true
+      }
       const xml = await source()
       const bounds = douyinMiniAppCaptureBounds(xml, size)
       const hasMessageInput = toutiaoGenericConsultationPage(xml)
@@ -180,14 +180,6 @@ function createToutiaoSearchWorkflow({
             : '头条小荷页面已打开，但连续三次未识别到可靠的正文区域；尚未进行正文像素校验，已停止本题。')
         }
       } else genericConsultationReads = 0
-      const current = await ui.currentApp()
-      if (current?.package && current.package !== getActivePackageName()) {
-        throw new Error(`头条全文入口点击后进入了错误应用：expected=${getActivePackageName()}, actual=${current.package}`)
-      }
-      if (/MiniAppHostActivity|BrowserActivity/.test(current?.activity || '')) {
-        if (!fullAnswerHostSeen) log('waiting: 已确认进入头条全文宿主，正在等待全文UI层级就绪')
-        fullAnswerHostSeen = true
-      }
     }
     throw new ToutiaoFullAnswerNotOpenedError('已点击头条小荷AI医生全文入口，但未能确认本题全文页打开。')
   }

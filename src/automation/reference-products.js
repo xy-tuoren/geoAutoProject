@@ -243,23 +243,27 @@ function calibratedProductFallbackOverlap(overlaps) {
   return Math.max(0, low - 8)
 }
 
-async function referenceProductViewportReadiness(frame, xml, listBounds) {
-  const candidates = referenceProductImageBounds(xml, listBounds)
+async function referenceProductViewportReadiness(frame, xml, listBounds, options = {}) {
+  const candidates = referenceProductImageBounds(xml, listBounds, options)
   const frameSize = await imageInfo(frame)
+  const scaleX = frameSize.width / (listBounds[2] - listBounds[0])
+  const scaleY = frameSize.height / (listBounds[3] - listBounds[1])
   const relativeBounds = candidates.bounds.map(bounds => [
-    Math.max(0, bounds[0] - listBounds[0]),
-    Math.max(0, bounds[1] - listBounds[1]),
-    Math.min(frameSize.width, bounds[2] - listBounds[0]),
-    Math.min(frameSize.height, bounds[3] - listBounds[1]),
-  ]).filter(bounds => bounds[2] - bounds[0] >= 60 && bounds[3] - bounds[1] >= 45)
+    Math.max(0, Math.round((bounds[0] - listBounds[0]) * scaleX)),
+    Math.max(0, Math.round((bounds[1] - listBounds[1]) * scaleY)),
+    Math.min(frameSize.width, Math.round((bounds[2] - listBounds[0]) * scaleX)),
+    Math.min(frameSize.height, Math.round((bounds[3] - listBounds[1]) * scaleY)),
+  ]).filter(bounds => bounds[2] > bounds[0] && bounds[3] > bounds[1])
   const loadedFlags = await Promise.all(relativeBounds.map(async bounds => imageLooksLoaded(await cropImage(frame, bounds))))
   const loaded = loadedFlags.filter(Boolean).length
   const labelledCards = visibleLabelBoundsList(xml, '查看说明书').filter(bounds => boundsIntersect(bounds, listBounds)).length
-  const cards = Math.max(candidates.expectedCards || 0, labelledCards, relativeBounds.length)
+  const cards = Math.max(candidates.expectedCards || 0, labelledCards - (candidates.offscreenArtworkCards || 0), relativeBounds.length)
   const viewportLoaded = relativeBounds.length ? true : await imageLooksLoaded(frame)
-  const ready = cards
+  const imagesReady = cards
     ? relativeBounds.length >= cards && loaded === relativeBounds.length
     : viewportLoaded
+  const previousArtworkRequired = (candidates.offscreenArtworkCards || 0) > 0
+  const ready = imagesReady && (!previousArtworkRequired || Boolean(options.previousArtworkVerified))
   return {
     ready,
     mode: candidates.mode,
@@ -267,6 +271,14 @@ async function referenceProductViewportReadiness(frame, xml, listBounds) {
     images: relativeBounds.length,
     loaded,
     unloaded: cards ? Math.max(cards, relativeBounds.length) - loaded : (ready ? 0 : 1),
+    physicalImageBounds: relativeBounds,
+    cardAspectRatios: candidates.cardAspectRatios || [],
+    artworkAboveViewportCandidates: candidates.offscreenArtworkCards || 0,
+    previouslyVerifiedArtworkAboveViewport: options.previousArtworkVerified ? candidates.offscreenArtworkCards || 0 : 0,
+    previousArtworkOverlapRequired: previousArtworkRequired,
+    previousArtworkOverlapVerified: !previousArtworkRequired || Boolean(options.previousArtworkVerified),
+    previousArtworkTailPhysicalBottom: Math.round((candidates.offscreenArtworkTailBottom || 0) * scaleY),
+    reason: !imagesReady ? 'visible_artwork_unloaded' : !ready ? 'previous_artwork_overlap_unverified' : null,
   }
 }
 

@@ -20,7 +20,7 @@ async function rawImage(image) {
   return { data: result.data, width: result.info.width, height: result.info.height, channels: result.info.channels }
 }
 
-async function detectXiaoheUserQuestionBubble(image, chatBounds, logicalSize) {
+async function detectXiaoheUserQuestionBubble(image, chatBounds, logicalSize, { searchBottomRatio = 0.45, targetPhysicalBounds = null } = {}) {
   const raw = await rawImage(image)
   const logicalWidth = logicalSize?.width || raw.width
   const logicalHeight = logicalSize?.height || raw.height
@@ -43,7 +43,7 @@ async function detectXiaoheUserQuestionBubble(image, chatBounds, logicalSize) {
   const visibleSafeTop = Math.max(0, Math.floor(raw.height * 0.032))
   const searchTop = visibleSafeTop
   const searchLeft = Math.max(chatLeft, Math.floor(chatRight - chatWidth * 0.55))
-  const searchBottom = Math.min(chatBottom, Math.ceil(chatTop + chatHeight * 0.45))
+  const searchBottom = Math.min(chatBottom, Math.ceil(chatTop + chatHeight * searchBottomRatio))
   const minimumPixelsPerRow = Math.max(12, Math.floor(chatWidth * 0.10))
   const minimumSolidRows = Math.max(10, Math.floor(chatHeight * 0.012))
   const minimumFullBubbleRows = Math.max(18, Math.floor(raw.height * 0.015))
@@ -71,6 +71,7 @@ async function detectXiaoheUserQuestionBubble(image, chatBounds, logicalSize) {
       fullyVisible: runRows >= minimumFullBubbleRows
         && runStart > visibleSafeTop + edgeMargin
         && bottom < chatBottom - edgeMargin,
+      scanComplete: bottom < searchBottom - edgeMargin,
     })
   }
 
@@ -101,6 +102,7 @@ async function detectXiaoheUserQuestionBubble(image, chatBounds, logicalSize) {
   addCandidate(searchBottom)
   const candidate = candidates
     .filter(item => item.solidRows >= minimumFullBubbleRows)
+    .filter(item => !targetPhysicalBounds || (targetPhysicalBounds[1] >= item.physicalBounds[1] && targetPhysicalBounds[3] <= item.physicalBounds[3]))
     .sort((a, b) => {
       const areaA = (a.physicalBounds[2] - a.physicalBounds[0]) * a.solidRows
       const areaB = (b.physicalBounds[2] - b.physicalBounds[0]) * b.solidRows

@@ -7,7 +7,8 @@ const { hasAppLimitedNotice } = require('./result-quality')
 const { captureEnvironment } = require('./environment-report')
 const { execFileSync } = require('node:child_process')
 const { sleep, createBatchDirectory, batchArtifactDirectories, taskArtifactDirectories } = require('./utils')
-const { normalizeQuestionPlan, brandExecutionUnits, safeDirectorySegment } = require('../question-plan')
+const { normalizeQuestionPlan, safeDirectorySegment } = require('../question-plan')
+const { normalizeCollectionOrder, collectionSchedule } = require('./collection-schedule')
 const { EventLog } = require('./event-log')
 const { iterNodes, nodeAttr, nodeIsVisible, parseBounds, findChatScrollBounds, validateCaptureViewport, visibleLabelBounds, boundsForNodeAttribute } = require('./hierarchy')
 const { imageInfo, cropImage } = require('./images')
@@ -42,6 +43,7 @@ const { OperationTelemetry } = require('./operation-telemetry')
 const { compactRecognitionFrames } = require('./diagnostic-storage')
 const { ConsoleLogFormatter } = require('./console-log-formatter')
 const { createQuestionWorkflows } = require('./question-workflows')
+const { createDoubaoWorkflow } = require('./doubao-workflow')
 
 async function waitForPackageHierarchy({
   dumpHierarchy,
@@ -365,10 +367,13 @@ function createRunner(options) {
     })
   }
 
+  const activeManualInteractions = new Set()
+  let manualControlDuringQuestion = false
   async function startQuestionLogging(artifacts, context) {
     await evidencePending
     if (evidenceError) throw evidenceError
     activeQuestionArtifacts = artifacts
+    manualControlDuringQuestion = activeManualInteractions.size > 0
     lastOcrDiagnostic = null
     currentStage = null
     observedLimitation = false
@@ -405,6 +410,21 @@ function createRunner(options) {
 
   async function finishQuestionLogging(event, details = {}) {
     if (!activeQuestionEventLog) return
+    if (manualControlDuringQuestion && event === 'question_completed') {
+      Object.assign(details, { manual_control_during_question: true, quality_status: 'needs_review', result_label: '已采集：建议核图', human_reviewed: false })
+      // A user action may arrive after PNG creation but before publication.
+      // Keep the final result and every answer metadata file in sync as well.
+      if (batchState) {
+        updateResult(batchState.results, { ...activeQuestionContext, ...details, status: 'completed' })
+        await checkpoint()
+      }
+      const metadataFiles = await fs.readdir(activeQuestionArtifacts.diagnosticDirectory)
+      for (const name of metadataFiles.filter(name => /^回答.*\.json$/.test(name))) {
+        const file = path.join(activeQuestionArtifacts.diagnosticDirectory, name)
+        const meta = JSON.parse(await fs.readFile(file, 'utf8'))
+        await writeJsonAtomic(file, { ...meta, manual_control_during_question: true, quality_status: 'needs_review', result_label: '已采集：建议核图', human_reviewed: false })
+      }
+    }
     await evidencePending
     if (evidenceError) throw evidenceError
     if (!cancelled) try {
@@ -445,14 +465,16 @@ function createRunner(options) {
     await batchEventLog?.flush()
   }
 
+  let answerRoutePackage = null
   function resetEntryState(entry) {
     activeEntry = entry
+    answerRoutePackage = null
     cachedInputBounds = null
     cachedSendBounds = null
   }
 
   function activePackageName() {
-    return activeEntry.packageName || DEFAULT_PACKAGE
+    return answerRoutePackage || activeEntry.packageName || DEFAULT_PACKAGE
   }
 
   function activePackageLabel() {
@@ -807,6 +829,14 @@ function createRunner(options) {
     tap,
     ui,
     getActivePackageName: activePackageName,
+    activateAnswerRoute: async packageName => {
+      if (!activeEntry.answerRoutePackages?.includes(packageName)) throw new Error('当前入口未允许此跨应用回答路由')
+      const current = await ui.currentApp()
+      if (current?.package !== packageName) throw new Error('跨应用路由确认期间前台已变化，停止操作')
+      const xml = await waitForPackageHierarchy({ dumpHierarchy: () => ui.dumpHierarchy(), packageName, packageLabel: '头条跳转小荷APP', timeout: 8_000 })
+      answerRoutePackage = packageName
+      return { xml: typeof xml === 'string' ? xml : await source() }
+    },
   })
 
   let payloadMaxLongImageHeight = DEFAULT_MAX_LONG_IMAGE_HEIGHT
@@ -829,6 +859,24 @@ function createRunner(options) {
     ui,
     getMaxLongImageHeight: () => payloadMaxLongImageHeight,
     incrementObserverRegionFallbacks: () => { observerRegionFallbacks += 1 },
+    saveFailureEvidence: async (error, capture) => {
+      if (!activeQuestionArtifacts) return
+      const stem = `药品失败现场_${Date.now()}`
+      const directory = activeQuestionArtifacts.diagnosticDirectory
+      await fs.mkdir(directory, { recursive: true })
+      const outputs = [
+        capture?.rawFrame && ['原图.png', capture.rawFrame],
+        capture?.frame && ['列表.png', capture.frame],
+        capture?.xml && ['层级.xml', capture.xml],
+        ['就绪.json', JSON.stringify({ error: error.message, page: error.productPage, stable: capture?.stable,
+          readiness: capture?.readiness, logical_bounds: capture?.logicalBounds, physical_bounds: capture?.physicalBounds,
+          logical_size: capture?.logicalSize, captured_before_drawer_cleanup: true }, null, 2)],
+      ].filter(Boolean)
+      const saved = await Promise.allSettled(outputs.map(([suffix, data]) => fs.writeFile(path.join(directory, `${stem}_${suffix}`), data)))
+      for (const result of saved) if (result.status === 'rejected') log(`diagnostic: 药品证据写入失败：${result.reason.message}`)
+      await saveFailureDiagnostics(activeQuestionArtifacts, error, { stem })
+      log(`diagnostic: 药品失败当页已在关闭抽屉之前保存：${path.join(directory, stem)}`)
+    },
   })
 
   const replyCapture = createReplyCapture({
@@ -880,7 +928,18 @@ function createRunner(options) {
   })
 
 
+  const doubaoWorkflow = createDoubaoWorkflow({
+    source, screenshot, ui, tap, swipe, observer, recoverObserver, log, checkCancelled,
+    record: async (event, details) => {
+      await Promise.all([
+        batchEventLog?.record(event, { category: 'capture', details, context: activeQuestionContext }),
+        activeQuestionEventLog?.record(event, { category: 'capture', details }),
+      ])
+    },
+  })
+
   const { askOnceDouyin, askOnceToutiao, askOnce } = createQuestionWorkflows({
+    doubaoWorkflow,
     observer,
     recoverySnapshot,
     log,
@@ -897,6 +956,15 @@ function createRunner(options) {
     captureDouyinMiniAppEntryAnswerFrames,
     saveArtifacts,
     inputToutiaoQuestion,
+    restoreSearchEntry: async () => {
+      if (!answerRoutePackage) return
+      await ui.appStart(activeEntry.packageName)
+      await waitForPackageHierarchy({ dumpHierarchy: () => ui.dumpHierarchy(), packageName: activeEntry.packageName, packageLabel: activeEntry.label, timeout: 15_000 })
+      answerRoutePackage = null
+      cachedInputBounds = null
+      cachedSendBounds = null
+      log('stage: 跨应用回答结束，已回到头条搜索入口')
+    },
     waitForToutiaoAnswerCard,
     captureToutiaoSearchSummary,
     openToutiaoFullAnswer,
@@ -946,6 +1014,7 @@ function createRunner(options) {
     await waitForVisualQuiet({ timeout: 1_200, fallbackMs: 800 })
     if (entry.workflow === 'douyin-search') await waitForDouyinSearchInput(15_000)
     else if (entry.workflow === 'toutiao-search') await waitForToutiaoSearchInput(15_000)
+    else if (entry.workflow === 'doubao-chat') await doubaoWorkflow.prepare(15_000)
     else await waitForInput(15_000)
   }
 
@@ -968,6 +1037,16 @@ function createRunner(options) {
   }
 
   const runner = {
+    async recordManualInteraction(interaction) {
+      if (interaction.phase === 'started') activeManualInteractions.add(interaction.id)
+      else activeManualInteractions.delete(interaction.id)
+      if (activeQuestionEventLog) manualControlDuringQuestion = true
+      const details = { action: interaction.action, phase: interaction.phase }
+      await Promise.all([
+        batchEventLog?.record('manual_device_control', { category: 'device', context: activeQuestionContext, details }),
+        activeQuestionEventLog?.record('manual_device_control', { category: 'device', details }),
+      ])
+    },
     run(payload) { return withCancellation(controller.signal, () => runBatch(payload)) },
     retryFailedBatch(payload) { return withCancellation(controller.signal, () => retryBatch(payload)) },
     async stop() {
@@ -1001,7 +1080,9 @@ function createRunner(options) {
       payload.questions = questionPlan.questions
       payload.brandGroups = questionPlan.brandGroups
       const grouped = questionPlan.mode === 'grouped'
-      const executionUnits = brandExecutionUnits(questionPlan)
+      const collectionOrder = normalizeCollectionOrder(payload.collectionOrder)
+      payload.collectionOrder = collectionOrder
+      const schedule = collectionSchedule(questionPlan, entries, collectionOrder)
       const outputRoot = path.resolve(payload.outputDir)
       const batchDirectory = await createBatchDirectory(outputRoot)
       emitProgress({ type: 'batch_created', batch_directory: await fs.realpath(batchDirectory) })
@@ -1014,10 +1095,12 @@ function createRunner(options) {
         diagnostic_directory: batchArtifacts.diagnosticDirectory, event_log: batchEventLog.filePath,
         entries: entries.map(entry => ({ id: entry.id, label: entry.label, package: entry.packageName })),
         question_plan_mode: questionPlan.mode, brand_groups: questionPlan.brandGroups, brand_manifest: brandManifestPath,
+        collection_order: collectionOrder,
+        entry_priority: entries.map(entry => entry.id),
         question_count: questionPlan.tasks.length, total: entries.length * questionPlan.tasks.length,
-        results: executionUnits.flatMap(unit => entries.flatMap(entry => unit.tasks.map(task => ({
+        results: schedule.flatMap(({ entry, tasks }) => tasks.map(task => ({
           ...task, entry_id: entry.id, entry_label: entry.label, status: 'pending',
-        })))),
+        }))),
         summary: path.join(batchArtifacts.diagnosticDirectory, 'batch-summary.json'),
       }
       await checkpoint()
@@ -1025,7 +1108,9 @@ function createRunner(options) {
         await fs.writeFile(brandManifestPath, JSON.stringify({
           created_at: new Date().toISOString(),
           artifact_layout_version: ARTIFACT_LAYOUT_VERSION,
-          execution_order: 'brand_entry_question',
+          execution_order: collectionOrder === 'platform_first' ? 'entry_brand_question' : 'brand_question_entry',
+          collection_order: collectionOrder,
+          entry_priority: entries.map(entry => entry.id),
           brand_directory_numbered: false,
           batch_directory: batchDirectory,
           delivery_directory: batchArtifacts.deliveryDirectory,
@@ -1036,6 +1121,9 @@ function createRunner(options) {
         }, null, 2), 'utf8')
       }
       emitProgress({ type: 'initialized', entries: entries.map(entry => ({ id: entry.id, label: entry.label })), question_count: questionPlan.tasks.length, results: [] })
+      await batchEventLog.record('collection_schedule_created', { category: 'lifecycle', details: {
+        collection_order: collectionOrder, entry_priority: batchState.entry_priority, total: batchState.total,
+      } })
       try {
         await waitForDevice()
         await ui.start(payload.serial)
@@ -1049,31 +1137,32 @@ function createRunner(options) {
         } catch (error) {
           await disableObserver(error)
         }
-        log(`device=${payload.serial} entries=${entries.map(entry => entry.id).join(',')} batch=${batchDirectory}`)
+        log(`device=${payload.serial} entries=${entries.map(entry => entry.id).join(',')} order=${collectionOrder} batch=${batchDirectory}`)
         let completed = 0
         let failed = 0
         const results = batchState.results
         const failures = []
-        for (const [unitIndex, unit] of executionUnits.entries()) {
-          if (grouped) {
-            log(`brand: [${unitIndex + 1}/${executionUnits.length}] ${unit.brand} questions=${unit.tasks.length}`)
+        let previousUnit = null
+        for (const { unit, unitIndex, entry, entryIndex, tasks } of schedule) {
+          if (grouped && previousUnit !== unit) {
+            log(`brand: [${unitIndex + 1}/${questionPlan.brandGroups.length}] ${unit.brand} questions=${unit.tasks.length}`)
             await batchEventLog.record('brand_started', {
               category: 'lifecycle',
               details: {
                 brand: unit.brand,
                 brand_sequence: unitIndex + 1,
-                brand_count: executionUnits.length,
+                brand_count: questionPlan.brandGroups.length,
                 question_count: unit.tasks.length,
               },
             })
-            emitProgress({ type: 'brand_started', brand: unit.brand, brand_sequence: unitIndex + 1, brand_count: executionUnits.length })
+            emitProgress({ type: 'brand_started', brand: unit.brand, brand_sequence: unitIndex + 1, brand_count: questionPlan.brandGroups.length })
           }
-          for (const [entryIndex, entry] of entries.entries()) {
+          previousUnit = unit
             checkCancelled()
             emitProgress({ type: 'entry_started', entry_id: entry.id })
             log(`entry: [${entryIndex + 1}/${entries.length}] ${entry.label} package=${entry.packageName}${grouped ? ` brand=${unit.brand}` : ''}`)
             const entryResult = await runQuestionsWithRecovery({
-              questions: unit.tasks,
+              questions: tasks,
               beforeQuestion: async task => {
                 const artifacts = await createQuestionAttempt(taskArtifactDirectories(batchArtifacts, entryIndex + 1, entry.label, entries.length, task, grouped))
                 const taskContext = grouped ? {
@@ -1203,7 +1292,6 @@ function createRunner(options) {
             })
             completed += entryResult.completed
             failed += entryResult.failed
-          }
         }
         const total = entries.length * questionPlan.tasks.length
         const summaryPath = path.join(batchArtifacts.diagnosticDirectory, 'batch-summary.json')
@@ -1311,6 +1399,9 @@ function createRunner(options) {
       }
       const retryAttempt = retryAttemptCount(previousSummary)
       const grouped = previousSummary.question_plan_mode === 'grouped'
+      // The saved results array, including legacy brand-first batches, is the
+      // source of truth. Current device settings never reorder a continuation.
+      payload.collectionOrder = previousSummary.collection_order || 'legacy_saved_order'
       const results = [...previousSummary.results]
       const retryStartedAt = new Date().toISOString()
       const retryFailures = []
@@ -1321,6 +1412,11 @@ function createRunner(options) {
         batch_directory: batchDirectory, diagnostic_directory: batchArtifacts.diagnosticDirectory,
         delivery_directory: batchArtifacts.deliveryDirectory, summary: summaryPath }
       await checkpoint()
+      await batchEventLog.record('collection_schedule_resumed', { category: 'lifecycle', details: {
+        collection_order: payload.collectionOrder,
+        entry_priority: (previousSummary.entries || []).map(entry => entry.id),
+        remaining: retryItems.length, source: 'saved_results_order',
+      } })
       emitProgress({
         type: 'initialized',
         entries: (previousSummary.entries || []).map(entry => ({ id: entry.id, label: entry.label })),

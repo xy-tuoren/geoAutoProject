@@ -5,6 +5,7 @@ const fs = require('node:fs/promises')
 const path = require('node:path')
 const { createDeviceTasks } = require('./device-tasks')
 const { createDevicePreview } = require('./device-preview')
+const { createDeviceControl } = require('./device-control')
 const { interruptRunning } = require('../automation/batch-state')
 const { automationEntries, normalizeAutomationEntries } = require('../automation/entry-catalog')
 const { loadQuestionFile } = require('../questions')
@@ -17,7 +18,14 @@ const root = projectRoot()
 let updateManager = null
 let connectedDevices = new Set()
 let quitting = false
-const previews = createDevicePreview({ adbPath: adbCommand, serverPath: () => bundledScrcpyServer({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath, root }), log })
+const previews = createDevicePreview({ adbPath: adbCommand, serverPath: () => bundledScrcpyServer({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath, root }), log,
+  onClose: (serial, streamId, owner) => controls.stop(serial, streamId, owner) })
+const controls = createDeviceControl({
+  clientOptions: () => ({ root: appRoot(), isPackaged: app.isPackaged, resourcesPath: process.resourcesPath, adbPath: adbCommand(), log }),
+  isAvailable: (serial, streamId, owner) => !quitting && connectedDevices.has(serial) && previews.isActive(serial, streamId, owner),
+  onInteraction: (serial, interaction) => tasks.manualInteraction(serial, interaction),
+  log,
+})
 const tasks = createDeviceTasks({
   runnerOptions: { root: appRoot(), isPackaged: app.isPackaged, resourcesPath: process.resourcesPath, adbPath: adbCommand() },
   emit: (type, value) => {
@@ -54,27 +62,57 @@ function windowIconPath() {
 function run(command, args, options = {}) {
   return new Promise((resolve, reject) => {
     execFile(command, args, { encoding: 'utf8', ...options }, (error, stdout, stderr) => {
-      if (error) reject(new Error(stderr || error.message))
+      if (error) reject(Object.assign(error, { stdout, stderr }))
       else resolve(stdout)
     })
   })
 }
 
-async function listDevices() {
+let deviceQuery = null
+function listDevices() {
+  // Refresh, multi-device start and resume can request the same list together.
+  // Share the in-flight read without caching stale connection state.
+  if (!deviceQuery) deviceQuery = readDevices().finally(() => { deviceQuery = null })
+  return deviceQuery
+}
+
+async function readDevices() {
   const adb = adbCommand()
   log('读取 ADB 设备:', adb)
   let output
-  try {
-    output = await run(adb, ['devices', '-l'], { timeout: 5_000, windowsHide: true })
-  } catch (error) {
-    logError('ADB 读取失败:', error.message)
-    throw new Error(`无法读取 ADB 设备：${error.message.includes('ENOENT') ? '内置 ADB 不可用，请重新安装桌面应用。' : error.message}`)
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const started = Date.now()
+    try {
+      output = await run(adb, ['devices', '-l'], { timeout: 15_000, windowsHide: true })
+      break
+    } catch (error) {
+      const timedOut = error.killed && error.signal && error.code !== 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER'
+      const detail = String(error.stderr || error.stdout || '').trim()
+      logError('ADB 读取失败:', JSON.stringify({ attempt: attempt + 1, elapsed_ms: Date.now() - started,
+        code: error.code, signal: error.signal, killed: error.killed, detail, message: error.message }))
+      // Only repeat this read-only listing. Never kill the shared ADB server:
+      // other phones may still be collecting or streaming a preview.
+      const transient = timedOut || /cannot connect|daemon|protocol fault|connection reset|closed/i.test(detail || error.message)
+      if (attempt === 0 && transient) {
+        log('ADB 设备查询暂未完成，正在只读重试一次…')
+        continue
+      }
+      let message
+      if (error.code === 'ENOENT') message = '未找到 ADB 可执行文件，请检查内置运行时。'
+      else if (error.code === 'EACCES') message = 'ADB 没有执行权限，请检查内置运行时的文件权限。'
+      else if (timedOut) message = 'ADB 设备查询超时（每次 15 秒，已重试一次），请稍后刷新设备。这不代表 USB 已断开。'
+      else message = `${detail || error.message}（退出码：${error.code ?? '无'}，信号：${error.signal || '无'}）`
+      throw new Error(`无法读取 ADB 设备：${message}`, { cause: error })
+    }
   }
   const devices = output.split('\n').slice(1)
     .map(line => line.trim().split(/\s+/))
     .filter(parts => parts.length >= 2 && parts[1] === 'device')
     .map(parts => parts[0])
   log(devices.length ? `已发现设备: ${devices.join(', ')}` : '未发现已授权设备')
+  for (const serial of connectedDevices) {
+    if (!devices.includes(serial)) { void controls.stop(serial); void previews.stop(serial) }
+  }
   connectedDevices = new Set(devices)
   return devices
 }
@@ -162,6 +200,12 @@ ipcMain.handle('automation:preview-start', async (event, serial, streamId) => {
 })
 ipcMain.handle('automation:preview-stop', (event, serial, streamId) => previews.stop(serial, streamId, event.sender.id))
 ipcMain.on('automation:preview-ack', (event, serial, streamId, sequence) => previews.acknowledge(serial, streamId, sequence, event.sender.id))
+ipcMain.handle('automation:device-control', (event, serial, streamId, action) => {
+  const window = BrowserWindow.fromWebContents(event.sender)
+  if (!window?.isVisible() || window.isMinimized()) throw new Error('窗口不可见，手机操作已暂停。')
+  // Manual control is intentionally also available during collection.
+  return controls.perform(serial, streamId, event.sender.id, action)
+})
 
 ipcMain.handle('questions:import', async (_event, payload) => {
   log('导入问题文件:', payload.file, `列=${payload.column || '问题'}`)
@@ -188,6 +232,7 @@ ipcMain.handle('product-questions:import', async (_event, file) => {
 })
 
 ipcMain.handle('automation:start', async (_event, payload) => {
+  payload.collectionOrder = require('../automation/collection-schedule').normalizeCollectionOrder(payload.collectionOrder)
   const questionPlan = normalizeQuestionPlan(payload)
   payload.questions = questionPlan.questions
   payload.brandGroups = questionPlan.brandGroups
@@ -284,17 +329,18 @@ app.whenReady().then(() => {
 app.on('window-all-closed', () => {
   log('所有窗口已关闭')
   previews.stop()
+  controls.stop()
   tasks.stop()
   if (process.platform !== 'darwin') app.quit()
 })
 
 app.on('before-quit', event => {
-  if (!tasks.size && !previews.size) return
+  if (!tasks.size && !previews.size && !controls.size) return
   event.preventDefault()
   if (quitting) return
   quitting = true
   tasks.stop()
-  void Promise.all([tasks.whenIdle(), previews.stop()]).then(() => app.quit())
+  void Promise.all([tasks.whenIdle(), previews.stop(), controls.stop()]).then(() => app.quit())
 })
 
 app.on('will-quit', () => {

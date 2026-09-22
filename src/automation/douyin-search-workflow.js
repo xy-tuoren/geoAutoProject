@@ -15,6 +15,7 @@ const {
   miniAppShellCloseBounds,
 } = require('./miniapp-locators')
 const { DouyinSearchResultNotFoundError } = require('./search-recovery')
+const { inspectSearchFirstScreen } = require('./search-first-screen')
 
 const DOUYIN_SUMMARY_PREFERENCE_MS = 3_000
 const DOUYIN_SEARCH_SCAN_LIMIT = 0
@@ -124,28 +125,23 @@ function createDouyinSearchWorkflow({
   now = Date.now,
   delay = sleep,
 }) {
-  async function waitForDouyinSearchResult(timeout) {
-    const deadline = now() + timeout
+  async function waitForDouyinSearchResult(timeout, question = null) {
     const size = await windowSize()
-    let lastProgress = 0
-    let stableEntrySignature = ''
-    let stableEntryReads = 0
-    let entryFirstSeenAt = 0
     let genericAnswerLogged = false
-    let nextOcrAt = 0
-    while (now() < deadline) {
-      const xml = await source()
-      const target = douyinSearchResultTarget(xml, size)
-      const genericAnswer = douyinGenericAiAnswerBounds(xml, size)
-      if ((genericAnswer || target?.ignoredExpandableAnswer) && !genericAnswerLogged) {
-        log(target?.mode === 'miniapp_entry_card'
-          ? 'stage: 已识别抖音通用AI回答，忽略“展开更多”并改走下方小荷AI医生独立小程序入口卡片'
-          : 'stage: 已识别抖音通用AI回答，已忽略“展开更多”并继续查找小荷AI医生入口')
-        genericAnswerLogged = true
-      }
-      if (target?.mode === 'smart_summary') return { xml, target, size }
-      if (now() >= nextOcrAt) {
-        const frame = await screenshot()
+    const result = await inspectSearchFirstScreen({ source, screenshot, timeout, now, delay, log,
+      queryMatches: xml => !question || douyinSearchInput(xml)?.text === question,
+      hierarchyTarget: xml => {
+        const target = douyinSearchResultTarget(xml, size)
+        const genericAnswer = douyinGenericAiAnswerBounds(xml, size)
+        if ((genericAnswer || target?.ignoredExpandableAnswer) && !genericAnswerLogged) {
+          log(target?.mode === 'miniapp_entry_card'
+            ? 'stage: 已识别抖音通用AI回答，忽略“展开更多”并改走下方小荷AI医生独立小程序入口卡片'
+            : 'stage: 已识别抖音通用AI回答，已忽略“展开更多”并继续查找小荷AI医生入口')
+          genericAnswerLogged = true
+        }
+        return target?.mode === 'smart_summary' ? { target, size } : null
+      },
+      recognize: async (frame, xml) => {
         const logicalSize = hierarchyLogicalSize(xml, size)
         const recognition = await ocr.recognize(frame, { minConfidence: 0.5 })
         const ocrTarget = douyinOcrConsultEntryTarget(recognition, logicalSize) || douyinOcrViewFullTarget(recognition, logicalSize)
@@ -167,8 +163,8 @@ function createDouyinSearchWorkflow({
           target: ocrTarget,
         })
         log(ocrTarget
-          ? `ocr: purpose=douyin_answer_card outcome=matched engine=${recognition.engine} elapsed=${Math.round(recognition.elapsedMs)}ms lines=${recognition.results.length} brand_confidence=${ocrTarget.brandConfidence.toFixed(3)} summary_confidence=${ocrTarget.summaryConfidence.toFixed(3)} view_full_confidence=${ocrTarget.viewFullConfidence.toFixed(3)} physical_bounds=${ocrTarget.physicalBounds.join(',')} logical_bounds=${ocrTarget.bounds.join(',')}`
-          : `ocr: purpose=douyin_answer_card outcome=not_found engine=${recognition.engine} elapsed=${Math.round(recognition.elapsedMs)}ms lines=${recognition.results.length}`)
+          ? `ocr: purpose=douyin_answer_card outcome=matched engine=${recognition.engine} elapsed=${Math.round(recognition.elapsedMs)}ms lines=${recognition.results.length} cache_hit=${Boolean(recognition.cacheHit)} engine_elapsed_ms=${Math.round(recognition.engineElapsedMs || 0)} brand_confidence=${ocrTarget.brandConfidence.toFixed(3)} summary_confidence=${ocrTarget.summaryConfidence.toFixed(3)} view_full_confidence=${ocrTarget.viewFullConfidence.toFixed(3)} physical_bounds=${ocrTarget.physicalBounds.join(',')} logical_bounds=${ocrTarget.bounds.join(',')}`
+          : `ocr: purpose=douyin_answer_card outcome=not_found engine=${recognition.engine} elapsed=${Math.round(recognition.elapsedMs)}ms lines=${recognition.results.length} cache_hit=${Boolean(recognition.cacheHit)} engine_elapsed_ms=${Math.round(recognition.engineElapsedMs || 0)}`)
         if (ocrTarget) {
           return {
             xml,
@@ -179,31 +175,13 @@ function createDouyinSearchWorkflow({
             recognition,
           }
         }
-        nextOcrAt = now() + 2_000
-      }
-      if (target?.mode === 'miniapp_entry_card') {
-        const signature = `${target.cardBounds.join(',')}|${target.tapBounds.join(',')}`
-        if (signature === stableEntrySignature) stableEntryReads += 1
-        else {
-          stableEntrySignature = signature
-          stableEntryReads = 1
-          entryFirstSeenAt = now()
-        }
-        // Anonymous Canvas structure is a candidate, never identity evidence.
-      } else {
-        stableEntrySignature = ''
-        stableEntryReads = 0
-        entryFirstSeenAt = 0
-      }
-      if (now() - lastProgress >= 5_000) {
-        log(`waiting: ${stableEntryReads ? '已发现小程序入口卡片，继续短暂等待智能总结优先出现' : '正在等待抖音智能总结或小荷AI医生小程序入口卡片'}…`)
-        lastProgress = now()
-      }
-      await delay(500)
-    }
+        return { target: null }
+      },
+    })
+    if (!result.absent) return result
     throw new DouyinSearchResultNotFoundError(
       '抖音搜索结果首屏既未出现小荷AI医生智能总结，也未出现可验证的小程序入口卡片。',
-      { scanScrolls: 0 },
+      { scanScrolls: 0, inspection: { ocrAttempts: result.ocrAttempts, elapsedMs: result.elapsedMs, stableAbsence: true } },
     )
   }
   
@@ -251,8 +229,8 @@ function createDouyinSearchWorkflow({
       target: ocrTarget,
     })
     log(ocrTarget
-      ? `ocr: purpose=douyin_summary_recapture outcome=matched engine=${recognition.engine} elapsed=${Math.round(recognition.elapsedMs)}ms lines=${recognition.results.length} brand_confidence=${ocrTarget.brandConfidence.toFixed(3)} summary_confidence=${ocrTarget.summaryConfidence.toFixed(3)} view_full_confidence=${ocrTarget.viewFullConfidence.toFixed(3)} physical_bounds=${ocrTarget.physicalBounds.join(',')} logical_bounds=${ocrTarget.bounds.join(',')}`
-      : `ocr: purpose=douyin_summary_recapture outcome=not_found engine=${recognition.engine} elapsed=${Math.round(recognition.elapsedMs)}ms lines=${recognition.results.length}`)
+      ? `ocr: purpose=douyin_summary_recapture outcome=matched engine=${recognition.engine} elapsed=${Math.round(recognition.elapsedMs)}ms lines=${recognition.results.length} cache_hit=${Boolean(recognition.cacheHit)} engine_elapsed_ms=${Math.round(recognition.engineElapsedMs || 0)} brand_confidence=${ocrTarget.brandConfidence.toFixed(3)} summary_confidence=${ocrTarget.summaryConfidence.toFixed(3)} view_full_confidence=${ocrTarget.viewFullConfidence.toFixed(3)} physical_bounds=${ocrTarget.physicalBounds.join(',')} logical_bounds=${ocrTarget.bounds.join(',')}`
+      : `ocr: purpose=douyin_summary_recapture outcome=not_found engine=${recognition.engine} elapsed=${Math.round(recognition.elapsedMs)}ms lines=${recognition.results.length} cache_hit=${Boolean(recognition.cacheHit)} engine_elapsed_ms=${Math.round(recognition.engineElapsedMs || 0)}`)
     if (!ocrTarget) throw new Error('取得稳定搜索截图后，UI层级和OCR均未确认小荷AI医生智能总结“查看全文”，且小程序入口卡片已消失，已停止点击。')
     return {
       ...capture,
@@ -445,7 +423,7 @@ function createDouyinSearchWorkflow({
           logical_size: logicalSize, target: retryTarget,
           network_restart_attempts: networkRestartAttempts,
         })
-        log(`ocr: purpose=douyin_miniapp_network_error outcome=matched engine=${recognition.engine} elapsed=${Math.round(recognition.elapsedMs || 0)}ms lines=${recognition.results.length} restart_attempts=${networkRestartAttempts}`)
+        log(`ocr: purpose=douyin_miniapp_network_error outcome=matched engine=${recognition.engine} elapsed=${Math.round(recognition.elapsedMs || 0)}ms lines=${recognition.results.length} cache_hit=${Boolean(recognition.cacheHit)} engine_elapsed_ms=${Math.round(recognition.engineElapsedMs || 0)} restart_attempts=${networkRestartAttempts}`)
         throw new DouyinMiniAppNetworkError()
       }
       const context = douyinMiniAppAnswerContextEvidence(recognition, question)

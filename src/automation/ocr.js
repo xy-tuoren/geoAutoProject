@@ -4,6 +4,9 @@ const { checkCancellation } = require('./cancellation')
 function normalizeOcrText(value) {
   return String(value || '')
     .normalize('NFKC')
+    // Controlled equivalent glyph seen in RapidOCR output; do not fuzzy-match
+    // medicine names, numbers or question keywords.
+    .replace(/別/g, '别')
     .replace(/[\s·・•|丨]/g, '')
     .replace(/[>》〉›»]+$/g, '')
 }
@@ -61,6 +64,7 @@ class OcrRecognizer {
 
   async recognize(image, options = {}) {
     checkCancellation()
+    const started = performance.now()
     const hash = createHash('sha256').update(image).digest('hex')
     const key = `${hash}:${JSON.stringify(options)}`
     const hit = this.cache?.key === key
@@ -70,6 +74,9 @@ class OcrRecognizer {
     }
     const recognition = structuredClone(this.cache.value)
     recognition.cacheHit = hit
+    recognition.sourceElapsedMs = recognition.elapsedMs
+    recognition.elapsedMs = performance.now() - started
+    if (hit) recognition.engineElapsedMs = 0
     this.evidence.set(recognition, { frame: image, sha256: hash, created_at: this.cache.created_at, options })
     this.onRecognition(recognition)
     return recognition

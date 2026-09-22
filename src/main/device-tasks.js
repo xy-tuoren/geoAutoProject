@@ -72,7 +72,13 @@ function createDeviceTasks({ runnerOptions, emit, changed = () => {}, createWork
     changed()
     return { stopping: selected.length > 0 }
   }
-  return { start, stop, snapshot, get size() { return tasks.size }, whenIdle: () => Promise.all([...tasks.values()].map(task => task.done)) }
+  function manualInteraction(serial, interaction) {
+    const task = tasks.get(serial)
+    if (!task?.worker) return
+    try { task.worker.postMessage({ type: 'manual-interaction', interaction }) }
+    catch (error) { emit('log', { serial, taskId: task.taskId, text: `手动操作记录未送达采集进程：${error.message}\n` }) }
+  }
+  return { start, stop, snapshot, manualInteraction, get size() { return tasks.size }, whenIdle: () => Promise.all([...tasks.values()].map(task => task.done)) }
 }
 
 module.exports = { createDeviceTasks, deviceDirectory }

@@ -119,12 +119,12 @@ test('屏幕总览按每台手机真实比例分配宽度，同高单行排列�
       const { widths, screenHeight } = screenLayout(width, height, aspects)
       assert.equal(widths.length, count)
       assert.ok(screenHeight > 80)
-      assert.ok(screenHeight + 180 <= height + 1)
+      assert.ok(screenHeight + 212 <= height + 1, '保留手机操作工具栏和卡片控件的高度')
       assert.ok(widths.reduce((sum, value) => sum + value, 0) + (count - 1) * 12 <= width + 1)
       widths.forEach((value, i) => assert.ok(Math.abs((value - 22) / screenHeight - aspects[i]) < 0.00001))
     }
   }
-  assert.ok(screenLayout(1180, 640, [9 / 20]).screenHeight > 440)
+  assert.ok(screenLayout(1180, 640, [9 / 20]).screenHeight > 408, '新增工具栏后单台预览仍保留足够可用高度')
 })
 
 test('各手机配置和日志独立，过期任务消息不覆盖新任务，启动中的停止意图保留', () => {

@@ -8,6 +8,7 @@ const retryFailed = $('#retry-failed')
 const resumeBatch = $('#resume-batch')
 const stop = $('#stop')
 const entryList = $('#entry-list')
+const collectionOrder = $('#collection-order')
 const updateAction = $('#update-action')
 const { retryableBatchDirectory } = window.retryState
 const { initializeEntryProgress, applyEntryProgress } = window.entryProgress
@@ -30,6 +31,7 @@ const deviceCards = new Map()
 let selectedSerial = ''
 let defaultOutputDir = ''
 let defaultEntries = []
+let defaultEntryOrder = []
 let previewEpoch = 0
 let activeView = 'tasks'
 const generatorDialog = $('#question-generator-dialog')
@@ -335,13 +337,14 @@ function renderEntryProgress() {
 }
 
 function sessionFor(serial) {
-  if (!sessions.has(serial)) sessions.set(serial, createSession({ text: '', entries: defaultEntries, outputDir: defaultOutputDir, timeout: '90', maxLongImageHeight: '15000', column: '问题' }))
+  if (!sessions.has(serial)) sessions.set(serial, createSession({ text: '', entries: defaultEntries, entryOrder: defaultEntryOrder, collectionOrder: 'platform_first', outputDir: defaultOutputDir, timeout: '90', maxLongImageHeight: '15000', column: '问题' }))
   return sessions.get(serial)
 }
 
 function saveDraft() {
   if (!selectedSerial) return
   sessionFor(selectedSerial).draft = { text: questions.value, entries: selectedEntries(), outputDir: $('#output-dir').value,
+    entryOrder: [...entryList.querySelectorAll('input[name="entry"]')].map(input => input.value), collectionOrder: collectionOrder.value,
     timeout: $('#timeout').value, maxLongImageHeight: $('#max-long-image-height').value, column: $('#column-name').value }
 }
 
@@ -356,6 +359,13 @@ function selectDevice(serial) {
   $('#timeout').value = draft.timeout
   $('#max-long-image-height').value = draft.maxLongImageHeight
   $('#column-name').value = draft.column
+  collectionOrder.value = draft.collectionOrder || 'platform_first'
+  const rows = [...entryList.children]
+  const priority = draft.entryOrder || draft.entries
+  for (const id of [...priority, ...rows.map(row => row.dataset.entryId)]) {
+    const index = rows.findIndex(row => row.dataset.entryId === id)
+    if (index >= 0) entryList.append(rows.splice(index, 1)[0])
+  }
   entryList.querySelectorAll('input').forEach(input => { input.checked = draft.entries.includes(input.value) })
   clearLog()
   for (const item of session?.logs || []) appendLog(item.text)
@@ -376,6 +386,12 @@ function renderDeviceControls() {
   stop.textContent = session?.stopping ? '正在停止…' : '停止此手机'
   for (const selector of ['#questions', '#output-dir', '#timeout', '#max-long-image-height', '#column-name', '#import-questions', '#select-directory', '#open-question-generator']) $(selector).disabled = !session || busy
   entryList.querySelectorAll('input').forEach(input => { input.disabled = !session || busy })
+  collectionOrder.disabled = !session || busy
+  const entryRows = [...entryList.children]
+  entryRows.forEach((row, index) => {
+    row.querySelector('[data-move="up"]').disabled = !session || busy || index === 0
+    row.querySelector('[data-move="down"]').disabled = !session || busy || index === entryRows.length - 1
+  })
   $('#start-all').disabled = ![...sessions.values()].some(item => item.connected && !item.running && !item.importing && item.draft.text.trim())
   $('#stop-all').disabled = ![...sessions.values()].some(item => item.running && !item.stopping)
   $('#screens-stop-all').disabled = $('#stop-all').disabled
@@ -424,6 +440,7 @@ function stopCardPreview(card) {
   card.player = null
   if (streamId) void window.automation.stopPreview(card.serial, streamId).catch(() => {})
   card.screen.classList.add('is-stale')
+  card.control?.refresh()
 }
 
 function previewFailed(card, message) {
@@ -450,6 +467,7 @@ function startCardPreview(card) {
         card.freshness.textContent = `实时 · ${new Date().toLocaleTimeString()}`
         card.freshness.title = `${frame.width} × ${frame.height} · scrcpy 视频流 · 最高 15 帧/秒`
         if (card.aspect !== frame.width / frame.height) { card.aspect = frame.width / frame.height; layoutDeviceCards() }
+        card.control?.refresh()
       },
       onError: error => { if (card.streamId === streamId) previewFailed(card, `视频无法显示：${error.message}。请刷新设备重试。`) },
     })
@@ -492,8 +510,12 @@ function renderDeviceCards() {
       element.querySelector('strong').title = serial
       const screen = element.querySelector('.device-screen')
       const canvas = screen.querySelector('canvas')
-      canvas.setAttribute('aria-label', `${serial} 当前屏幕，只读实时画面`)
+      canvas.setAttribute('aria-label', `${serial} 手机画面，可点击、拖动和长按`)
       card = { serial, element, screen, canvas, placeholder: screen.querySelector('span'), freshness: element.querySelector('.device-freshness'), streamId: null, player: null, timer: null }
+      card.control = window.deviceControl.attach({ card,
+        available: () => canPreview(card) && Boolean(card.streamId) && !canvas.hidden && !screen.classList.contains('is-stale'),
+        invoke: (streamId, action) => window.automation.controlDevice(serial, streamId, action),
+      })
       const buttons = element.querySelectorAll('.device-card-actions button')
       buttons[0].setAttribute('aria-label', `配置 ${serial} 并查看日志`)
       buttons[0].addEventListener('click', () => { selectDevice(serial); showWorkspace('tasks') })
@@ -516,6 +538,7 @@ function renderDeviceCards() {
     detail.textContent = total ? `${done}/${total} 已处理${active ? ` · ${active}` : ''}` : `${parseQuestionInput(session.draft.text).questions.length} 题 · ${session.draft.entries.length} 个入口`
     detail.title = detail.textContent
     card.element.querySelector('.device-card-actions .danger').disabled = !session.running || session.stopping
+    card.control?.refresh()
   }
   const list = [...sessions.values()]
   $('#device-overview').textContent = `${list.filter(item => item.connected).length} 台已连接 · ${list.filter(item => item.running).length} 台执行中 · 从左到右 · 画面适应窗口`
@@ -598,18 +621,33 @@ function selectedEntries() {
   return [...entryList.querySelectorAll('input[name="entry"]:checked')].map(input => input.value)
 }
 
+collectionOrder.addEventListener('click', () => {
+  const session = sessions.get(selectedSerial)
+  if (!session || session.running || session.importing) return
+  collectionOrder.value = collectionOrder.value === 'platform_first' ? 'question_first' : 'platform_first'
+  updatePlan()
+})
+
 function updatePlan() {
   saveDraft()
   const plan = currentQuestionPlan()
   const deviceCount = device.value ? 1 : 0
   const entryCount = selectedEntries().length
+  const platformFirst = collectionOrder.value !== 'question_first'
+  $('#collection-order-label').textContent = platformFirst ? '按平台采集' : '按问题采集'
+  collectionOrder.setAttribute('aria-label', platformFirst ? '切换为按问题采集' : '切换为按平台采集')
+  collectionOrder.title = platformFirst
+    ? '当前：一个平台采集完全部问题，再换平台。点击切换为按问题采集。'
+    : '当前：一道题采集完全部平台，再换题。点击切换为按平台采集。'
+  const selectedLabels = [...entryList.querySelectorAll('input[name="entry"]:checked')].map(input => input.closest('.entry-option').textContent.trim())
+  $('#entry-order-preview').textContent = selectedLabels.length ? `平台优先级：${selectedLabels.join(' → ')}` : '尚未选择采集平台'
   const questionCount = plan.questions.length
   const grouping = plan.mode === 'grouped'
     ? `${plan.brandGroups.length} 品牌 · `
     : ''
   $('#plan').textContent = plan.errors.length
     ? `分组输入有 ${plan.errors.length} 项需要修正`
-    : `${grouping}${deviceCount} 台设备 × ${entryCount} 个入口 × ${questionCount} 条问题 = ${deviceCount * entryCount * questionCount} 次计划`
+    : `${platformFirst ? '按平台' : '按问题'} · ${grouping}${deviceCount} 台设备 × ${entryCount} 个入口 × ${questionCount} 条问题 = ${deviceCount * entryCount * questionCount} 次计划`
   $('#question-count').textContent = `${questionCount} 条问题`
   renderQuestionPlan(plan)
   renderDeviceControls()
@@ -658,7 +696,7 @@ async function refreshDevices() {
     refreshPreviewState()
     status.textContent = devices.length ? `已发现 ${devices.length} 台已授权设备` : '未发现已授权设备'
   } catch (error) {
-    status.textContent = error.message || '读取 ADB 设备失败'
+    status.textContent = (error.message || '读取 ADB 设备失败').replace(/^Error invoking remote method 'automation:devices': (?:Error: )?/, '')
   }
   updatePlan()
 }
@@ -667,8 +705,12 @@ async function refreshEntries() {
   try {
     const entries = await window.automation.listEntries()
     defaultEntries = entries.filter(entry => entry.defaultSelected).map(entry => entry.id)
+    defaultEntryOrder = entries.map(entry => entry.id)
     entryList.replaceChildren()
     entries.forEach(entry => {
+      const row = document.createElement('div')
+      row.className = 'entry-priority-row'
+      row.dataset.entryId = entry.id
       const label = document.createElement('label')
       label.className = 'option entry-option'
       const input = document.createElement('input')
@@ -679,8 +721,28 @@ async function refreshEntries() {
       input.addEventListener('change', updatePlan)
       const text = document.createElement('span')
       text.textContent = entry.label
+      text.title = entry.label
       label.append(input, text)
-      entryList.append(label)
+      const actions = document.createElement('div')
+      actions.className = 'entry-priority-actions'
+      for (const [direction, symbol, offset] of [['up', '↑', -1], ['down', '↓', 1]]) {
+        const button = iconButton(`${offset < 0 ? '上移' : '下移'}${entry.label}`, symbol, () => {
+          const session = sessions.get(selectedSerial)
+          if (!session || session.running || session.importing) return
+          const sibling = offset < 0 ? row.previousElementSibling : row.nextElementSibling
+          if (!sibling) return
+          if (offset < 0) entryList.insertBefore(row, sibling)
+          else entryList.insertBefore(sibling, row)
+          updatePlan()
+          // Keep keyboard focus in the moved row, including at the list edges.
+          const focusTarget = button.disabled ? actions.querySelector('button:not(:disabled)') : button
+          focusTarget?.focus()
+        })
+        button.dataset.move = direction
+        actions.append(button)
+      }
+      row.append(label, actions)
+      entryList.append(row)
     })
   } catch (error) {
     status.textContent = error.message || '读取入口失败'
@@ -976,7 +1038,7 @@ function devicePayload(serial) {
   const timeout = Number(draft.timeout), maxLongImageHeight = Number(draft.maxLongImageHeight)
   if (!Number.isFinite(timeout) || timeout <= 0) throw new Error('单题超时需大于 0')
   if (!Number.isInteger(maxLongImageHeight) || maxLongImageHeight < 3000 || maxLongImageHeight > 30000) throw new Error('长图上限需为 3000–30000 之间的整数')
-  return { serial, questions: questionPlan.questions, brandGroups: questionPlan.brandGroups, entries: draft.entries, outputDir: draft.outputDir.trim(), timeout, maxLongImageHeight, newSession: true }
+  return { serial, questions: questionPlan.questions, brandGroups: questionPlan.brandGroups, entries: [...draft.entries], collectionOrder: draft.collectionOrder || 'platform_first', outputDir: draft.outputDir.trim(), timeout, maxLongImageHeight, newSession: true }
 }
 
 async function launchDevice(serial, retry = null) {

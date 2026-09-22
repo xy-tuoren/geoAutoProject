@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld('automation', {
   listTasks: () => ipcRenderer.invoke('automation:tasks'),
   startPreview: (serial, streamId) => ipcRenderer.invoke('automation:preview-start', serial, streamId),
   stopPreview: (serial, streamId) => ipcRenderer.invoke('automation:preview-stop', serial, streamId),
+  controlDevice: (serial, streamId, action) => ipcRenderer.invoke('automation:device-control', serial, streamId, action),
   acknowledgePreview: (serial, streamId, sequence) => ipcRenderer.send('automation:preview-ack', serial, streamId, sequence),
   onPreview: callback => ipcRenderer.on('automation:preview-event', (_event, value) => callback(value)),
   importQuestions: payload => ipcRenderer.invoke('questions:import', payload),

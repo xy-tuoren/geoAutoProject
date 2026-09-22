@@ -252,7 +252,7 @@ class U2Client {
     });
   }
 
-  async request(method, params = {}, { timeout, retryRead = false } = {}) {
+  async request(method, params = {}, { timeout, retryRead = false, recover = true } = {}) {
     const generation = this.stopGeneration;
     let readRetries = 0;
     while (true) {
@@ -264,7 +264,7 @@ class U2Client {
       } catch (error) {
         this.#checkActive(generation);
         if (!retryRead) {
-          if (transientReadFailure(error)) {
+          if (recover && transientReadFailure(error)) {
             await this.restart().catch((restartError) => {
               this.log(`sidecar恢复失败：${restartError.message}`);
             });

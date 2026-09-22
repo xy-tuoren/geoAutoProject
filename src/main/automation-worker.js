@@ -9,6 +9,7 @@ const runner = createRunner({ ...workerData.runnerOptions,
 })
 parentPort.on('message', message => {
   if (message.type === 'stop') void runner.stop().catch(error => send('log', `错误：停止控制服务失败：${error.message}\n`))
+  if (message.type === 'manual-interaction') void runner.recordManualInteraction(message.interaction).catch(error => send('log', `手动操作记录失败：${error.message}\n`))
 })
 process.on('exit', () => {
   try { runner.restoreDevicePowerOnProcessExit() } catch {}

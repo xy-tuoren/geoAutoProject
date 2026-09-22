@@ -252,10 +252,8 @@ test('小程序首帧前展开引用资料并记录完整性，覆盖两种竖�
     const xml = `<hierarchy><node package="com.ss.android.ugc.aweme" bounds="${b([0, 0, 240, 500])}"/><node class="androidx.compose.ui.viewinterop.ViewFactoryHolder" bounds="${b([0, 150, 240, 230])}" />
       <node class="android.widget.ImageView" bounds="${b([126, 182, 140, 198])}" /></hierarchy>`
     let expanded = false
-    let positioned = false
-    let recoveredAfterExpansion = false
     let bubbleVisible = true
-    const questionBubble = { input: await sharp({ create: { width: 84 * scale, height: 40 * scale, channels: 3, background: '#00c2ae' } }).png().toBuffer(), left: 150 * scale, top: 96 * scale }
+    const questionBubble = { input: await sharp({ create: { width: 84 * scale, height: 40 * scale, channels: 3, background: '#00c2ae' } }).png().toBuffer(), left: 150 * scale, top: 125 * scale }
     const floating = { input: Buffer.from(`<svg width="${width}" height="${height}" viewBox="0 0 240 500"><circle cx="120" cy="410" r="16" fill="white"/><path d="M120 402 V418 M115 413 L120 418 L125 413" fill="none" stroke="black" stroke-width="2.5"/></svg>`), left: 0, top: 0 }
     const collapsedFrame = await sharp({ create: { width, height, channels: 3, background: '#fff' } }).composite([questionBubble, floating]).png().toBuffer()
     const expandedFrame = await sharp({ create: { width, height, channels: 3, background: '#edf7f6' } }).composite([questionBubble, floating]).png().toBuffer()
@@ -264,27 +262,31 @@ test('小程序首帧前展开引用资料并记录完整性，覆盖两种竖�
       source: async () => xml, windowSize: async () => ({ width, height }), log: () => {},
       setLastOcrDiagnostic: () => {},
       screenshot: async () => bubbleVisible ? expanded ? expandedFrame : collapsedFrame : await sharp({ create: { width, height, channels: 3, background: '#fff' } }).png().toBuffer(),
-      ocr: { recognize: async () => ({ engine: 'test', elapsedMs: 1, image: { width, height }, results: [
-        { text: '样例药品', normalizedText: '样例药品', confidence: 0.99, bounds: (positioned ? expanded && !recoveredAfterExpansion ? [160, 5, 225, 35] : [160, 5, 225, 25] : [160, 150, 225, 178]).map(v => v * scale) },
-        { text: expanded ? '参考1篇药品说明书∧' : '参考1篇药品说明书', normalizedText: expanded ? '参考1篇药品说明书∧' : '参考1篇药品说明书', confidence: 0.99, bounds: (positioned ? [12, 180, 132, 200] : [12, 320, 132, 340]).map(v => v * scale) },
-      ] }) },
+      ocr: { recognize: async frame => {
+        const info = await sharp(frame).metadata()
+        const offset = info.height === height ? 0 : 110
+        return { engine: 'test', elapsedMs: 1, image: { width: info.width, height: info.height }, results: [
+          { text: '样例药品', normalizedText: '样例药品', confidence: 0.99, bounds: [160, 135 - offset, 225, 155 - offset].map(v => v * scale) },
+          { text: expanded ? '参考1篇药品说明书∧' : '参考1篇药品说明书', normalizedText: expanded ? '参考1篇药品说明书∧' : '参考1篇药品说明书', confidence: 0.99, bounds: [12, 180 - offset, 132, 200 - offset].map(v => v * scale) },
+        ] }
+      } },
       tap: async (...point) => { taps.push(point); expanded = true },
       waitForVisualQuiet: async () => {},
-      swipeChat: async (_bounds, direction) => { if (direction === 'down') positioned = true; if (direction === 'up' && expanded) recoveredAfterExpansion = true; return { distance: 0, canScrollMore: false } },
+      swipeChat: async () => { assert.equal(expanded, true, '首帧不得为美观定位而滚动'); return { distance: 0, canScrollMore: false } },
     })
     const result = await capture.captureMiniAppFullAnswerFrames(xml, bounds, { platformLabel: '抖音', metadataPrefix: 'douyin', openedMetadataKey: 'douyin_view_full_opened', questionStart: '样例药品' })
     assert.equal(result.evidenceEmbedded, true)
     assert.equal(result.evidenceExpanded, true)
     assert.equal(result.captureMetadata.reply_evidence_hierarchy_refreshed, true)
-    assert.equal(result.captureMetadata.douyin_current_question_first_frame_reacquisition_swipes, 1)
+    assert.equal(result.captureMetadata.douyin_current_question_first_frame_reacquisition_swipes, 0)
     assert.deepEqual(taps, [[133 * scale, 190 * scale]])
     assert.equal(result.captureMetadata.reply_floating_control_detection_method, 'image')
     assert.ok(result.bounds[3] < result.captureMetadata.reply_floating_control_bounds[1])
     const firstCropTop = result.captureMetadata.douyin_current_question_first_frame_crop[1]
-    assert.ok(firstCropTop < 0)
+    assert.ok(firstCropTop >= 0 && firstCropTop < 15 * scale)
     assert.equal(await imagesSimilar(result.frames[0], await sharp(expandedFrame).extract({ left: 0, top: result.bounds[1] + firstCropTop, width, height: result.bounds[3] - result.bounds[1] - firstCropTop }).png().toBuffer(), 0), true)
     bubbleVisible = false
-    await assert.rejects(capture.captureMiniAppFullAnswerFrames(xml, bounds, { platformLabel: '抖音', metadataPrefix: 'douyin', openedMetadataKey: 'douyin_view_full_opened', questionStart: '样例药品' }), /完整绿色问题气泡/)
+    await assert.rejects(capture.captureMiniAppFullAnswerFrames(xml, bounds, { platformLabel: '抖音', metadataPrefix: 'douyin', openedMetadataKey: 'douyin_view_full_opened', questionStart: '样例药品' }), /问题气泡/)
   }
 })
 
@@ -609,6 +611,7 @@ test('桌面入口默认勾选小荷App和抖音，并按选择顺序去重执�
     ['xiaohe-app', true],
     ['douyin-xiaohe-miniapp', true],
     ['toutiao-xiaohe-miniapp', false],
+    ['doubao-app', false],
   ])
   assert.throws(() => normalizeAutomationEntries(['unknown-entry']), /未知入口/)
 })
@@ -1136,6 +1139,7 @@ test('抖音首屏未召回入口时不刷新并保存搜索结果结束本题',
 test('抖音首屏无入口时不刷新也不滚动搜索结果', async () => {
   let now = 0
   const swipes = []
+  const frame = await sharp(Buffer.from('<svg width="1080" height="2400"><rect width="1080" height="2400" fill="white"/><path d="M60 700h900v70H60z M60 1000h800v70H60z"/></svg>')).png().toBuffer()
   const xml = '<hierarchy>'
     + '<node package="com.ss.android.ugc.aweme" class="android.widget.EditText" resource-id="com.ss.android.ugc.aweme:id/et_search_kw" text="测试问题" visible-to-user="true" bounds="[132,90][754,210]" />'
     + '<node package="com.ss.android.ugc.aweme" class="androidx.recyclerview.widget.RecyclerView" visible-to-user="true" bounds="[0,220][1080,2200]" />'
@@ -1144,7 +1148,7 @@ test('抖音首屏无入口时不刷新也不滚动搜索结果', async () => {
     source: async () => xml,
     windowSize: async () => ({ width: 1080, height: 2400 }),
     log: () => {},
-    screenshot: async () => Buffer.from('screen'),
+    screenshot: async () => frame,
     ocr: {
       recognize: async () => ({
         engine: 'rapidocr', elapsedMs: 0, image: { width: 1080, height: 2400 }, results: [],

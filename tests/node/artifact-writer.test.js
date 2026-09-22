@@ -44,7 +44,7 @@ test('帧与接缝数量不一致时先写接缝汇总再抛出拼图错误', as
         throw error
       }
     }, /每对相邻截图都必须提供接缝状态/)
-    assert.equal(ARTIFACT_LAYOUT_VERSION, 10)
+    assert.equal(ARTIFACT_LAYOUT_VERSION, 11)
     assert.ok(thrown.replySeamDiagnostics)
     const summary = JSON.parse(await fs.readFile(path.join(artifacts.diagnosticDirectory, '接缝汇总.json'), 'utf8'))
     assert.equal(summary.frame_count, 2)
@@ -88,4 +88,18 @@ test('非拼接产物可复用已经取得的搜索结果帧', async () => {
   } finally {
     await fs.rm(root, { recursive: true, force: true })
   }
+})
+
+test('采集器返回的完成层级取代开始层级，并保持交付目录只有 PNG', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'artifact-writer-final-xml-'))
+  const artifacts = {deliveryDirectory:path.join(root,'交付图片'),diagnosticDirectory:path.join(root,'调试产物')}
+  const png = await require('sharp')({create:{width:200,height:400,channels:3,background:'#fff'}}).png().toBuffer()
+  const writer = createArtifactWriter({ defaultCaptureMethod:async()=>({frames:[png],transitions:[],xml:'<hierarchy completed="true"/>',
+    bounds:[0,0,200,400],fallbackReasons:[],productDetected:false,productCaptureAttempts:0}),
+    getMaxLongImageHeight:()=>15000, observerMetadata:()=>({}),getBatchEventLog:()=>null,log:()=>{} })
+  try {
+    const result=await writer.saveArtifacts({artifacts,stem:'回答',question:'测试',status:'stable',xml:'<hierarchy loading="true"/>'})
+    assert.equal(await fs.readFile(result.hierarchy,'utf8'),'<hierarchy completed="true"/>')
+    assert.deepEqual(await fs.readdir(artifacts.deliveryDirectory),['回答_001.png'])
+  } finally { await fs.rm(root,{recursive:true,force:true}) }
 })
