@@ -119,10 +119,20 @@ Windows 打包成功后，`dist/` 中应至少包含：
 
 `Build Windows` 的行为：
 
-- 手动运行 `workflow_dispatch`：构建 Windows 安装包并上传 Actions Artifact，不发布 Release。
+- 手动运行 `workflow_dispatch`，留空 `release_tag`：构建 Windows 安装包并上传 Actions Artifact，不发布 Release。
+- 填写 `release_tag`（如 `v0.1.27`）：下载已发布的稳定版 Release，跳过构建，补部署 COS 和旧服务器兼容清单；不移动标签或重新生成安装包。
 - 推送 `v*` 标签：先测试和打包，再创建或更新 GitHub Release，并上传 `.exe`、`.blockmap`、`latest.yml`。
 - 标签发布完成后，将 Windows 更新文件同步到腾讯云 COS，并最后上传 `latest.yml`。
 - 标签发布时会校验 `v<package.json version>` 是否完全匹配，不匹配会失败。
+
+COS 上传日志每约 30 秒报告已完成字节数，分片失败记录分片号、HTTP 状态、COS 错误码与安全分类（读取超时、连接超时、DNS、TLS 或连接中断），不输出签名 URL 或密钥。SDK 连接/读写超时分别为 10/60 秒，每个请求最多重试一次；整个上传步骤最多 12 分钟，部署 job 最多 20 分钟。安装包和 blockmap 全部上传成功后才更新 `latest.yml`，失败时保留原更新清单。SDK 仍按 MD5 校验复用同一文件的已上传分片。
+
+已有 Release 上传失败时，先查日志，再补部署原版本：
+
+```bash
+gh run view <run-id> --repo xy-tuoren/geoAutoProject --log-failed
+gh workflow run build-windows.yml --repo xy-tuoren/geoAutoProject --ref main -f release_tag=v0.1.27
+```
 
 `Build macOS package` 的行为：
 
