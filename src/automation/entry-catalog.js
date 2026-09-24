@@ -2,7 +2,6 @@ const { iterNodes, nodeAttr } = require('./hierarchy')
 
 const DEFAULT_PACKAGE = 'com.aurora.xiaohe.aidoctor'
 const DEFAULT_ENTRY_ID = 'douyin-xiaohe-miniapp'
-const DEFAULT_SELECTED_ENTRY_IDS = new Set(['xiaohe-app', 'douyin-xiaohe-miniapp'])
 const DEFAULT_ENTRY_HIERARCHY_STARTUP_TIMEOUT_MS = 8_000
 const TOUTIAO_ENTRY_HIERARCHY_STARTUP_TIMEOUT_MS = 30_000
 
@@ -53,7 +52,7 @@ function hierarchyBelongsToPackage(xml, packageName = DEFAULT_PACKAGE) {
 function automationEntries() {
   return ENTRY_LIST.map(entry => ({
     ...entry,
-    defaultSelected: DEFAULT_SELECTED_ENTRY_IDS.has(entry.id),
+    defaultSelected: false,
   }))
 }
 

@@ -238,6 +238,7 @@ ipcMain.handle('automation:start', async (_event, payload) => {
   payload.brandGroups = questionPlan.brandGroups
   payload.questionPlanMode = questionPlan.mode
   if (!payload.serial || !payload.outputDir) throw new Error('请选择 Android 设备和截图目录。')
+  if (!Array.isArray(payload.entries) || !payload.entries.length) throw new Error('请至少选择一个采集入口。')
   const entries = normalizeAutomationEntries(payload.entries)
   payload.entries = entries.map(entry => entry.id)
   payload.newSession = true

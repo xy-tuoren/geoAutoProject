@@ -1,3 +1,4 @@
+const sharp = require('sharp')
 const { iterNodes, nodeAttr, nodeIsVisible, parseBounds } = require('./hierarchy')
 const { imageInfo, cropImage, imageRegionsStable, imageLooksLoaded, verifyReplyFrameOverlap } = require('./images')
 const { fillQuestionInput, captureStableObserved, captureStableSandwich } = require('./capture-primitives')
@@ -5,6 +6,7 @@ const { CaptureSequence } = require('./capture-sequence')
 const { sleep } = require('./utils')
 
 const DOUBAO_PACKAGE = 'com.larus.nova'
+const MISSING_CHAT_LAYOUT = '未识别到豆包对话页面的根节点、消息列表和输入框；已停止操作。'
 const decodeText = text => String(text).replace(/&#(x[0-9a-f]+|\d+);/gi, (_, code) => String.fromCodePoint(code[0].toLowerCase() === 'x' ? parseInt(code.slice(1), 16) : Number(code)))
   .replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&')
 
@@ -17,7 +19,7 @@ function doubaoPage(xml, question = '') {
   const root = byId('chat_root')
   const list = byId('message_list')
   const input = byId('input_text')
-  if (!root || !list || !input) throw new Error('未识别到豆包对话页面的根节点、消息列表和输入框；已停止操作。')
+  if (!root || !list || !input) throw new Error(MISSING_CHAT_LAYOUT)
   const size = { width: root.bounds[2], height: root.bounds[3] }
   if (/rotation="[123]"/.test(xml) || size.height <= size.width) throw new Error('豆包仅支持正常竖屏。')
   if (root.bounds[0] !== 0 || root.bounds[1] !== 0 || size.height / size.width < 1.45 || size.height / size.width > 2.8
@@ -64,6 +66,47 @@ function mapDoubaoBounds(bounds, logical, physical) {
   return bounds.map((value, index) => Math.round(value * (index % 2 ? physical.height / logical.height : physical.width / logical.width)))
 }
 
+async function doubaoScrollbarOnlyChange(first, second) {
+  const [a, b] = await Promise.all([imageInfo(first), imageInfo(second)])
+  if (a.width !== b.width || a.height !== b.height) return false
+  // Doubao's RecyclerView draws a transient grey scroll indicator at the
+  // outermost edge. Compare the entire content area; only a narrow, pale,
+  // monochrome rail may differ. Keep the original full-width PNG for delivery.
+  const railWidth = Math.max(4, Math.min(24, Math.ceil(a.width * 0.015)))
+  const contentBounds = [0, 0, a.width - railWidth, a.height]
+  const [contentA, contentB] = await Promise.all([cropImage(first, contentBounds), cropImage(second, contentBounds)])
+  if (!await imageRegionsStable(contentA, contentB)) return false
+  const railBounds = { left: a.width - railWidth, top: 0, width: railWidth, height: a.height }
+  const [railA, railB] = await Promise.all([first, second].map(frame => sharp(frame).extract(railBounds).removeAlpha().raw().toBuffer()))
+  let changed = false
+  for (let i = 0; i < railA.length; i += 3) {
+    if (Math.max(Math.abs(railA[i] - railB[i]), Math.abs(railA[i + 1] - railB[i + 1]),
+      Math.abs(railA[i + 2] - railB[i + 2])) < 12) continue
+    changed = true
+    for (const rail of [railA, railB]) {
+      const low = Math.min(rail[i], rail[i + 1], rail[i + 2])
+      const high = Math.max(rail[i], rail[i + 1], rail[i + 2])
+      if (low < 150 || high - low > 10) return false
+    }
+  }
+  return changed
+}
+
+function doubaoVisibleContentSignature(page) {
+  const [left, top, right, bottom] = page.bounds
+  return JSON.stringify(page.nodes.filter(node => node.bounds[2] > left && node.bounds[0] < right
+    && node.bounds[3] > top && node.bounds[1] < bottom)
+    .map(node => [node.id, node.text, node.label, node.bounds]))
+}
+
+async function doubaoCompletionFrameDecision(current, next) {
+  if (!next.page.complete || next.page.loading) return 'completion_controls_missing'
+  if (doubaoVisibleContentSignature(current.page) !== doubaoVisibleContentSignature(next.page)) return 'visible_content_changed'
+  if (await imageRegionsStable(current.frame, next.frame)) return 'unchanged'
+  if (await doubaoScrollbarOnlyChange(current.frame, next.frame)) return 'unchanged_scrollbar_only'
+  return 'content_pixels_changed'
+}
+
 function createDoubaoWorkflow({ source, screenshot, ui, tap, swipe, observer, recoverObserver = async error => { throw error },
   log = () => {}, record = async () => {}, checkCancelled = () => {}, delay = sleep, now = Date.now }) {
   let captureBounds = null
@@ -71,6 +114,24 @@ function createDoubaoWorkflow({ source, screenshot, ui, tap, swipe, observer, re
     checkCancelled()
     const xml = await source()
     return { xml, page: doubaoPage(xml, question) }
+  }
+
+  async function readAfterNewSession(timeout) {
+    const started = now()
+    let retries = 0
+    while (true) {
+      try {
+        const current = await read()
+        return { ...current, retries, waitedMs: now() - started }
+      } catch (error) {
+        if (error.message !== MISSING_CHAT_LAYOUT || now() - started >= timeout) throw error
+        // A new conversation briefly renders an incomplete hierarchy. Only
+        // repeat the read; never repeat the click or send while it attaches.
+        await foreground()
+        retries += 1
+        await delay(Math.min(250, Math.max(0, timeout - (now() - started))))
+      }
+    }
   }
 
   async function foreground() {
@@ -108,13 +169,21 @@ function createDoubaoWorkflow({ source, screenshot, ui, tap, swipe, observer, re
     }
     const deadline = now() + 12_000
     let cleanReads = 0
+    let layoutWaitReads = 0
+    let layoutWaitMs = 0
     while (now() < deadline && cleanReads < 2) {
-      current = await read()
+      if (newSessionClicked) {
+        const settled = await readAfterNewSession(Math.min(4_000, Math.max(0, deadline - now())))
+        current = settled
+        layoutWaitReads += settled.retries
+        if (settled.retries) layoutWaitMs += settled.waitedMs
+      } else current = await read()
       cleanReads = current.page.clean ? cleanReads + 1 : 0
       if (cleanReads < 2) await delay(250)
     }
     if (cleanReads < 2) throw new Error('豆包新会话未能连续两次确认为干净页面，已在输入前停止；不重复点击。')
-    await record('doubao_new_session_confirmed', { clicked: newSessionClicked, clean_reads: cleanReads })
+    await record('doubao_new_session_confirmed', { clicked: newSessionClicked, clean_reads: cleanReads,
+      layout_wait_reads: layoutWaitReads, layout_wait_ms: layoutWaitMs })
     log('stage: 正在输入豆包问题并逐字回读')
     await foreground()
     const guardedInput = {
@@ -130,7 +199,8 @@ function createDoubaoWorkflow({ source, screenshot, ui, tap, swipe, observer, re
     await clickNode(current.page.byId('action_send'))
     await record('doubao_question_submitted', { input_verified: true, submission_count: 1 })
     log('stage: 豆包问题已单次发送，等待回答完成与真实底部')
-    return { new_session_performed: true, new_session_clicked: newSessionClicked, doubao_input_verified: true, doubao_submission_count: 1 }
+    return { new_session_performed: true, new_session_clicked: newSessionClicked, doubao_input_verified: true, doubao_submission_count: 1,
+      doubao_new_session_layout_wait_reads: layoutWaitReads, doubao_new_session_layout_wait_ms: layoutWaitMs }
   }
 
   async function stable(question, timeout = 8_000) {
@@ -203,8 +273,14 @@ function createDoubaoWorkflow({ source, screenshot, ui, tap, swipe, observer, re
   async function captureAnswer(question, timeout = 90_000) {
     captureBounds = null
     const started = now()
-    const deadline = now() + timeout
-    let current; let unchanged = 0; let quietSince = now(); let probes = 0; let lastNavigation = now()
+    const deadline = started + timeout
+    // The answer may legitimately take the whole task budget to generate. Once
+    // the completion controls appear, bound a *static* but unverifiable footer
+    // separately; actual changes to visible UI content still get the full budget.
+    const stalledFooterLimit = Math.min(35_000, Math.max(18_000, timeout / 3))
+    let current; let unchanged = 0; let quietSince = started; let probes = 0; let lastNavigation = started
+    let completionSeenAt = null; let lastVisibleProgressAt = null; let lastDecision = 'completion_controls_missing'
+    let scrollbarOnlyProbesDuringCompletion = 0
     while (now() < deadline) {
       // During generation only read the UI; do not accept a brief token pause.
       const state = await read(question)
@@ -212,6 +288,7 @@ function createDoubaoWorkflow({ source, screenshot, ui, tap, swipe, observer, re
         unchanged = 0
         quietSince = now()
         current = null
+        if (completionSeenAt !== null) lastVisibleProgressAt = now()
         if (now() - lastNavigation >= 4_000) {
           const physicalSize = await imageInfo(await screenshot())
           mapDoubaoBounds(state.page.bounds, state.page.size, physicalSize)
@@ -221,19 +298,43 @@ function createDoubaoWorkflow({ source, screenshot, ui, tap, swipe, observer, re
         await delay(500)
         continue
       }
+      if (completionSeenAt === null) {
+        completionSeenAt = now()
+        lastVisibleProgressAt = completionSeenAt
+        await record('doubao_reply_completion_controls_seen', { elapsed_ms: completionSeenAt - started,
+          overall_timeout_ms: timeout, stalled_footer_limit_ms: stalledFooterLimit })
+      }
       if (!current) { current = await stable(question); quietSince = now() }
       await scroll(current, 'down', 0.65, probes % 2 === 1)
       const next = await stable(question)
-      const same = next.page.complete && await imageRegionsStable(current.frame, next.frame)
+      const decision = await doubaoCompletionFrameDecision(current, next)
+      const same = decision === 'unchanged' || decision === 'unchanged_scrollbar_only'
+      if (decision === 'visible_content_changed') lastVisibleProgressAt = now()
+      if (decision === 'unchanged_scrollbar_only') scrollbarOnlyProbesDuringCompletion++
       unchanged = same ? unchanged + 1 : 0
       if (!same) quietSince = now()
       current = next
       probes++
+      lastDecision = decision
+      await record('doubao_reply_completion_probe', { probe: probes, decision, consecutive_unchanged: unchanged,
+        quiet_ms: now() - quietSince, stalled_ms: now() - lastVisibleProgressAt })
       if (unchanged >= 3 && now() - quietSince >= 6_000) break
+      if (now() - lastVisibleProgressAt >= stalledFooterLimit) break
     }
-    if (!current || unchanged < 3 || now() - quietSince < 6_000) throw new Error('豆包回答超时：未同时确认完成操作栏、连续三次到底和持续静止。')
+    if (!current || unchanged < 3 || now() - quietSince < 6_000) {
+      const details = { completion_controls_seen: completionSeenAt !== null, probes, consecutive_unchanged: unchanged,
+        quiet_ms: now() - quietSince, stalled_ms: lastVisibleProgressAt === null ? 0 : now() - lastVisibleProgressAt,
+        elapsed_ms: now() - started, last_decision: lastDecision,
+        reason: completionSeenAt !== null && now() - lastVisibleProgressAt >= stalledFooterLimit
+          ? 'static_footer_unverifiable' : 'overall_timeout' }
+      await record('doubao_reply_completion_unverified', details)
+      const reason = details.reason === 'static_footer_unverifiable' ? '完成操作栏已出现，但静态页面的像素仍持续变化'
+        : '回答生成或到底确认超过总时限'
+      throw new Error(`豆包回答未能确认真实到底：${reason}（${details.reason}）；探测=${probes}，连续未滚动=${unchanged}，最后变化=${lastDecision}，耗时=${Math.round(details.elapsed_ms / 1000)}秒。`)
+    }
     const completionMs = now() - started
-    await record('doubao_reply_completion_confirmed', { probes, unchanged, quiet_ms: now() - quietSince })
+    await record('doubao_reply_completion_confirmed', { probes, unchanged, quiet_ms: now() - quietSince,
+      scrollbar_only_probes: scrollbarOnlyProbesDuringCompletion, completion_controls_seen_ms: completionSeenAt - started })
     log('stage: 豆包回答已完成，正在返回本题问题顶部')
     const topStarted = now(); const topDeadline = now() + 90_000
     unchanged = 0; let topSwipes = 0
@@ -279,16 +380,20 @@ function createDoubaoWorkflow({ source, screenshot, ui, tap, swipe, observer, re
       captureBounds[1] += Math.ceil(headerHeight + current.page.size.width * 0.005)
     }
     const seamRecords = []; const scrollDecisions = []; const seamDiagnostics = []
-    let recaptureCount = 0; let scans = 0
+    let recaptureCount = 0; let scans = 0; let scrollbarOnlyProbes = 0
     unchanged = 0
     const captureDeadline = now() + Math.max(180_000, timeout * 2)
     while (now() < captureDeadline) {
       const distance = await scroll(current, 'down', 0.4, scans % 2 === 1)
       let next = await ready(await stable(question), question)
       scans++
-      if (await imageRegionsStable(current.frame, next.frame)) {
+      const fullyStable = await imageRegionsStable(current.frame, next.frame)
+      const scrollbarOnly = !fullyStable && await doubaoScrollbarOnlyChange(current.frame, next.frame)
+      if (fullyStable || scrollbarOnly) {
         unchanged++
-        scrollDecisions.push({ swipe: scans, decision: 'unchanged', consecutive: unchanged })
+        if (scrollbarOnly) scrollbarOnlyProbes++
+        scrollDecisions.push({ swipe: scans, decision: scrollbarOnly ? 'unchanged_scrollbar_only' : 'unchanged', consecutive: unchanged })
+        if (scrollbarOnly) await record('doubao_scrollbar_only_change', { swipe: scans, consecutive: unchanged })
         current = next
         if (unchanged >= 2 && current.page.complete) break
         if (unchanged >= 3) throw new Error('豆包页面无法继续滚动，但未显示回答完成标记。')
@@ -341,7 +446,8 @@ function createDoubaoWorkflow({ source, screenshot, ui, tap, swipe, observer, re
       seamRecords.push({ index: sequence.length - 1, overlap: lastSize.height, verified: true, method: 'same_raw_png_terminal_extension' })
       scrollDecisions.push({ decision: 'terminal_extension', page: sequence.length })
     }
-    await record('doubao_capture_completed', { pages: sequence.length, seams: seamRecords.length, confirmed_end: true })
+    await record('doubao_capture_completed', { pages: sequence.length, seams: seamRecords.length, confirmed_end: true,
+      scrollbar_only_probes: scrollbarOnlyProbes })
     return { ...sequence.toCaptureResult(), xml: current.xml, bounds: current.physicalBounds, recaptureCount,
       fullRetryCount: 0, fallbackReasons: [], topNavigationMs, questionLocated: true, questionFullyVisible: true,
       evidenceEmbedded: referenceCount > 0, evidenceExpanded: referenceCount > 0, productDetected: false, products: null, productCaptureAttempts: 0, productCaptureMs: 0,
@@ -351,6 +457,9 @@ function createDoubaoWorkflow({ source, screenshot, ui, tap, swipe, observer, re
         doubao_reference_count: referenceCount, doubao_references_complete: true,
         doubao_references: [...references.values()].sort((a, b) => a.index - b.index),
         doubao_completion_probes: probes, doubao_completion_ms: completionMs, doubao_top_swipes: topSwipes,
+        doubao_scrollbar_only_probes: scrollbarOnlyProbes,
+        doubao_completion_scrollbar_only_probes: scrollbarOnlyProbesDuringCompletion,
+        doubao_completion_controls_seen_ms: completionSeenAt - started,
         doubao_logical_size: current.page.size, doubao_screenshot_size: current.physicalSize,
         reply_completion_confirmed_before_capture: true, reference_products_applicable: false } }
   }
@@ -358,4 +467,5 @@ function createDoubaoWorkflow({ source, screenshot, ui, tap, swipe, observer, re
   return { prepare, submitQuestion, captureAnswer }
 }
 
-module.exports = { DOUBAO_PACKAGE, doubaoPage, mapDoubaoBounds, doubaoReferenceCount, doubaoReferences, createDoubaoWorkflow }
+module.exports = { DOUBAO_PACKAGE, doubaoPage, mapDoubaoBounds, doubaoScrollbarOnlyChange,
+  doubaoCompletionFrameDecision, doubaoReferenceCount, doubaoReferences, createDoubaoWorkflow }

@@ -603,13 +603,13 @@ test('只允许目标App层级进入UI操作流程', () => {
   assert.equal(hierarchyBelongsToPackage(search), false)
 })
 
-test('桌面入口默认勾选小荷App和抖音，并按选择顺序去重执行', () => {
+test('桌面入口默认全部不勾选，CLI 缺省入口不受影响，并按选择顺序去重执行', () => {
   assert.equal(normalizeAutomationEntries([])[0].id, 'douyin-xiaohe-miniapp')
   const entries = normalizeAutomationEntries(['douyin-xiaohe-miniapp', 'xiaohe-app', 'douyin-xiaohe-miniapp'])
   assert.deepEqual(entries.map(entry => entry.id), ['douyin-xiaohe-miniapp', 'xiaohe-app'])
   assert.deepEqual(automationEntries().map(entry => [entry.id, entry.defaultSelected]), [
-    ['xiaohe-app', true],
-    ['douyin-xiaohe-miniapp', true],
+    ['xiaohe-app', false],
+    ['douyin-xiaohe-miniapp', false],
     ['toutiao-xiaohe-miniapp', false],
     ['doubao-app', false],
   ])

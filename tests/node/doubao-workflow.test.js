@@ -1,6 +1,7 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
-const { doubaoPage, mapDoubaoBounds, doubaoReferenceCount, doubaoReferences, createDoubaoWorkflow } = require('../../src/automation/doubao-workflow')
+const { doubaoPage, mapDoubaoBounds, doubaoScrollbarOnlyChange, doubaoCompletionFrameDecision,
+  doubaoReferenceCount, doubaoReferences, createDoubaoWorkflow } = require('../../src/automation/doubao-workflow')
 
 function fixture(scale = 1, { welcome = true, question = '', complete = false, rotation = 0 } = {}) {
   const b = values => `[${values.slice(0, 2).map(v => Math.round(v * scale))}][${values.slice(2).map(v => Math.round(v * scale))}]`
@@ -58,6 +59,42 @@ test('豆包新会话无法确认时不输入，不重放新会话点击', async
   assert.equal(clicks,1); assert.equal(inputs,0)
 })
 
+test('豆包新会话短暂缺少消息列表时等待就绪，不重复点击或发送', async () => {
+  const png = await require('sharp')({create:{width:1080,height:2400,channels:3,background:'#fff'}}).png().toBuffer()
+  const old = fixture(1, {welcome:false, question:'旧问题'})
+    .replace('</hierarchy>', '<node package="com.larus.nova" resource-id="com.larus.nova:id/larus_chat_top_left_create_new_cvs" bounds="[140,115][260,235]" clickable="true"/></hierarchy>')
+  const transitional = '<hierarchy rotation="0"><node package="com.larus.nova" resource-id="com.larus.nova:id/chat_root" bounds="[0,0][1080,2400]"/></hierarchy>'
+  let xml = old; let transitions = 0; let newSessionClicks = 0; let sends = 0; let clock = 0
+  const flow = createDoubaoWorkflow({
+    source: async () => {
+      if (transitions > 0) {
+        transitions -= 1
+        return transitional
+      }
+      return xml
+    },
+    screenshot: async () => png,
+    ui: {
+      currentApp: async () => ({package:'com.larus.nova'}),
+      sendKeys: async text => {
+        xml = fixture().replace('text="发消息或按住说话..."', `text="${text}"`)
+          .replace('</hierarchy>', '<node package="com.larus.nova" resource-id="com.larus.nova:id/action_send" bounds="[930,2160][1040,2320]"/></hierarchy>')
+      },
+    },
+    tap: async x => {
+      if (x < 300) { newSessionClicks += 1; xml = fixture(); transitions = 2 }
+      if (x > 900) sends += 1
+    },
+    delay: async ms => { clock += ms },
+    now: () => clock,
+  })
+  const result = await flow.submitQuestion('测试问题')
+  assert.equal(newSessionClicks, 1)
+  assert.equal(sends, 1)
+  assert.equal(result.doubao_new_session_layout_wait_reads, 2)
+  assert.equal(result.doubao_new_session_layout_wait_ms, 500)
+})
+
 test('豆包发送前两次精确回读，只提交一次并先记录提交状态', async () => {
   const png = await require('sharp')({create:{width:1080,height:2400,channels:3,background:'#fff'}}).png().toBuffer()
   let xml = fixture(); let sent = 0; let checkpoint = false
@@ -76,6 +113,70 @@ test('豆包失去前台后停止输入与点击', async () => {
     ui:{currentApp:async()=>({package:'other.app'}),sendKeys:async()=>{actions++}},tap:async()=>{actions++}})
   await assert.rejects(flow.submitQuestion('测试问题'), /前台应用不是豆包/)
   assert.equal(actions,0)
+})
+
+for (const [width, height] of [[1080, 1438], [720, 960]]) {
+  test(`豆包末屏只忽略灰色滚动条，正文或深色边缘变化仍拒绝 (${width}x${height})`, async () => {
+    const sharp = require('sharp')
+    const railWidth = Math.ceil(width * 0.015)
+    const base = await sharp({create:{width,height,channels:3,background:'#fff'}})
+      .composite([{input:Buffer.from(`<svg width="${width}" height="${height}"><rect x="${width*0.1}" y="${height*0.5}" width="${width*0.75}" height="10" fill="#222"/></svg>`),left:0,top:0}]).png().toBuffer()
+    const overlay = (x, color) => sharp(base).composite([{input:Buffer.from(`<svg width="${width}" height="${height}"><rect x="${x}" y="${Math.floor(height*0.7)}" width="${Math.max(3,railWidth/2)}" height="${Math.floor(height*0.2)}" fill="${color}"/></svg>`),left:0,top:0}]).png().toBuffer()
+    assert.equal(await doubaoScrollbarOnlyChange(base, await overlay(width - railWidth, '#bbb')), true)
+    assert.equal(await doubaoScrollbarOnlyChange(base, await overlay(Math.floor(width*0.5), '#bbb')), false)
+    assert.equal(await doubaoScrollbarOnlyChange(base, await overlay(width - railWidth, '#222')), false)
+  })
+}
+
+for (const [scale, width, height] of [[1, 1080, 1740], [2 / 3, 720, 1160]]) {
+  test(`豆包完成阶段须同时保持操作栏、正文结构和正文像素，仅容许浅灰滚动条 (${width}x${height})`, async () => {
+    const sharp = require('sharp')
+    const xml = fixture(scale, {welcome: false, complete: true})
+    const page = doubaoPage(xml)
+    const base = await sharp({create: {width, height, channels: 3, background: '#fff'}})
+      .composite([{input: Buffer.from(`<svg width="${width}" height="${height}"><rect x="${width * 0.1}" y="${height * 0.5}" width="${width * 0.65}" height="14" fill="#222"/></svg>`), left: 0, top: 0}])
+      .png().toBuffer()
+    const changed = async (left, color) => sharp(base).composite([{
+      input: Buffer.from(`<svg width="${width}" height="${height}"><rect x="${left}" y="${Math.floor(height * 0.7)}" width="${Math.ceil(width * 0.008)}" height="${Math.floor(height * 0.2)}" fill="${color}"/></svg>`),
+      left: 0, top: 0,
+    }]).png().toBuffer()
+    const current = {page, frame: base}
+    assert.equal(await doubaoCompletionFrameDecision(current, {page, frame: base}), 'unchanged')
+    assert.equal(await doubaoCompletionFrameDecision(current,
+      {page, frame: await changed(width - Math.ceil(width * 0.015), '#bbb')}), 'unchanged_scrollbar_only')
+    assert.equal(await doubaoCompletionFrameDecision(current,
+      {page, frame: await changed(Math.floor(width * 0.5), '#bbb')}), 'content_pixels_changed')
+    assert.equal(await doubaoCompletionFrameDecision(current,
+      {page, frame: await changed(width - Math.ceil(width * 0.015), '#222')}), 'content_pixels_changed')
+    const newNode = `<node package="com.larus.nova" resource-id="com.larus.nova:id/content_view" text="新增正文" bounds="[${Math.round(77 * scale)},${Math.round(1000 * scale)}][${Math.round(600 * scale)},${Math.round(1060 * scale)}]"/>`
+    assert.equal(await doubaoCompletionFrameDecision(current,
+      {page: doubaoPage(xml.replace('</hierarchy>', `${newNode}</hierarchy>`)), frame: base}), 'visible_content_changed')
+    assert.equal(await doubaoCompletionFrameDecision(current,
+      {page: doubaoPage(fixture(scale, {welcome: false})), frame: base}), 'completion_controls_missing')
+  })
+}
+
+test('豆包完成栏出现后静态结构下正文像素持续变化，提前诊断而不误判到底', async () => {
+  const sharp = require('sharp')
+  const xml = fixture(1 / 3, {welcome: false, complete: true})
+  const base = await sharp({create: {width: 270, height: 600, channels: 3, background: '#fff'}}).png().toBuffer()
+  const changed = await sharp(base).composite([{input: Buffer.from('<svg width="270" height="600"><rect x="50" y="320" width="90" height="35" fill="#222"/></svg>'),
+    left: 0, top: 0}]).png().toBuffer()
+  let frame = base; let clock = 0; let swipes = 0
+  const events = []
+  const flow = createDoubaoWorkflow({
+    source: async () => xml, screenshot: async () => frame,
+    ui: {currentApp: async () => ({package: 'com.larus.nova'})},
+    swipe: async () => { frame = frame === base ? changed : base; swipes++ },
+    delay: async ms => { clock += Math.max(ms, 1_000) }, now: () => clock,
+    record: async (event, details) => { events.push({event, details}) },
+  })
+  await assert.rejects(flow.captureAnswer('测试问题', 90_000), /static_footer_unverifiable/)
+  assert.ok(clock >= 30_000 && clock < 90_000)
+  assert.ok(swipes >= 3)
+  assert.equal(events.filter(item => item.event === 'doubao_reply_completion_confirmed').length, 0)
+  assert.equal(events.at(-1).event, 'doubao_reply_completion_unverified')
+  assert.equal(events.at(-1).details.last_decision, 'content_pixels_changed')
 })
 
 test('豆包完整滚动采集保留问题、所有正文像素和悬浮按钮下的末尾，物理尺寸独立映射', async () => {
