@@ -100,7 +100,7 @@ npm run run:android -- \
 
 Windows 安装包由 GitHub Actions 在 `windows-latest` 上构建。手动运行 `Build Windows` 工作流只生成可下载的 Artifact；推送 `v*` 版本标签会在测试和打包成功后自动创建或更新 GitHub Release，并上传 `.exe`、`.blockmap` 与自动更新所需的 `latest.yml`。当前 macOS 工作流仅保留手动构建，不会随版本标签执行：
 
-Windows 安装包内置的自动更新源为腾讯云 COS：`https://yisheng-1252303079.cos.ap-guangzhou.myqcloud.com/geo-updates/win/`，固定安装包下载地址为该目录下的 `question-automation-electron-setup.exe`。每次版本标签构建会先上传带版本号的安装包和 `.blockmap`，再由 COS 内部复制生成固定下载文件，最后发布 `latest.yml`；发布完成后按上传时间仅保留最近 5 个带版本号的安装包及对应 `.blockmap`。暂时的上传连接故障最多尝试 3 次，复用 MD5 校验通过的分片；上传步骤设有 12 分钟总时限并报告进度及错误分类。已发布的稳定版可在 `Build Windows` 手动运行时填写 `release_tag`，直接补部署原 Release，无须重新构建。只有这些更新对象设置为公有读，桶内业务附件不受影响。GitHub 仓库需配置 `TENCENT_COS_SECRET_ID`、`TENCENT_COS_SECRET_KEY`、`TENCENT_COS_BUCKET` 和 `TENCENT_COS_REGION`。旧 HTTP 更新服务器暂时只发布一份指向 COS 的兼容清单，供旧版客户端完成迁移。
+Windows 安装包内置的自动更新源为腾讯云 COS：`https://yisheng-1252303079.cos.ap-guangzhou.myqcloud.com/geo-updates/win/`，固定安装包下载地址为该目录下的 `question-automation-electron-setup.exe`。每次版本标签构建会先上传带版本号的安装包和 `.blockmap`，再由 COS 内部复制生成固定下载文件，最后发布 `latest.yml`；发布完成后按上传时间仅保留最近 5 个带版本号的安装包及对应 `.blockmap`。暂时的上传连接故障最多尝试 3 次，复用 MD5 校验通过的分片；上传步骤设有 20 分钟总时限并报告进度及错误分类。已发布的稳定版可在 `Build Windows` 手动运行时填写 `release_tag`，直接补部署原 Release，无须重新构建。只有这些更新对象设置为公有读，桶内业务附件不受影响。GitHub 仓库需配置 `TENCENT_COS_SECRET_ID`、`TENCENT_COS_SECRET_KEY`、`TENCENT_COS_BUCKET` 和 `TENCENT_COS_REGION`。旧 HTTP 更新服务器暂时只发布一份指向 COS 的兼容清单，供旧版客户端完成迁移。
 
 ```bash
 git tag v0.2.0
