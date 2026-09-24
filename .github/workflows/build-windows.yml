@@ -249,6 +249,7 @@ jobs:
               SecretKey=os.environ["TENCENT_COS_SECRET_KEY"],
               Scheme="https",
               Timeout=(30, 60),
+              AutoSwitchDomainOnRetry=True,
           ), retry=1)
           installer = Path(glob.glob("release-assets/*.exe")[0])
           blockmap = Path(f"{installer}.blockmap")
