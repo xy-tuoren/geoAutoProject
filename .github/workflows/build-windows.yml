@@ -202,13 +202,14 @@ jobs:
               # Classify the wrapped requests exception without logging URLs, signatures or credentials.
               message = str(error).lower()
               for reason, markers in (
+                  ("write_timeout", ("write operation timed out",)),
                   ("read_timeout", ("read timed out", "readtimeout")),
                   ("connect_timeout", ("connecttimeout", "connection timed out")),
                   ("dns_error", ("nameresolution", "name resolution", "getaddrinfo")),
                   ("tls_error", ("sslerror", "certificate verify failed")),
                   ("connection_reset", ("connection reset", "broken pipe", "remote end closed")),
-                  ("connection_error", ("connectionerror", "connection aborted", "failed to establish")),
                   ("timeout", ("timeout", "timed out")),
+                  ("connection_error", ("connectionerror", "connection aborted", "failed to establish")),
               ):
                   if any(marker in message for marker in markers):
                       return reason
@@ -235,7 +236,9 @@ jobs:
                       status = getattr(error, "get_status_code", lambda: "unknown")()
                       code = getattr(error, "get_error_code", lambda: type(error).__name__)()
                       part = kwargs.get("PartNumber", args[3] if len(args) > 3 else "unknown")
-                      print(f"COS part upload failed: part={part}, status={status}, code={code}, reason={error_reason(error)}", flush=True)
+                      reason = error_reason(error)
+                      self.part_error_reasons.append(reason)
+                      print(f"COS part upload failed: part={part}, status={status}, code={code}, reason={reason}", flush=True)
                       raise
 
           bucket = os.environ["TENCENT_COS_BUCKET"]
@@ -245,40 +248,52 @@ jobs:
               SecretId=os.environ["TENCENT_COS_SECRET_ID"],
               SecretKey=os.environ["TENCENT_COS_SECRET_KEY"],
               Scheme="https",
-              Timeout=(10, 60),
+              Timeout=(30, 60),
           ), retry=1)
           installer = Path(glob.glob("release-assets/*.exe")[0])
           blockmap = Path(f"{installer}.blockmap")
           metadata = Path("release-assets/latest.yml")
           prefix = "geo-updates/win/"
 
+          def upload_asset(asset, content_type):
+              transient_errors = {"write_timeout", "read_timeout", "connect_timeout", "dns_error",
+                                  "connection_reset", "connection_error", "timeout"}
+              for attempt in range(1, 4):
+                  client.part_error_reasons = []
+                  print(f"COS uploading: {asset.name} ({asset.stat().st_size} bytes), attempt={attempt}/3", flush=True)
+                  try:
+                      client.upload_file(
+                          Bucket=bucket,
+                          Key=f"{prefix}{asset.name}",
+                          LocalFilePath=str(asset),
+                          PartSize=5,
+                          MAXThread=3,
+                          EnableMD5=True,
+                          progress_callback=progress_for(asset.name),
+                          ACL="public-read",
+                          ContentType=content_type,
+                          CacheControl="public, max-age=31536000, immutable",
+                      )
+                      return
+                  except Exception as error:
+                      reasons = set(client.part_error_reasons) or {error_reason(error)}
+                      if attempt == 3 or not reasons <= transient_errors:
+                          raise
+                      print(f"COS resuming verified parts after transient failure: {sorted(reasons)}", flush=True)
+                      time.sleep(attempt * 2)
+
           for asset, content_type in (
               (installer, "application/vnd.microsoft.portable-executable"),
               (blockmap, "application/octet-stream"),
           ):
-              print(f"COS uploading: {asset.name} ({asset.stat().st_size} bytes)", flush=True)
-              client.upload_file(
-                  Bucket=bucket,
-                  Key=f"{prefix}{asset.name}",
-                  LocalFilePath=str(asset),
-                  PartSize=5,
-                  MAXThread=3,
-                  EnableMD5=True,
-                  progress_callback=progress_for(asset.name),
-                  ACL="public-read",
-                  ContentType=content_type,
-                  CacheControl="public, max-age=31536000, immutable",
-              )
+              upload_asset(asset, content_type)
 
-          print("COS uploading fixed installer", flush=True)
-          client.upload_file(
+          print("COS copying verified installer to fixed download key inside COS", flush=True)
+          client.copy_object(
               Bucket=bucket,
               Key=f"{prefix}question-automation-electron-setup.exe",
-              LocalFilePath=str(installer),
-              PartSize=5,
-              MAXThread=3,
-              EnableMD5=True,
-              progress_callback=progress_for("fixed installer"),
+              CopySource={"Bucket": bucket, "Region": region, "Key": f"{prefix}{installer.name}"},
+              CopyStatus="Replaced",
               ACL="public-read",
               ContentType="application/vnd.microsoft.portable-executable",
               CacheControl="no-cache",
