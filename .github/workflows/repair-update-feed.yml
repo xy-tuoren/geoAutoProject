@@ -11,6 +11,11 @@ on:
 permissions:
   contents: read
 
+# Share the production lock with Build Windows, including its legacy bridge.
+concurrency:
+  group: windows-update-production
+  cancel-in-progress: false
+
 jobs:
   repair:
     runs-on: ubuntu-latest

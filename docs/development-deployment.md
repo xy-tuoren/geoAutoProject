@@ -125,7 +125,15 @@ Windows 打包成功后，`dist/` 中应至少包含：
 - 标签发布完成后，将 Windows 更新文件同步到腾讯云 COS，并最后上传 `latest.yml`。
 - 标签发布时会校验 `v<package.json version>` 是否完全匹配，不匹配会失败。
 
-COS 上传日志每约 30 秒报告已完成字节数，分片失败记录分片号、HTTP 状态、COS 错误码与安全分类（写入/读取/连接超时、DNS、TLS 或连接中断），不输出签名 URL 或密钥。SDK 连接（含套接字写入）/读取超时分别为 30/60 秒，每个请求最多重试一次；仅对暂时的连接故障，文件级最多尝试 3 次，并按 MD5 校验复用已上传分片。权限或其他服务端错误不触发文件级重试。整个上传步骤最多 20 分钟，部署 job 最多 25 分钟。带版本安装包和 blockmap 上传成功后，由 COS 内部复制生成固定下载文件，避免重复跨网络上传安装包；最后才更新 `latest.yml`，之前任一步失败时保留原更新清单。
+COS 部署由 `scripts/deploy_cos_update.py` 执行，依赖固定在 `scripts/requirements-cos-deploy.txt`。日志以 JSON 事件每约 30 秒报告本次尝试的复用字节、新传成功字节、平均吞吐、预计剩余时间和失败分片数；复用字节不计入吞吐，失败分片数为本次尝试中失败过的不同分片数。分片错误记录 HTTP 状态和安全分类，不输出签名 URL 或密钥。SDK 连接（含套接字写入）/读取超时分别为 30/60 秒，每个请求最多重试一次；暂时的连接故障及 429/500/502/503/504 可触发文件级重试，最多 3 次，并按 MD5 校验复用已上传分片。权限、TLS 证书或完整性错误不触发文件级重试。
+
+连续 180 秒无成功分片进度时，监视器最迟在下一次 10 秒检查中阻止后续排队分片，并结束本次上传；已在途请求按 SDK 超时退出，因此 180 秒不是强杀截止时间。整个上传步骤最多 20 分钟，校验步骤最多 2 分钟，发布步骤最多 3 分钟，含依赖安装和 Release 下载的部署 job 最多 30 分钟。有持续进度的慢上传不会因无进度规则被停止，但仍受总时限约束。
+
+上传前先核验本地安装包与 Release 清单中的版本、路径、大小和 SHA-512。远端已完成对象的大小、SHA-512 元数据和 COS CRC64 全部匹配则跳过上传；旧流程留下的文件或已恢复分片合并后的文件缺少 SHA-512 元数据时，先核对大小/CRC64，再限时下载一次核验真实 SHA-512，通过后用 COS 内部复制补齐元数据。此迁移核验有 5 分钟读取预算（不含在途读取退出），无需重复上传安装包。同名版本文件不一致时明确失败，不覆盖。
+
+发布前验证版本化安装包和 blockmap 的远端完整性、匿名 HTTP 206、Content-Range 和起始字节，再由 COS 内部复制生成固定安装包并验证它的分段下载，最后才更新 `latest.yml`。清单写入前的任何校验失败都保留原清单；写入后会再次核验公开清单内容，若此时网络失败，重跑可识别已完成发布。固定安装包与清单不是跨对象原子事务；两者切换间自动更新仍使用旧清单中的版本化文件。
+
+`Build Windows` 与 `Repair legacy update feed` 使用同一工作流级生产锁，覆盖 COS 发布、清理和旧服务器同步，运行中的发布不会因新任务被自动取消。GitHub 默认只保留一个等待任务，新等待任务可能替换旧等待任务；版本检查不依赖排队顺序，生产清单拒绝降级、同版本安装包换包以及预发布版本。该锁仅约束这两个工作流，不约束控制台或其他外部写入。历史清理使用独立 job，与旧服务器同步互不依赖；清理失败可单独重跑失败 job，不影响已发布的更新。
 
 上传分片使用 1 MB，避免公网链路中 5 MB 分片连续写入出现超时；仍保留 3 路并发与逐片 MD5 校验。改变分片大小后，SDK 会重新验证旧分片，尺寸不匹配时创建新的上传会话，不混用不同大小的分片。启用 SDK 的 `AutoSwitchDomainOnRetry`，在符合 SDK 条件的网络异常重试时，从 `myqcloud.com` 切换到官方备用 `tencentcos.cn` 域名；此功能不启用收费的全球加速。
 
@@ -134,6 +142,14 @@ COS 上传日志每约 30 秒报告已完成字节数，分片失败记录分片
 ```bash
 gh run view <run-id> --repo xy-tuoren/geoAutoProject --log-failed
 gh workflow run build-windows.yml --repo xy-tuoren/geoAutoProject --ref main -f release_tag=v0.1.27
+```
+
+默认 `deploy_from=upload` 会自动复用完整对象和已校验分片。若已确认上传阶段完成，可添加 `-f deploy_from=verify`；若只需重试固定下载文件/清单发布，可用 `-f deploy_from=publish`。后者仍重新校验版本化文件与公开下载，不能绕过完整性检查。仅旧服务器同步失败时使用下文的 `Repair legacy update feed`，无需下载或重新上传整个安装包。
+
+部署逻辑单元测试供人工验收运行（不访问真实 COS）：
+
+```bash
+uv run --no-project --with-requirements scripts/requirements-cos-deploy.txt python -m unittest discover -s tests/deployment -p 'test_*.py'
 ```
 
 `Build macOS package` 的行为：
@@ -200,7 +216,7 @@ git push origin v0.1.2
 
 若安装包已补传到 COS，而旧服务器清单同步被中断，可手动运行 `Repair legacy update feed`，指定已有正式版本标签。该任务先验证 GitHub Release 与 COS 的 `latest.yml` 完全一致、安装包可下载，再使用已有服务器 Secrets 更新兼容清单，不重新构建或上传安装包。
 
-Windows 安装包使用 `electron-updater` 从 `https://yisheng-1252303079.cos.ap-guangzhou.myqcloud.com/geo-updates/win/` 检查更新；GitHub Releases 保留带版本号的安装包备份。标签构建会先上传带版本号的安装包和 blockmap，再更新固定下载文件，最后发布 `latest.yml`，随后只清理该目录中超过最近 5 个版本的安装包和对应 blockmap。COS 桶继续保持私有，仅更新对象设置为公有读。
+Windows 安装包使用 `electron-updater` 从 `https://yisheng-1252303079.cos.ap-guangzhou.myqcloud.com/geo-updates/win/` 检查更新；GitHub Releases 保留带版本号的安装包备份。标签构建先上传并校验带版本号的安装包和 blockmap，再更新并校验固定下载文件，最后发布 `latest.yml`。独立清理 job 按语义版本保留最高 5 个安装包和对应 blockmap，并始终保护当前清单引用的版本；不会因补传时间较晚而把旧版本当成新版本。COS 桶继续保持私有，仅更新对象设置为公有读。
 
 应用行为：
 

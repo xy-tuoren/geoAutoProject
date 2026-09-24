@@ -1,0 +1,4 @@
+# The upload progress adapter depends on SDK 1.9.44 private resume hooks.
+cos-python-sdk-v5==1.9.44
+PyYAML==6.0.2
+semver==3.0.4
