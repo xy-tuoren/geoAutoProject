@@ -266,7 +266,8 @@ jobs:
                           Bucket=bucket,
                           Key=f"{prefix}{asset.name}",
                           LocalFilePath=str(asset),
-                          PartSize=5,
+                          # Keep each TLS write small on the runner-to-COS public network path.
+                          PartSize=1,
                           MAXThread=3,
                           EnableMD5=True,
                           progress_callback=progress_for(asset.name),
