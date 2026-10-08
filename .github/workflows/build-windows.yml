@@ -184,7 +184,28 @@ jobs:
           set -euo pipefail
           [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
           test "$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease --jq '.isDraft or .isPrerelease')" = false
+          if [[ "${{ inputs.upload_runner }}" == 'local_recovery' ]]; then
+            : "${GEOAUTO_RECOVERY_ASSET_DIR:?Prefetch the exact Release assets before starting the ephemeral runner}"
+            gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > release-asset-digests.json
+            mkdir -p release-assets
+            uv run --no-project --python 3.11 python - <<'PY'
+          import hashlib, json, os, pathlib, shutil
+          root = pathlib.Path(os.environ['GEOAUTO_RECOVERY_ASSET_DIR'])
+          version = os.environ['RELEASE_TAG'][1:]
+          names = {'latest.yml', f'question-automation-electron-setup-{version}.exe', f'question-automation-electron-setup-{version}.exe.blockmap'}
+          assets = {a['name']: a for a in json.loads(pathlib.Path('release-asset-digests.json').read_text())['assets']}
+          for name in names:
+              source = root / name
+              expected = assets[name]
+              with source.open('rb') as stream:
+                  digest = 'sha256:' + hashlib.file_digest(stream, 'sha256').hexdigest()
+              if source.stat().st_size != expected['size'] or digest != expected.get('digest'):
+                  raise SystemExit('Cached Release asset differs from GitHub: ' + name)
+              shutil.copyfile(source, pathlib.Path('release-assets') / name)
+          PY
+          fi
           gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir release-assets \
+            --skip-existing \
             --pattern "question-automation-electron-setup-${RELEASE_TAG#v}.exe" \
             --pattern "question-automation-electron-setup-${RELEASE_TAG#v}.exe.blockmap" --pattern latest.yml
           grep -Fx "version: ${RELEASE_TAG#v}" release-assets/latest.yml
