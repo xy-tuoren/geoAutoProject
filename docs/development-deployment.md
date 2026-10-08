@@ -146,6 +146,8 @@ gh workflow run build-windows.yml --repo xy-tuoren/geoAutoProject --ref main -f 
 
 默认 `deploy_from=upload` 会自动复用完整对象和已校验分片。若已确认上传阶段完成，可添加 `-f deploy_from=verify`；若只需重试固定下载文件/清单发布，可用 `-f deploy_from=publish`。后者仍重新校验版本化文件与公开下载，不能绕过完整性检查。仅旧服务器同步失败时使用下文的 `Repair legacy update feed`，无需下载或重新上传整个安装包。
 
+托管 Ubuntu 节点到 COS 的写入持续超时时，可在恢复命令中添加 `-f upload_runner=github_windows`，使用 Windows 托管节点的另一条网络路径。该选项仍从原 Release 获取文件、校验已完成对象和分片，并执行完整发布校验；不重新构建安装包。
+
 若 GitHub 托管 runner 到 COS 连续写入超时，可先下载已有 Release 的三份文件，将其目录通过 `GEOAUTO_RECOVERY_ASSET_DIR` 传给临时本机 runner，再以 `-f upload_runner=local_recovery` 补部署该 Release。runner 必须以 ephemeral 模式注册并带 `geoauto-cos-recovery` 标签；开始前逐文件对比 GitHub 的大小与 SHA-256，发布时仍执行原有 SHA-512、CRC64、分段下载和清单校验。上传 job 使用同一生产互斥锁和部署 Secrets；本机须已有 uv，任务在独立 Python 环境执行，结束后 ephemeral runner 自动注销。普通标签发布默认仍使用 GitHub 托管 runner，此选项只用于已有 Release 的恢复，不改变安装包或标签。结束后移除本次 runner 目录和临时文件。
 
 部署逻辑单元测试供人工验收运行（不访问真实 COS）：
