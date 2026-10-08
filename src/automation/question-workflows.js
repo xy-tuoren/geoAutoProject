@@ -64,7 +64,9 @@ function createQuestionWorkflows({
       entry_hierarchy_startup_timeout_ms: entryHierarchyStartupTimeout(entry),
       ...(['douyin-search', 'toutiao-search'].includes(entry.workflow) ? {
         search_entry_timeout_ms: SEARCH_ENTRY_TIMEOUT_MS,
-        search_entry_scan_policy: 'stable_first_screen_one_ocr_recheck_only_on_change',
+        search_entry_scan_policy: entry.workflow === 'douyin-search'
+          ? 'stable_first_screen_verified_media_mask'
+          : 'stable_first_screen_one_ocr_recheck_only_on_change',
         search_entry_max_ocr_attempts: 2,
       } : {}),
     }
@@ -75,8 +77,12 @@ function createQuestionWorkflows({
       search_entry_ocr_attempts: error.inspection?.ocrAttempts ?? null,
       search_entry_elapsed_ms: error.inspection?.elapsedMs ?? null,
       search_entry_stable_absence: Boolean(error.inspection?.stableAbsence),
+      search_entry_stability_policy: error.inspection?.stabilityPolicy ?? null,
+      search_entry_dynamic_regions_ignored: error.inspection?.dynamicRegionsIgnored ?? 0,
     })
-    const [xml, frame] = await Promise.all([source(), screenshot()])
+    const [xml, frame] = error.searchEvidence?.frame && error.searchEvidence?.xml
+      ? [error.searchEvidence.xml, error.searchEvidence.frame]
+      : await Promise.all([source(), screenshot()])
     const screenshotPath = path.join(artifacts.deliveryDirectory, `${SEARCH_RESULTS_ONLY_STEM}.png`)
     const platformMeta = platform === 'douyin'
       ? {
@@ -152,6 +158,9 @@ function createQuestionWorkflows({
         douyin_search_refreshed: card.refreshed,
         search_entry_ocr_attempts: card.ocrAttempts ?? null,
         search_entry_elapsed_ms: card.elapsedMs ?? null,
+        search_entry_stable_absence: Boolean(card.stableAbsence),
+        search_entry_stability_policy: card.stabilityPolicy ?? null,
+        search_entry_dynamic_regions_ignored: card.dynamicRegionsIgnored ?? 0,
       })
     } catch (error) {
       if (error instanceof DouyinSearchResultNotFoundError) {
@@ -168,7 +177,7 @@ function createQuestionWorkflows({
       log(`diagnostic: 抖音搜索超时现场已保存到 ${directory}`)
       throw error
     }
-    const searchCapture = await captureDouyinSearchTarget(card.size, card.target)
+    const searchCapture = await captureDouyinSearchTarget(card.size, card.target, question)
     await fs.mkdir(artifacts.deliveryDirectory, { recursive: true })
     let leadingScreenshotPath
     let full
@@ -300,6 +309,9 @@ function createQuestionWorkflows({
       toutiao_search_attempts: card.attempt,
       search_entry_ocr_attempts: card.ocrAttempts ?? null,
       search_entry_elapsed_ms: card.elapsedMs ?? null,
+      search_entry_stable_absence: Boolean(card.stableAbsence),
+      search_entry_stability_policy: card.stabilityPolicy ?? null,
+      search_entry_dynamic_regions_ignored: card.dynamicRegionsIgnored ?? 0,
       toutiao_search_repeated_exact_question: Boolean(card.repeated),
       toutiao_full_answer_open_attempts: 1,
       toutiao_full_answer_route_repeated: false,

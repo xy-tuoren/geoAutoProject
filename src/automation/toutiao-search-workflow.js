@@ -54,15 +54,16 @@ function createToutiaoSearchWorkflow({
   delay = sleep,
 }) {
   async function waitForToutiaoAnswerCard(timeout, question) {
-    const size = await windowSize()
+    const fallbackSize = await windowSize()
     const result = await inspectSearchFirstScreen({ source, screenshot, timeout, now, delay, log,
       queryMatches: xml => toutiaoSearchInput(xml)?.text === question,
       hierarchyTarget: xml => {
+        const size = hierarchyLogicalSize(xml, fallbackSize)
         const viewMore = toutiaoViewMoreBounds(xml)
         return viewMore ? { target: viewMore, viewMore, size, mode: 'smart_summary', detectionMethod: 'ui_hierarchy' } : null
       },
       recognize: async (frame, xml) => {
-        const logicalSize = hierarchyLogicalSize(xml, size)
+        const logicalSize = hierarchyLogicalSize(xml, fallbackSize)
         const recognition = await ocr.recognize(frame, {
           minConfidence: 0.5,
         })
@@ -84,11 +85,17 @@ function createToutiaoSearchWorkflow({
         log(ocrTarget
           ? `ocr: purpose=toutiao_answer_card outcome=matched engine=${recognition.engine} elapsed=${Math.round(recognition.elapsedMs)}ms lines=${recognition.results.length} cache_hit=${Boolean(recognition.cacheHit)} engine_elapsed_ms=${Math.round(recognition.engineElapsedMs || 0)} summary_confidence=${ocrTarget.summaryConfidence.toFixed(3)} view_more_confidence=${ocrTarget.viewMoreConfidence.toFixed(3)} physical_bounds=${ocrTarget.physicalBounds.join(',')} logical_bounds=${ocrTarget.bounds.join(',')}`
           : `ocr: purpose=toutiao_answer_card outcome=not_found engine=${recognition.engine} elapsed=${Math.round(recognition.elapsedMs)}ms lines=${recognition.results.length} cache_hit=${Boolean(recognition.cacheHit)} engine_elapsed_ms=${Math.round(recognition.engineElapsedMs || 0)}`)
-        return { target: ocrTarget, viewMore: ocrTarget?.bounds, size, mode: ocrTarget?.mode || 'smart_summary', detectionMethod: 'rapidocr', ocrTarget, recognition }
+        return { target: ocrTarget, viewMore: ocrTarget?.bounds, size: logicalSize, mode: ocrTarget?.mode || 'smart_summary', detectionMethod: 'rapidocr', ocrTarget, recognition }
       },
     })
     if (!result.absent) return result
-    throw new ToutiaoAnswerCardNotFoundError('头条搜索结果中未出现小荷AI医生全文入口卡片。', { inspection: { ocrAttempts: result.ocrAttempts, elapsedMs: result.elapsedMs, stableAbsence: true } })
+    throw new ToutiaoAnswerCardNotFoundError('头条搜索结果中未出现小荷AI医生全文入口卡片。', { searchEvidence: { xml: result.xml, frame: result.frame }, inspection: {
+      ocrAttempts: result.ocrAttempts,
+      elapsedMs: result.elapsedMs,
+      stableAbsence: result.stableAbsence,
+      stabilityPolicy: result.stabilityPolicy,
+      dynamicRegionsIgnored: result.dynamicRegionsIgnored,
+    } })
   }
   
   async function captureToutiaoSearchSummary(size, expectedCard = null, question = null) {

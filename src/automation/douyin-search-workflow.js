@@ -1,6 +1,7 @@
 const { sleep } = require('./utils')
 const { cropImage, imageInfo, imageLooksLoaded, imageRegionsStable, detectFloatingDownArrow } = require('./images')
 const { captureStableSandwich, fillQuestionInput } = require('./capture-primitives')
+const { logicalBoundsToPhysical } = require('./capture-stability')
 const { normalizeOcrText, mapPhysicalBoundsToLogical, findOcrText } = require('./ocr')
 const { iterNodes, nodeAttr, nodeIsVisible, parseBounds } = require('./hierarchy')
 const {
@@ -126,11 +127,14 @@ function createDouyinSearchWorkflow({
   delay = sleep,
 }) {
   async function waitForDouyinSearchResult(timeout, question = null) {
-    const size = await windowSize()
+    const fallbackSize = await windowSize()
     let genericAnswerLogged = false
     const result = await inspectSearchFirstScreen({ source, screenshot, timeout, now, delay, log,
+      ignoreDynamicMedia: true,
+      logicalSize: fallbackSize,
       queryMatches: xml => !question || douyinSearchInput(xml)?.text === question,
       hierarchyTarget: xml => {
+        const size = hierarchyLogicalSize(xml, fallbackSize)
         const target = douyinSearchResultTarget(xml, size)
         const genericAnswer = douyinGenericAiAnswerBounds(xml, size)
         if ((genericAnswer || target?.ignoredExpandableAnswer) && !genericAnswerLogged) {
@@ -142,7 +146,7 @@ function createDouyinSearchWorkflow({
         return target?.mode === 'smart_summary' ? { target, size } : null
       },
       recognize: async (frame, xml) => {
-        const logicalSize = hierarchyLogicalSize(xml, size)
+        const logicalSize = hierarchyLogicalSize(xml, fallbackSize)
         const recognition = await ocr.recognize(frame, { minConfidence: 0.5 })
         const ocrTarget = douyinOcrConsultEntryTarget(recognition, logicalSize) || douyinOcrViewFullTarget(recognition, logicalSize)
           || douyinOcrBrandEntryTarget(recognition, xml, logicalSize)
@@ -169,7 +173,7 @@ function createDouyinSearchWorkflow({
           return {
             xml,
             target: ocrTarget.mode ? ocrTarget : { mode: 'smart_summary', viewFull: ocrTarget.bounds },
-            size,
+            size: logicalSize,
             detectionMethod: 'rapidocr',
             ocrTarget,
             recognition,
@@ -181,11 +185,17 @@ function createDouyinSearchWorkflow({
     if (!result.absent) return result
     throw new DouyinSearchResultNotFoundError(
       '抖音搜索结果首屏既未出现小荷AI医生智能总结，也未出现可验证的小程序入口卡片。',
-      { scanScrolls: 0, inspection: { ocrAttempts: result.ocrAttempts, elapsedMs: result.elapsedMs, stableAbsence: true } },
+      { scanScrolls: 0, searchEvidence: { xml: result.xml, frame: result.frame }, inspection: {
+        ocrAttempts: result.ocrAttempts,
+        elapsedMs: result.elapsedMs,
+        stableAbsence: result.stableAbsence,
+        stabilityPolicy: result.stabilityPolicy,
+        dynamicRegionsIgnored: result.dynamicRegionsIgnored,
+      } },
     )
   }
   
-  async function captureDouyinSearchTarget(size, expectedTarget = null) {
+  async function captureDouyinSearchTarget(size, expectedTarget = null, question = null) {
     await waitForVisualQuiet({ timeout: 1_200, fallbackMs: 300 })
     const stabilityBounds = douyinSearchTargetStabilityBounds(expectedTarget, size)
     const capture = await captureStableSandwich({
@@ -193,9 +203,14 @@ function createDouyinSearchWorkflow({
       hierarchy: source,
       framesStable: stabilityBounds
         ? async (first, second) => {
+          const [firstSize, secondSize] = await Promise.all([imageInfo(first), imageInfo(second)])
+          if ([firstSize, secondSize].some(physical => physical.width >= physical.height
+            || Math.abs((physical.width / size.width) / (physical.height / size.height) - 1) > 0.03)) {
+            throw new Error('抖音入口卡片截图与UI逻辑视口比例不一致，已停止点击。')
+          }
           const [firstTarget, secondTarget] = await Promise.all([
-            cropImage(first, stabilityBounds),
-            cropImage(second, stabilityBounds),
+            cropImage(first, logicalBoundsToPhysical(stabilityBounds, size, firstSize)),
+            cropImage(second, logicalBoundsToPhysical(stabilityBounds, size, secondSize)),
           ])
           return imageRegionsStable(firstTarget, secondTarget)
         }
@@ -206,9 +221,19 @@ function createDouyinSearchWorkflow({
     if (!capture.stable) throw new Error(stabilityBounds
       ? '抖音小荷AI目标卡片持续变化，无法取得稳定点击证据。'
       : '抖音搜索结果持续变化，无法取得稳定截图。')
-    const target = douyinSearchResultTarget(capture.xml, size)
-    if (target?.mode === 'smart_summary') return { ...capture, target, detectionMethod: 'ui_hierarchy' }
+    if (question && douyinSearchInput(capture.xml)?.text !== question) throw new Error('抖音入口点击前搜索词已变化，已停止点击。')
     const logicalSize = hierarchyLogicalSize(capture.xml, size)
+    const requireVerifiedTarget = target => {
+      const bounds = target?.cardBounds || target?.viewFull || target?.tapBounds || target?.bounds
+      if (stabilityBounds && (logicalSize.width !== size.width || logicalSize.height !== size.height
+        || !bounds || bounds[0] < stabilityBounds[0] || bounds[1] < stabilityBounds[1]
+        || bounds[2] > stabilityBounds[2] || bounds[3] > stabilityBounds[3])) {
+        throw new Error('抖音入口卡片位置或逻辑视口已变化，未覆盖原稳定校验区域，已停止点击。')
+      }
+      return target
+    }
+    const target = douyinSearchResultTarget(capture.xml, logicalSize)
+    if (target?.mode === 'smart_summary') return { ...capture, target: requireVerifiedTarget(target), detectionMethod: 'ui_hierarchy' }
     const recognition = await ocr.recognize(capture.frame, { minConfidence: 0.5 })
     const ocrTarget = douyinOcrConsultEntryTarget(recognition, logicalSize) || douyinOcrViewFullTarget(recognition, logicalSize)
       || douyinOcrBrandEntryTarget(recognition, capture.xml, logicalSize)
@@ -234,7 +259,7 @@ function createDouyinSearchWorkflow({
     if (!ocrTarget) throw new Error('取得稳定搜索截图后，UI层级和OCR均未确认小荷AI医生智能总结“查看全文”，且小程序入口卡片已消失，已停止点击。')
     return {
       ...capture,
-      target: ocrTarget.mode ? ocrTarget : { mode: 'smart_summary', viewFull: ocrTarget.bounds },
+      target: requireVerifiedTarget(ocrTarget.mode ? ocrTarget : { mode: 'smart_summary', viewFull: ocrTarget.bounds }),
       detectionMethod: 'rapidocr',
       ocrTarget,
       recognition,

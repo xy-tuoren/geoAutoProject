@@ -4,6 +4,20 @@ const { randomUUID } = require('node:crypto')
 
 function classifyAutomationLog(message) {
   const text = String(message).trim()
+  if (text.startsWith('search: 首屏检查 ')) {
+    try {
+      const payload = JSON.parse(text.slice('search: 首屏检查 '.length))
+      const counters = ['elapsed_ms', 'ocr_attempts', 'dynamic_regions_ignored']
+      if (payload && !Array.isArray(payload)
+        && ['waiting', 'ready', 'timeout'].includes(payload.state)
+        && typeof payload.reason === 'string'
+        && counters.every(key => Number.isSafeInteger(payload[key]) && payload[key] >= 0)) {
+        const details = { state: payload.state, reason: payload.reason }
+        for (const key of counters) details[key] = payload[key]
+        return { event: 'search_first_screen_inspection', category: 'diagnostic', details }
+      }
+    } catch { /* Preserve malformed diagnostics as ordinary logs. */ }
+  }
   const firstScreen = text.match(/^search: 首屏已加载且稳定，无小荷入口（ocr_attempts=(\d+)，elapsed=(\d+)ms，scrolls=0）$/)
   if (firstScreen) return { event: 'search_first_screen_absent', category: 'diagnostic', details: { ocr_attempts: Number(firstScreen[1]), elapsed_ms: Number(firstScreen[2]), scan_scrolls: 0, loaded: true, stable: true } }
   if (/^capture: 药品入口仅在底部露出/.test(text)) return { event: 'reference_products_trigger_reveal', category: 'capture', details: {} }

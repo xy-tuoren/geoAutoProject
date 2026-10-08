@@ -960,6 +960,21 @@ test('用户错误摘要提供稳定错误码、处理建议和技术原文', ()
   })
 })
 
+test('搜索首屏未就绪与回答生成超时分别归类，不能将未识别视作没有入口', () => {
+  const error = Object.assign(new Error('搜索首屏检查超时：结果内容持续变化'), {
+    code: 'SEARCH_FIRST_SCREEN_NOT_READY',
+    inspection: { ocrAttempts: 0, stableAbsence: false, reason: 'content_changed' },
+  })
+  const info = automationErrorInfo(error)
+  assert.equal(info.code, 'SEARCH_FIRST_SCREEN_NOT_READY')
+  assert.match(info.title, /搜索首屏/)
+  assert.match(info.message, /尚不能判断是否存在小荷入口/)
+  assert.match(info.action, /搜索超时截图/)
+  assert.equal(info.fatal, false)
+  assert.equal(info.technical_message, error.message)
+  assert.equal(automationErrorInfo(new Error('回答生成超时')).code, 'ANSWER_NOT_READY')
+})
+
 test('抖音入口按真实搜索控件和回答卡片结构定位', () => {
   assert.equal(DOUYIN_SEARCH_SUMMARY_FILENAME, '回答_智能总结.png')
   const xml = `<hierarchy>
@@ -3354,6 +3369,16 @@ test('品牌汇总按入口数量计算计划、成功和失败', () => {
     name: '诺和诺德', brand_index: 1, directory_name: '诺和诺德',
     question_count: 2, planned: 4, completed: 1, failed: 1, search_results_only: 1,
   }])
+})
+
+test('搜索首屏检查日志安全解析状态、OCR次数与忽略媒体数量', () => {
+  const details = { state: 'timeout', reason: 'content_changed', elapsed_ms: 15042, ocr_attempts: 0, dynamic_regions_ignored: 1 }
+  assert.deepEqual(classifyAutomationLog(`search: 首屏检查 ${JSON.stringify({ ...details, ignored: 'extra' })}`), {
+    event: 'search_first_screen_inspection', category: 'diagnostic', details,
+  })
+  for (const payload of ['{bad json}', 'null', '[]', '{"state":"unknown"}', '{"state":"waiting","elapsed_ms":-1}', '{"state":"ready","ocr_attempts":"2"}']) {
+    assert.deepEqual(classifyAutomationLog(`search: 首屏检查 ${payload}`), { event: 'log', category: 'runtime', details: {} })
+  }
 })
 
 test('结构化事件日志记录参考药品关键阶段和单题上下文', async () => {

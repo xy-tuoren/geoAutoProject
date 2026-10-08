@@ -73,6 +73,16 @@ function automationErrorInfo(error) {
       ...common,
     }
   }
+  if (error?.code === 'SEARCH_FIRST_SCREEN_NOT_READY') {
+    return {
+      code: 'SEARCH_FIRST_SCREEN_NOT_READY',
+      title: '搜索首屏未在等待时间内就绪',
+      message: '搜索结果首屏未完成加载或稳定校验，尚不能判断是否存在小荷入口。',
+      action: '请查看搜索超时截图和首屏检查日志，确认当前查询、网络及结果加载情况；恢复后使用“重试失败项”。',
+      fatal: false,
+      ...common,
+    }
+  }
   const collectionErrors = [
     ['DOUYIN_MINIAPP_NETWORK_ERROR', /抖音小程序显示“网络不稳定|小程序仍显示“网络不稳定/, '抖音小程序网络异常', '检查手机网络及小程序能否手动打开；恢复后使用“重试失败项”。这不代表 USB 连接中断。'],
     ['INPUT_NOT_CONFIRMED', /输入.*(?:不一致|失败|未确认)|回读.*不一致|未找到.*输入框/, '问题输入未确认', '请检查输入框和输入法；确认手机当前问题后再重试。'],
