@@ -117,7 +117,7 @@ Windows 打包成功后，`dist/` 中应至少包含：
 - `.github/workflows/build-windows.yml`
 - `.github/workflows/build-desktop.yml`
 
-`Build Windows` 的行为：
+`Windows build and COS release` 的行为：
 
 - 手动运行 `workflow_dispatch`，留空 `release_tag`：构建 Windows 安装包并上传 Actions Artifact，不发布 Release。
 - 填写 `release_tag`（如 `v0.1.27`）：下载已发布的稳定版 Release，跳过构建，补部署 COS 和旧服务器兼容清单；不移动标签或重新生成安装包。
@@ -125,15 +125,19 @@ Windows 打包成功后，`dist/` 中应至少包含：
 - 标签发布完成后，将 Windows 更新文件同步到腾讯云 COS，并最后上传 `latest.yml`。
 - 标签发布时会校验 `v<package.json version>` 是否完全匹配，不匹配会失败。
 
+工作流文件仍为 `build-windows.yml`。运行标题区分 `Windows installer build`、`Windows release` 和 `COS deployment recovery`；job 名称分别显示安装包构建、GitHub Release 发布、COS 更新部署、历史清理和旧客户端同步。整个工作流任一必要阶段失败仍会标红，可从对应 job 判断实际失败阶段，避免将 COS 上传失败误读为安装包构建失败。
+
 COS 部署由 `scripts/deploy_cos_update.py` 执行，依赖固定在 `scripts/requirements-cos-deploy.txt`。日志以 JSON 事件每约 30 秒报告本次尝试的复用字节、新传成功字节、平均吞吐、预计剩余时间和失败分片数；复用字节不计入吞吐，失败分片数为本次尝试中失败过的不同分片数。分片错误记录 HTTP 状态和安全分类，不输出签名 URL 或密钥。SDK 连接（含套接字写入）/读取超时分别为 30/60 秒，每个请求最多重试一次；暂时的连接故障及 429/500/502/503/504 可触发文件级重试，最多 3 次，并按 MD5 校验复用已上传分片。权限、TLS 证书或完整性错误不触发文件级重试。
 
-连续 180 秒无成功分片进度时，监视器最迟在下一次 10 秒检查中阻止后续排队分片，并结束本次上传；已在途请求按 SDK 超时退出，因此 180 秒不是强杀截止时间。整个上传步骤最多 20 分钟，校验步骤最多 2 分钟，发布步骤最多 3 分钟，含依赖安装和 Release 下载的部署 job 最多 30 分钟。有持续进度的慢上传不会因无进度规则被停止，但仍受总时限约束。
+连续 180 秒无成功分片进度时，监视器最迟在下一次 10 秒检查中阻止后续排队分片，并结束本次上传；已在途请求按 SDK 超时退出，因此 180 秒不是强杀截止时间。整个上传步骤最多 60 分钟，校验步骤最多 2 分钟，发布步骤最多 3 分钟，含依赖安装、Release 下载和诊断归档的部署 job 最多 75 分钟。上限根据 0.1.28 发布时约 90–115 KB/s 的实际链路吞吐调整：约 211 MiB 的安装包可能需要 30–41 分钟。有持续进度的慢上传可继续运行，无成功进度时仍按原规则停止，不等待总预算耗尽；更高上限不代表上传速度提高。
+
+部署脚本将相同的安全 JSON 事件同步写入 `COS_DEPLOY_REPORT_DIR/events.jsonl`。上传、校验或清单发布失败后，摘要显示各阶段结果、最后一次已确认的分片进度和对应 `deploy_from` 恢复命令；成功时显示清单已发布。强制停止可能缺少最后一条完整事件，摘要只采用已完整写入的事件，并明确进度可能滞后。已校验分片仍由 COS/SDK 保存和复用，不依赖本地日志进行完整性判断。`cos-deployment-<run_id>-<attempt>` Artifact 保留 14 天，仅包括安全 JSONL 和摘要，不保存环境变量、SDK 异常原文、签名 URL、密钥或安装包副本；诊断失败不改变实际部署结果。整项 job 超时、runner 丢失或强制取消时，GitHub 无法保证执行收尾和 Artifact 上传。
 
 上传前先核验本地安装包与 Release 清单中的版本、路径、大小和 SHA-512。远端已完成对象的大小、SHA-512 元数据和 COS CRC64 全部匹配则跳过上传；旧流程留下的文件或已恢复分片合并后的文件缺少 SHA-512 元数据时，先核对大小/CRC64，再限时下载一次核验真实 SHA-512，通过后用 COS 内部复制补齐元数据。此迁移核验有 5 分钟读取预算（不含在途读取退出），无需重复上传安装包。同名版本文件不一致时明确失败，不覆盖。
 
 发布前验证版本化安装包和 blockmap 的远端完整性、匿名 HTTP 206、Content-Range 和起始字节，再由 COS 内部复制生成固定安装包并验证它的分段下载，最后才更新 `latest.yml`。清单写入前的任何校验失败都保留原清单；写入后会再次核验公开清单内容，若此时网络失败，重跑可识别已完成发布。固定安装包与清单不是跨对象原子事务；两者切换间自动更新仍使用旧清单中的版本化文件。
 
-`Build Windows` 与 `Repair legacy update feed` 使用同一工作流级生产锁，覆盖 COS 发布、清理和旧服务器同步，运行中的发布不会因新任务被自动取消。GitHub 默认只保留一个等待任务，新等待任务可能替换旧等待任务；版本检查不依赖排队顺序，生产清单拒绝降级、同版本安装包换包以及预发布版本。该锁仅约束这两个工作流，不约束控制台或其他外部写入。历史清理使用独立 job，与旧服务器同步互不依赖；清理失败可单独重跑失败 job，不影响已发布的更新。
+`Windows build and COS release` 与 `Repair legacy update feed` 使用同一工作流级生产锁，覆盖 COS 发布、清理和旧服务器同步，运行中的发布不会因新任务被自动取消。GitHub 默认只保留一个等待任务，新等待任务可能替换旧等待任务；版本检查不依赖排队顺序，生产清单拒绝降级、同版本安装包换包以及预发布版本。该锁仅约束这两个工作流，不约束控制台或其他外部写入。历史清理使用独立 job，与旧服务器同步互不依赖；清理失败可单独重跑失败 job，不影响已发布的更新。
 
 上传分片使用 1 MB，避免公网链路中 5 MB 分片连续写入出现超时；仍保留 3 路并发与逐片 MD5 校验。改变分片大小后，SDK 会重新验证旧分片，尺寸不匹配时创建新的上传会话，不混用不同大小的分片。启用 SDK 的 `AutoSwitchDomainOnRetry`，在符合 SDK 条件的网络异常重试时，从 `myqcloud.com` 切换到官方备用 `tencentcos.cn` 域名；此功能不启用收费的全球加速。
 
@@ -146,9 +150,9 @@ gh workflow run build-windows.yml --repo xy-tuoren/geoAutoProject --ref main -f 
 
 默认 `deploy_from=upload` 会自动复用完整对象和已校验分片。若已确认上传阶段完成，可添加 `-f deploy_from=verify`；若只需重试固定下载文件/清单发布，可用 `-f deploy_from=publish`。后者仍重新校验版本化文件与公开下载，不能绕过完整性检查。仅旧服务器同步失败时使用下文的 `Repair legacy update feed`，无需下载或重新上传整个安装包。
 
-托管 Ubuntu 节点到 COS 的写入持续超时时，可在恢复命令中添加 `-f upload_runner=github_windows`，使用 Windows 托管节点的另一条网络路径。该选项仍从原 Release 获取文件、校验已完成对象和分片，并执行完整发布校验；不重新构建安装包。
+普通标签发布（没有手动输入参数）和手动恢复现在都默认使用 `windows-latest`，优先复用 0.1.28 已完成上传的节点类型。无需手动添加 `upload_runner=github_windows`；该值仍可显式填写。若 Windows 路径暂时异常，可手动添加 `-f upload_runner=github_hosted` 切换到 Ubuntu 备选；两种路径都从原 Release 获取文件、校验已完成对象和分片，并执行完整发布校验，不重新构建安装包。节点类型不保证每次网络吞吐相同。
 
-若 GitHub 托管 runner 到 COS 连续写入超时，可先下载已有 Release 的三份文件，将其目录通过 `GEOAUTO_RECOVERY_ASSET_DIR` 传给临时本机 runner，再以 `-f upload_runner=local_recovery` 补部署该 Release。runner 必须以 ephemeral 模式注册并带 `geoauto-cos-recovery` 标签；开始前逐文件对比 GitHub 的大小与 SHA-256，发布时仍执行原有 SHA-512、CRC64、分段下载和清单校验。上传 job 使用同一生产互斥锁和部署 Secrets；本机须已有 uv，任务在独立 Python 环境执行，结束后 ephemeral runner 自动注销。普通标签发布默认仍使用 GitHub 托管 runner，此选项只用于已有 Release 的恢复，不改变安装包或标签。结束后移除本次 runner 目录和临时文件。
+若 GitHub 托管 runner 到 COS 连续写入超时，可先下载已有 Release 的三份文件，将其目录通过 `GEOAUTO_RECOVERY_ASSET_DIR` 传给临时本机 runner，再以 `-f upload_runner=local_recovery` 补部署该 Release。runner 必须以 ephemeral 模式注册并带 `geoauto-cos-recovery` 标签；开始前逐文件对比 GitHub 的大小与 SHA-256，发布时仍执行原有 SHA-512、CRC64、分段下载和清单校验。上传 job 使用同一生产互斥锁和部署 Secrets；本机须已有 uv，任务在独立 Python 环境执行，结束后 ephemeral runner 自动注销。普通标签发布默认使用 Windows 托管 runner，本机选项只用于已有 Release 的恢复，不改变安装包或标签；开始前需确认本机能访问 GitHub Actions 服务。结束后移除本次 runner 目录和临时文件。
 
 部署逻辑单元测试供人工验收运行（不访问真实 COS）：
 
@@ -261,7 +265,7 @@ Windows 包输入中文乱码时，优先检查是否走了 uiautomator2 sidecar
 
 不会。普通分支推送只更新代码。只有推送 `v*` 标签才会触发 Windows Release 发布。
 
-手动运行 `Build Windows` 会发 Release 吗？
+手动运行 `Windows build and COS release` 会发 Release 吗？
 
 不会。手动运行只生成 Actions Artifact，用于临时下载测试。
 

@@ -4,6 +4,7 @@ import argparse
 import base64
 from contextlib import closing
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -24,6 +25,8 @@ PART_BYTES = 1024 * 1024
 IDLE_SECONDS = 180
 TRANSIENT = {"write_timeout", "read_timeout", "connect_timeout", "dns_error",
              "connection_reset", "connection_error", "timeout", "service_unavailable"}
+_EVENT_LOCK = threading.Lock()
+_REPORT_WARNING_EMITTED = False
 
 
 class DeploymentError(Exception):
@@ -31,7 +34,23 @@ class DeploymentError(Exception):
 
 
 def event(name, **fields):
-    print(json.dumps({"event": name, **fields}, ensure_ascii=False), flush=True)
+    global _REPORT_WARNING_EMITTED
+    line = json.dumps({"event": name, "time_utc": datetime.now(timezone.utc).isoformat(
+        timespec="seconds"), **fields}, ensure_ascii=False)
+    # Upload workers and the progress monitor may emit concurrently. Keep each record whole.
+    with _EVENT_LOCK:
+        print(line, flush=True)
+        if directory := os.environ.get("COS_DEPLOY_REPORT_DIR"):
+            try:
+                root = Path(directory)
+                root.mkdir(parents=True, exist_ok=True)
+                with (root / "events.jsonl").open("a", encoding="utf-8") as stream:
+                    stream.write(line + "\n")
+            except OSError:
+                # Diagnostics must not turn a verified publication into a failed deployment.
+                if not _REPORT_WARNING_EMITTED:
+                    print('{"event": "deployment_diagnostics_unavailable"}', flush=True)
+                    _REPORT_WARNING_EMITTED = True
 
 
 def error_reason(error):
@@ -445,12 +464,13 @@ def main():
     parser.add_argument("phase", choices=("upload", "verify", "publish", "cleanup"))
     parser.add_argument("--assets", type=Path, default=Path("release-assets"))
     args = parser.parse_args()
-    bucket, region = os.environ["TENCENT_COS_BUCKET"], os.environ["TENCENT_COS_REGION"]
-    client = ReleaseCosClient(CosConfig(Region=region,
-        SecretId=os.environ["TENCENT_COS_SECRET_ID"], SecretKey=os.environ["TENCENT_COS_SECRET_KEY"],
-        Scheme="https", Timeout=(30, 60), AutoSwitchDomainOnRetry=True), retry=1)
-    publisher = Publisher(client, bucket, region, os.environ["RELEASE_TAG"], args.assets)
+    event("deployment_phase_started", phase=args.phase)
     try:
+        bucket, region = os.environ["TENCENT_COS_BUCKET"], os.environ["TENCENT_COS_REGION"]
+        client = ReleaseCosClient(CosConfig(Region=region,
+            SecretId=os.environ["TENCENT_COS_SECRET_ID"], SecretKey=os.environ["TENCENT_COS_SECRET_KEY"],
+            Scheme="https", Timeout=(30, 60), AutoSwitchDomainOnRetry=True), retry=1)
+        publisher = Publisher(client, bucket, region, os.environ["RELEASE_TAG"], args.assets)
         publisher.run(args.phase)
         event("deployment_phase_complete", phase=args.phase)
     except Exception as error:

@@ -131,6 +131,27 @@ class DeploymentTests(unittest.TestCase):
                 client.upload_part("offline-123", "key", b"bytes", 1, "offline-id")
             upload.assert_not_called()
 
+    def test_transient_retry_reuses_object_completed_after_timeout(self):
+        with patch.object(self.publisher, "reuse", side_effect=[False, True]), \
+                patch.object(deploy.time, "sleep"):
+            self.client.upload_file.side_effect = TimeoutError("write operation timed out")
+            self.publisher.upload(self.asset)
+        self.client.upload_file.assert_called_once()
+
+    def test_diagnostic_write_failure_does_not_interrupt_deployment(self):
+        with patch.dict(deploy.os.environ, COS_DEPLOY_REPORT_DIR=str(self.directory)), \
+                patch.object(Path, "open", side_effect=PermissionError), \
+                patch("builtins.print") as output:
+            deploy.event("deployment_phase_complete", phase="upload")
+        self.assertIn('"event": "deployment_phase_complete"', output.call_args_list[0].args[0])
+
+    def test_structured_diagnostics_keep_resume_progress(self):
+        with patch.dict(deploy.os.environ, COS_DEPLOY_REPORT_DIR=str(self.directory)):
+            deploy.event("upload_progress", reused_bytes=800, uploaded_bytes=100, total_bytes=1000)
+        records = [deploy.json.loads(line) for line in
+                   (self.directory / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(records[-1]["reused_bytes"] + records[-1]["uploaded_bytes"], 900)
+
     def test_hashes_include_known_cos_crc_vector(self):
         self.path.write_bytes(b"123456789")
         asset = deploy.Asset.read(self.path, "application/octet-stream")

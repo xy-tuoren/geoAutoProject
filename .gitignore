@@ -10,6 +10,7 @@ image/
 test_captures/
 build/
 dist/
+cos-deployment-report/
 vendor/platform-tools/*
 !vendor/platform-tools/darwin/
 !vendor/platform-tools/darwin/**

@@ -1,4 +1,8 @@
-name: Build Windows
+name: Windows build and COS release
+run-name: >-
+  ${{ inputs.release_tag != '' && format('COS deployment recovery · {0} · {1}', inputs.release_tag, inputs.deploy_from)
+      || startsWith(github.ref, 'refs/tags/v') && format('Windows release · {0}', github.ref_name)
+      || format('Windows installer build · {0}', github.ref_name) }}
 
 on:
   workflow_dispatch:
@@ -17,13 +21,13 @@ on:
           - verify
           - publish
       upload_runner:
-        description: Upload from GitHub or a temporarily registered local COS recovery runner
+        description: COS upload node (Windows by default; Ubuntu/local for manual recovery)
         required: false
         type: choice
-        default: github_hosted
+        default: github_windows
         options:
-          - github_hosted
           - github_windows
+          - github_hosted
           - local_recovery
   push:
     tags:
@@ -36,6 +40,7 @@ concurrency:
 
 jobs:
   build-windows:
+    name: Build Windows installer
     if: inputs.release_tag == ''
     runs-on: windows-latest
     timeout-minutes: 45
@@ -109,6 +114,7 @@ jobs:
           retention-days: 14
 
   release-windows:
+    name: Publish GitHub Release
     if: startsWith(github.ref, 'refs/tags/v')
     needs: build-windows
     runs-on: ubuntu-latest
@@ -152,10 +158,12 @@ jobs:
           fi
 
   deploy-windows-update:
+    name: Deploy COS update feed
     if: always() && !cancelled() && ((startsWith(github.ref, 'refs/tags/v') && needs.build-windows.result == 'success') || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '' && needs.build-windows.result == 'skipped'))
     needs: build-windows
-    runs-on: ${{ inputs.upload_runner == 'local_recovery' && fromJSON('["self-hosted", "geoauto-cos-recovery"]') || inputs.upload_runner == 'github_windows' && 'windows-latest' || 'ubuntu-latest' }}
-    timeout-minutes: 30
+    # Tag pushes have no workflow_dispatch inputs: the empty value must also select Windows.
+    runs-on: ${{ inputs.upload_runner == 'local_recovery' && fromJSON('["self-hosted", "geoauto-cos-recovery"]') || inputs.upload_runner == 'github_hosted' && 'ubuntu-latest' || 'windows-latest' }}
+    timeout-minutes: 75
     permissions:
       contents: read
     env:
@@ -164,6 +172,8 @@ jobs:
       TENCENT_COS_BUCKET: ${{ secrets.TENCENT_COS_BUCKET }}
       TENCENT_COS_REGION: ${{ secrets.TENCENT_COS_REGION }}
       RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+      COS_DEPLOY_REPORT_DIR: cos-deployment-report
+      PYTHONUTF8: "1"
 
     steps:
       - name: Checkout deployment scripts
@@ -241,20 +251,45 @@ jobs:
         run: python -m pip install -r scripts/requirements-cos-deploy.txt
 
       - name: Upload or reuse verified versioned assets
+        id: upload
         if: inputs.release_tag == '' || inputs.deploy_from == '' || inputs.deploy_from == 'upload'
-        timeout-minutes: 20
+        # Observed hosted throughput takes about 40 minutes for a 211 MiB installer.
+        # The uploader still stops after 180 seconds with no successful part progress.
+        timeout-minutes: 60
         run: python scripts/deploy_cos_update.py upload
 
       - name: Verify public downloads before publishing
+        id: verify
         if: inputs.release_tag == '' || inputs.deploy_from != 'publish'
         timeout-minutes: 2
         run: python scripts/deploy_cos_update.py verify
 
       - name: Publish fixed installer and update manifest
+        id: publish
         timeout-minutes: 3
         run: python scripts/deploy_cos_update.py publish
 
+      - name: Summarize COS deployment and recovery
+        if: always()
+        continue-on-error: true
+        env:
+          COS_UPLOAD_RESULT: ${{ steps.upload.outcome }}
+          COS_VERIFY_RESULT: ${{ steps.verify.outcome }}
+          COS_PUBLISH_RESULT: ${{ steps.publish.outcome }}
+        run: python scripts/summarize_cos_deployment.py
+
+      - name: Save deployment diagnostics
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: cos-deployment-${{ github.run_id }}-${{ github.run_attempt }}
+          path: cos-deployment-report/
+          if-no-files-found: warn
+          retention-days: 14
+
   cleanup-windows-update:
+    name: Clean up old COS packages
     if: always() && !cancelled() && needs.deploy-windows-update.result == 'success'
     needs: deploy-windows-update
     runs-on: ubuntu-latest
@@ -280,6 +315,7 @@ jobs:
         run: python scripts/deploy_cos_update.py cleanup
 
   bridge-legacy-windows-update:
+    name: Sync legacy update feed
     if: always() && !cancelled() && needs.deploy-windows-update.result == 'success'
     needs: deploy-windows-update
     runs-on: ubuntu-latest

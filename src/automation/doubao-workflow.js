@@ -10,7 +10,7 @@ const MISSING_CHAT_LAYOUT = '未识别到豆包对话页面的根节点、消息
 const decodeText = text => String(text).replace(/&#(x[0-9a-f]+|\d+);/gi, (_, code) => String.fromCodePoint(code[0].toLowerCase() === 'x' ? parseInt(code.slice(1), 16) : Number(code)))
   .replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&')
 
-function doubaoPage(xml, question = '') {
+function doubaoPage(xml, question = '', { allowVoiceInput = false } = {}) {
   const nodes = iterNodes(xml).filter(attrs => nodeIsVisible(attrs) && nodeAttr(attrs, 'package') === DOUBAO_PACKAGE)
     .map(attrs => ({ attrs, id: nodeAttr(attrs, 'resource-id').replace(`${DOUBAO_PACKAGE}:id/`, ''),
       text: decodeText(nodeAttr(attrs, 'text')), label: decodeText(nodeAttr(attrs, 'content-desc')),
@@ -18,24 +18,62 @@ function doubaoPage(xml, question = '') {
   const byId = id => nodes.find(node => node.id === id)
   const root = byId('chat_root')
   const list = byId('message_list')
-  const input = byId('input_text')
+  const textInput = byId('input_text')
+  const speakArea = byId('speak_area')
+  const speakLabel = byId('speak_normal')
+  const contains = (outer, inner) => inner[0] >= outer[0] && inner[1] >= outer[1]
+    && inner[2] <= outer[2] && inner[3] <= outer[3]
+  // Voice mode is admitted only by preparation, never by typing or answer capture.
+  const voiceInput = allowVoiceInput && speakArea && speakLabel?.text.trim() === '按住说话'
+    && contains(speakArea.bounds, speakLabel.bounds) ? speakArea : null
+  const input = textInput || voiceInput
   if (!root || !list || !input) throw new Error(MISSING_CHAT_LAYOUT)
   const size = { width: root.bounds[2], height: root.bounds[3] }
   if (/rotation="[123]"/.test(xml) || size.height <= size.width) throw new Error('豆包仅支持正常竖屏。')
-  if (root.bounds[0] !== 0 || root.bounds[1] !== 0 || size.height / size.width < 1.45 || size.height / size.width > 2.8
-    || list.bounds[2] - list.bounds[0] < size.width * 0.9 || list.bounds[1] < size.height * 0.04
-    || list.bounds[3] > input.bounds[1] || list.bounds[3] - list.bounds[1] < size.height * 0.3) {
+  if (root.bounds[0] !== 0 || root.bounds[1] !== 0 || size.height / size.width < 1.45 || size.height / size.width > 2.8) {
     throw new Error('豆包有效视口异常，暂不支持横屏、分屏或折叠态。')
   }
+  if (list.bounds[2] - list.bounds[0] < size.width * 0.9 || list.bounds[1] < size.height * 0.04
+    || list.bounds[3] > input.bounds[1] || list.bounds[3] - list.bounds[1] < size.height * 0.3) {
+    const error = new Error('豆包消息视口尚未就绪，已停止以避免使用过渡布局坐标。')
+    error.code = 'DOUBAO_MESSAGE_VIEWPORT_NOT_READY'
+    throw error
+  }
   const inside = node => node.bounds[1] >= list.bounds[1] && node.bounds[3] <= list.bounds[3]
-  const complete = Boolean(byId('msg_action_copy') && byId('msg_action_regenerate'))
+  // Main conversations expose a full feedback/share toolbar without regenerate.
+  // Admit that variant only when every enabled action belongs to the same fully
+  // visible toolbar; a lone copy button is never enough to confirm completion.
+  const completionBar = byId('start_action_container')
+  const mainActions = [
+    ['msg_action_copy', '复制'], ['msg_action_re_tts', '朗读'], ['msg_action_like', '点赞'],
+    ['msg_action_dislike', '点踩'], ['msg_action_common', ''], ['msg_action_share', '分享'],
+  ]
+  const mainFooterVerified = completionBar && inside(completionBar) && mainActions.every(([id, label]) => {
+    const node = byId(id)
+    return node && node.label === label && nodeAttr(node.attrs, 'enabled') === 'true'
+      && nodeAttr(node.attrs, 'clickable') === 'true' && contains(completionBar.bounds, node.bounds)
+      && node.bounds[2] > node.bounds[0] && node.bounds[3] > node.bounds[1]
+  })
+  const completionControlsVariant = byId('msg_action_copy') && byId('msg_action_regenerate')
+    ? 'copy_regenerate' : mainFooterVerified ? 'main_conversation_toolbar' : null
+  const complete = Boolean(completionControlsVariant)
+  const hasReplyControls = nodes.some(node => node.id.startsWith('msg_action_'))
   const questionNode = question && nodes.find(node => node.text === question && inside(node)
     && node.id !== 'input_text' && node.id !== 'title' && node.bounds[2] >= size.width * 0.85
     && node.bounds[1] >= list.bounds[1] + size.height * 0.005 && node.bounds[3] - node.bounds[1] >= size.height * 0.025)
-  const clean = Boolean(byId('larus_mode_switch_welcome_title')) && !byId('message_left_container') && !complete
   const loading = nodes.some(node => /^(?:停止生成|停止回答|正在思考|思考中|正在生成|加载中)$/.test(node.label || node.text))
+  const welcomeAvatar = byId('onboarding')
+  const welcomeGreeting = nodes.find(node => !node.id && nodeAttr(node.attrs, 'class') === 'android.widget.TextView'
+    && contains(list.bounds, node.bounds) && /^嗨[，,]\s*我是豆包[，,]/.test(node.text) && /今天有什么可以帮你的吗[？?]$/.test(node.text))
+  const welcomeKind = byId('larus_mode_switch_welcome_title') ? 'welcome_title'
+    : welcomeAvatar && contains(list.bounds, welcomeAvatar.bounds) && nodeAttr(welcomeAvatar.attrs, 'class') === 'android.widget.ImageView'
+      && welcomeGreeting ? 'onboarding_greeting' : null
+  const clean = Boolean(welcomeKind) && !byId('message_left_container') && !byId('message_right_container')
+    && !hasReplyControls && !loading
   const collapsed = nodes.find(node => inside(node) && /^(?:展开全文|展开全部|查看全部(?:资料|来源|药品)|参考资料\s*\d+|\d+\s*(?:篇|个)来源)$/.test(node.text || node.label))
-  return { nodes, byId, size, bounds: list.bounds, input, clean, complete, loading, questionVisible: Boolean(questionNode), questionNode, collapsed }
+  return { nodes, byId, size, bounds: list.bounds, input, inputMode: textInput ? 'text' : 'voice',
+    inputModeToggle: byId('action_input'), welcomeKind, clean, complete, completionControlsVariant, loading,
+    questionVisible: Boolean(questionNode), questionNode, collapsed }
 }
 
 function doubaoReferenceCount(page) {
@@ -110,6 +148,8 @@ async function doubaoCompletionFrameDecision(current, next) {
 function createDoubaoWorkflow({ source, screenshot, ui, tap, swipe, observer, recoverObserver = async error => { throw error },
   log = () => {}, record = async () => {}, checkCancelled = () => {}, delay = sleep, now = Date.now }) {
   let captureBounds = null
+  let inputPreparation = null
+  let onboardingNavigationReads = 0
   async function read(question = '') {
     checkCancelled()
     const xml = await source()
@@ -147,17 +187,113 @@ function createDoubaoWorkflow({ source, screenshot, ui, tap, swipe, observer, re
   }
 
   async function prepare(timeout = 15_000) {
-    const deadline = now() + timeout
-    // App identity errors are never swallowed; only wait for the chat layout.
-    while (now() < deadline) {
-      const xml = await source()
-      if (xml.includes(`${DOUBAO_PACKAGE}:id/input_text`)) return doubaoPage(xml)
-      await delay(250)
+    const started = now()
+    const deadline = started + timeout
+    inputPreparation = { initial_mode: null, switch_attempts: 0, switch_confirmed: false,
+      wait_reads: 0, layout_wait_reads: 0, layout_confirm_reads: 0, elapsed_ms: 0 }
+    let switchLayoutSignature = null
+    const failure = (code, message) => {
+      const error = new Error(message)
+      error.code = code
+      error.details = { ...inputPreparation, elapsed_ms: now() - started }
+      return error
     }
-    throw new Error('豆包输入页未就绪，请先完成登录或关闭引导弹窗。')
+    const parseInputPage = xml => {
+      try { return doubaoPage(xml, '', { allowVoiceInput: true }) }
+      catch (error) {
+        // Switching from voice focuses the EditText and starts the keyboard
+        // animation. Its list and input bounds can update in different reads.
+        // Wait only after our confirmed single switch; no further action uses
+        // these transitional coordinates. Root/rotation checks still fail closed.
+        if (error.code === 'DOUBAO_MESSAGE_VIEWPORT_NOT_READY' && inputPreparation.switch_attempts === 1) {
+          inputPreparation.layout_wait_reads += 1
+          inputPreparation.layout_confirm_reads = 0
+          switchLayoutSignature = null
+          return null
+        }
+        if (error.message !== MISSING_CHAT_LAYOUT) throw error
+        inputPreparation.layout_confirm_reads = 0
+        switchLayoutSignature = null
+        return null
+      }
+    }
+    const validateToggle = page => {
+      const target = page.inputModeToggle
+      const area = page.input.bounds
+      if (!target || target.label !== '文本输入' || nodeAttr(target.attrs, 'class') !== 'android.widget.ImageView'
+        || nodeAttr(target.attrs, 'clickable') !== 'true' || nodeAttr(target.attrs, 'enabled') !== 'true'
+        || target.bounds[2] <= target.bounds[0] || target.bounds[3] <= target.bounds[1]
+        || target.bounds[0] < area[0] || target.bounds[1] < area[1]
+        || target.bounds[2] > area[2] || target.bounds[3] > area[3]
+        || target.bounds[0] < 0 || target.bounds[2] > page.size.width
+        || target.bounds[1] < page.bounds[3] || target.bounds[3] > page.size.height) {
+        throw failure('DOUBAO_INPUT_MODE_SWITCH_UNAVAILABLE',
+          '豆包处于语音输入模式，但未确认可用的“文本输入”切换按钮；已停止，未点击或输入。')
+      }
+      return target
+    }
+    while (now() < deadline) {
+      // Reads can be repeated; identity, geometry and action failures cannot.
+      await foreground()
+      const page = parseInputPage(await source())
+      inputPreparation.wait_reads += 1
+      if (page) {
+        inputPreparation.initial_mode ||= page.inputMode
+        if (page.inputMode === 'text' && nodeAttr(page.input.attrs, 'enabled') !== 'false') {
+          if (inputPreparation.switch_attempts === 1) {
+            const signature = JSON.stringify([page.size, page.bounds, page.input.bounds])
+            inputPreparation.layout_confirm_reads = signature === switchLayoutSignature
+              ? inputPreparation.layout_confirm_reads + 1 : 1
+            switchLayoutSignature = signature
+            if (inputPreparation.layout_confirm_reads < 2) {
+              await delay(Math.min(250, Math.max(0, deadline - now())))
+              continue
+            }
+          }
+          inputPreparation.elapsed_ms = now() - started
+          inputPreparation.switch_confirmed = inputPreparation.switch_attempts === 1
+          if (inputPreparation.switch_confirmed) {
+            await record('doubao_input_mode_switch_confirmed', { ...inputPreparation, input_mode: 'text' })
+          }
+          await record('doubao_input_ready', { ...inputPreparation, input_mode: 'text' })
+          return page
+        }
+        if (page.inputMode === 'voice' && inputPreparation.switch_attempts === 0) {
+          validateToggle(page)
+          const physical = await imageInfo(await screenshot())
+          mapDoubaoBounds(page.bounds, page.size, physical)
+          // Refresh after the PNG read; the user may have changed modes meanwhile.
+          await foreground()
+          const fresh = parseInputPage(await source())
+          inputPreparation.wait_reads += 1
+          if (fresh?.inputMode === 'voice') {
+            const target = validateToggle(fresh)
+            mapDoubaoBounds(fresh.bounds, fresh.size, physical)
+            if (now() >= deadline) break
+            inputPreparation.switch_attempts = 1
+            await record('doubao_input_mode_switch_requested', { from: 'voice', to: 'text',
+              switch_attempts: 1, target_bounds: target.bounds, coordinate_space: 'uiautomator2_logical_pixels',
+              logical_size: fresh.size, screenshot_size: physical })
+            log('stage: 豆包处于语音输入模式，正在单次切换为文本输入')
+            await clickNode(target)
+          }
+        }
+      }
+      await delay(Math.min(250, Math.max(0, deadline - now())))
+    }
+    if (inputPreparation.switch_attempts) {
+      throw failure('DOUBAO_TEXT_INPUT_SWITCH_NOT_READY',
+        '豆包已单次切换为文本输入，但输入框未就绪；已停止，未重复点击或发送。')
+    }
+    throw failure('DOUBAO_INPUT_NOT_READY',
+      '豆包输入页未就绪：未识别到可用的文本输入框或语音输入区域，请检查当前是否为豆包对话页。')
   }
 
   async function submitQuestion(question, beforeSubmission = async () => {}) {
+    // The batch prepares an entry once, then submits several questions. Consume
+    // that preparation so its mode-switch count is not attributed to every question.
+    const preparedInput = inputPreparation
+    inputPreparation = null
     log('stage: 正在确认豆包干净的新会话')
     let current = await read()
     // Check physical/logical geometry before creating a conversation or typing.
@@ -182,8 +318,9 @@ function createDoubaoWorkflow({ source, screenshot, ui, tap, swipe, observer, re
       if (cleanReads < 2) await delay(250)
     }
     if (cleanReads < 2) throw new Error('豆包新会话未能连续两次确认为干净页面，已在输入前停止；不重复点击。')
+    const cleanSessionPattern = current.page.welcomeKind
     await record('doubao_new_session_confirmed', { clicked: newSessionClicked, clean_reads: cleanReads,
-      layout_wait_reads: layoutWaitReads, layout_wait_ms: layoutWaitMs })
+      layout_wait_reads: layoutWaitReads, layout_wait_ms: layoutWaitMs, welcome_pattern: cleanSessionPattern })
     log('stage: 正在输入豆包问题并逐字回读')
     await foreground()
     const guardedInput = {
@@ -200,10 +337,17 @@ function createDoubaoWorkflow({ source, screenshot, ui, tap, swipe, observer, re
     await record('doubao_question_submitted', { input_verified: true, submission_count: 1 })
     log('stage: 豆包问题已单次发送，等待回答完成与真实底部')
     return { new_session_performed: true, new_session_clicked: newSessionClicked, doubao_input_verified: true, doubao_submission_count: 1,
-      doubao_new_session_layout_wait_reads: layoutWaitReads, doubao_new_session_layout_wait_ms: layoutWaitMs }
+      doubao_new_session_layout_wait_reads: layoutWaitReads, doubao_new_session_layout_wait_ms: layoutWaitMs,
+      doubao_initial_input_mode: preparedInput?.initial_mode || 'text',
+      doubao_input_mode_switch_attempts: preparedInput?.switch_attempts || 0,
+      doubao_input_mode_switch_confirmed: preparedInput?.switch_confirmed || false,
+      doubao_input_mode_layout_wait_reads: preparedInput?.layout_wait_reads || 0,
+      doubao_input_mode_layout_confirm_reads: preparedInput?.layout_confirm_reads || 0,
+      doubao_input_ready_reads: preparedInput?.wait_reads || 0, doubao_input_ready_ms: preparedInput?.elapsed_ms || 0,
+      doubao_clean_session_pattern: cleanSessionPattern }
   }
 
-  async function stable(question, timeout = 8_000) {
+  async function stable(question, timeout = 8_000, { navigation = false } = {}) {
     let current = await read(question)
     const expectedBounds = current.page.bounds.join(',')
     let fullFrame; let physicalSize; let physicalBounds
@@ -216,6 +360,17 @@ function createDoubaoWorkflow({ source, screenshot, ui, tap, swipe, observer, re
       fullFrame = await screenshot()
       physicalSize = await imageInfo(fullFrame)
       physicalBounds = mapDoubaoBounds(captureBounds || current.page.bounds, current.page.size, physicalSize)
+      // The welcome avatar animates even after the answer is finished. During
+      // navigation only, verify all pixels from the fully visible original
+      // question downward. Formal capture still verifies its entire viewport.
+      const welcomeAvatar = current.page.byId('onboarding')
+      if (navigation && current.page.questionVisible && welcomeAvatar
+        && nodeAttr(welcomeAvatar.attrs, 'class') === 'android.widget.ImageView'
+        && welcomeAvatar.bounds[3] <= current.page.questionNode.bounds[1]) {
+        const comparisonBounds = [...current.page.bounds]
+        comparisonBounds[1] = current.page.questionNode.bounds[1]
+        return cropImage(fullFrame, mapDoubaoBounds(comparisonBounds, current.page.size, physicalSize))
+      }
       return cropImage(fullFrame, physicalBounds)
     }
     let result
@@ -229,8 +384,27 @@ function createDoubaoWorkflow({ source, screenshot, ui, tap, swipe, observer, re
         hierarchyLoading: xml => doubaoPage(xml).loading, initialFrame: result?.frame || null, delay }, timeout)
     }
     if (!result.stable) throw new Error('豆包回答视口未能通过稳定像素校验。')
-    return { ...result, page: doubaoPage(result.xml, question), fullFrame, physicalSize, physicalBounds,
+    const page = doubaoPage(result.xml, question)
+    const welcomeAvatar = page.byId('onboarding')
+    const scoped = navigation && page.questionVisible && welcomeAvatar
+      && nodeAttr(welcomeAvatar.attrs, 'class') === 'android.widget.ImageView'
+      && welcomeAvatar.bounds[3] <= page.questionNode.bounds[1]
+    if (scoped) {
+      onboardingNavigationReads++
+      await record('doubao_navigation_stability_scoped', { question_bounds: page.questionNode.bounds,
+        message_bounds: page.bounds, scope: 'original_question_and_answer', formal_capture: false })
+    }
+    return { ...result, frame: scoped ? await cropImage(fullFrame, physicalBounds) : result.frame,
+      navigationFrame: scoped ? result.frame : null, page, fullFrame, physicalSize, physicalBounds,
       viewport: captureBounds || current.page.bounds }
+  }
+
+  async function navigationUnchanged(current, next) {
+    if (current.navigationFrame && next.navigationFrame) {
+      if (current.page.questionNode.bounds.join(',') !== next.page.questionNode.bounds.join(',')) return false
+      return imageRegionsStable(current.navigationFrame, next.navigationFrame)
+    }
+    return imageRegionsStable(current.frame, next.frame)
   }
 
   async function scroll(current, direction, fraction, alternate = false) {
@@ -244,7 +418,7 @@ function createDoubaoWorkflow({ source, screenshot, ui, tap, swipe, observer, re
     const from = direction === 'up' ? center - distance / 2 : center + distance / 2
     const to = direction === 'up' ? center + distance / 2 : center - distance / 2
     // A duration scaled to the current viewport avoids a fling on small screens.
-    await swipe(x, from, to, Math.round(1000 * fraction))
+    await swipe(x, from, to, Math.max(200, Math.round(1000 * fraction)))
     return distance * current.physicalSize.height / current.page.size.height
   }
 
@@ -272,6 +446,7 @@ function createDoubaoWorkflow({ source, screenshot, ui, tap, swipe, observer, re
 
   async function captureAnswer(question, timeout = 90_000) {
     captureBounds = null
+    onboardingNavigationReads = 0
     const started = now()
     const deadline = started + timeout
     // The answer may legitimately take the whole task budget to generate. Once
@@ -302,6 +477,7 @@ function createDoubaoWorkflow({ source, screenshot, ui, tap, swipe, observer, re
         completionSeenAt = now()
         lastVisibleProgressAt = completionSeenAt
         await record('doubao_reply_completion_controls_seen', { elapsed_ms: completionSeenAt - started,
+          controls_variant: state.page.completionControlsVariant,
           overall_timeout_ms: timeout, stalled_footer_limit_ms: stalledFooterLimit })
       }
       if (!current) { current = await stable(question); quietSince = now() }
@@ -334,18 +510,41 @@ function createDoubaoWorkflow({ source, screenshot, ui, tap, swipe, observer, re
     }
     const completionMs = now() - started
     await record('doubao_reply_completion_confirmed', { probes, unchanged, quiet_ms: now() - quietSince,
+      controls_variant: current.page.completionControlsVariant,
       scrollbar_only_probes: scrollbarOnlyProbesDuringCompletion, completion_controls_seen_ms: completionSeenAt - started })
     log('stage: 豆包回答已完成，正在返回本题问题顶部')
     const topStarted = now(); const topDeadline = now() + 90_000
     unchanged = 0; let topSwipes = 0
     while (now() < topDeadline) {
       await scroll(current, 'up', 0.7, topSwipes % 2 === 1)
-      const next = await stable(question)
-      unchanged = await imageRegionsStable(current.frame, next.frame) ? unchanged + 1 : 0
+      const next = await stable(question, 8_000, { navigation: true })
+      unchanged = await navigationUnchanged(current, next) ? unchanged + 1 : 0
       current = next; topSwipes++
       if (unchanged >= 2) break
     }
     if (unchanged < 2 || !current.page.questionVisible) throw new Error('豆包回顶后未确认完整原题气泡，未开始交付截图。')
+    // Onboarding can remain above the first question and push source 1 below
+    // the fold. Align the question with bounded moves based on fresh geometry.
+    // Keep its whole bubble visible before clicking references or capturing.
+    const alignmentDeadline = now() + 20_000
+    let questionAlignmentSwipes = 0
+    while (true) {
+      const height = current.page.bounds[3] - current.page.bounds[1]
+      const targetTop = current.page.bounds[1] + height * 0.12
+      const delta = current.page.questionNode.bounds[1] - targetTop
+      if (delta <= height * 0.03) break
+      if (now() >= alignmentDeadline) throw new Error('豆包原题未能对齐回答顶部，未开始交付截图。')
+      const previous = current
+      await scroll(current, 'down', Math.min(0.3, delta * 0.65 / height))
+      current = await stable(question, 8_000, { navigation: true })
+      questionAlignmentSwipes++
+      if (!current.page.questionVisible) throw new Error('豆包定位回答顶部后未确认完整原题，未开始交付截图。')
+      if (await navigationUnchanged(previous, current)) {
+        throw new Error('豆包原题上方欢迎区无法滚动，未开始交付截图。')
+      }
+    }
+    await record('doubao_question_top_aligned', { swipes: questionAlignmentSwipes,
+      question_bounds: current.page.questionNode.bounds, message_bounds: current.page.bounds })
     const referenceCount = doubaoReferenceCount(current.page)
     if (referenceCount > 0) {
       if (!doubaoReferences(current.page).some(item => item.index === 1)) {
@@ -453,10 +652,13 @@ function createDoubaoWorkflow({ source, screenshot, ui, tap, swipe, observer, re
       evidenceEmbedded: referenceCount > 0, evidenceExpanded: referenceCount > 0, productDetected: false, products: null, productCaptureAttempts: 0, productCaptureMs: 0,
       seamRecords, scrollDecisions, seamDiagnostics,
       captureMetadata: { doubao_capture_complete: true, doubao_answer_completion_controls_verified: true,
+        doubao_completion_controls_variant: current.page.completionControlsVariant,
         doubao_confirmed_top: true, doubao_confirmed_end: true, doubao_images_ready: true, doubao_reference_mode: 'expanded_inline_sources',
         doubao_reference_count: referenceCount, doubao_references_complete: true,
         doubao_references: [...references.values()].sort((a, b) => a.index - b.index),
         doubao_completion_probes: probes, doubao_completion_ms: completionMs, doubao_top_swipes: topSwipes,
+        doubao_question_alignment_swipes: questionAlignmentSwipes,
+        doubao_onboarding_navigation_scoped_reads: onboardingNavigationReads,
         doubao_scrollbar_only_probes: scrollbarOnlyProbes,
         doubao_completion_scrollbar_only_probes: scrollbarOnlyProbesDuringCompletion,
         doubao_completion_controls_seen_ms: completionSeenAt - started,
